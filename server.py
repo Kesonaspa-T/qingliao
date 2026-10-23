@@ -21,6 +21,7 @@ import secrets
 import ssl
 import sys
 import shutil
+import tempfile
 import threading
 import time
 import webbrowser
@@ -106,6 +107,9 @@ def default_state():
             "idleMin": 20,
             "momentInterval": 43200,
             "groupReplyMax": 2,
+            "groupBursts": 3,
+            "groupRoundMax": 10,
+            "groupAutoTalk": True,
         },
         "friends": [
             {
@@ -179,7 +183,11 @@ def _by_id(items):
     return out
 
 
-def merge_state(old, new):
+GROUP_FIELDS = ("name", "avatar", "members", "prompt")
+GROUP_RUNTIME = ("turnCounts", "lastSpurtAt", "lastChatAt")
+
+
+def merge_state(old, new, *, background=False):
     """客户端提交的是完整状态，服务器这边可能已经生成了新东西，做并集。"""
     if not isinstance(new, dict):
         return old
@@ -187,7 +195,17 @@ def merge_state(old, new):
     # 删除标记必须保留，旧设备/后台任务仍可能提交任意久以前的快照。
     deleted_ids = list(dict.fromkeys((old.get("deleted") or []) + (new.get("deleted") or [])))
     deleted = set(deleted_ids)
-    out = dict(new)
+    out = dict(old)
+    out.update(new)
+    edits = out.pop("_edits", {}) or {}
+    # 全量快照不等于用户编辑。只有显式修改的设置/群资料才覆盖磁盘。
+    settings = dict(old.get("settings") or {})
+    if not background:
+        if "_edits" in new:
+            settings.update(edits.get("settings") or {})
+        elif new.get("rev") is not None and new.get("rev") == old.get("rev"):
+            settings.update(new.get("settings") or {})
+    out["settings"] = settings
     out["deleted"] = deleted_ids
     # 版本由当前磁盘状态决定，不能被后台任务持有的旧 rev 拉低。
     out["rev"] = int(old.get("rev") or 0)
@@ -226,16 +244,50 @@ def merge_state(old, new):
         if g.get("id") in deleted:
             continue
         base = old_groups.get(g.get("id")) or {}
-        msgs = list(g.get("messages") or [])
-        have = {m.get("id") for m in msgs}
-        for m in base.get("messages") or []:
-            if m.get("id") not in have:
-                msgs.append(m)
-        g = dict(g)
-        g["messages"] = sorted(
-            [m for m in msgs if m.get("id") not in deleted],
-            key=lambda m: m.get("ts", 0),
-        )
+        incoming = g
+        g = dict(base or incoming)
+        # 调度字段只由后台更新，客户端不能重置节流时间/计数。
+        if background:
+            for field in GROUP_RUNTIME + ("unread",):
+                if field in incoming:
+                    g[field] = incoming[field]
+        elif not base:
+            for field in GROUP_RUNTIME:
+                g.pop(field, None)
+        if not background and "unread" in incoming:
+            g["unread"] = incoming["unread"]
+        patch = (edits.get("groups") or {}).get(g.get("id")) or {}
+        if not background:
+            for field in GROUP_FIELDS:
+                if field in patch:
+                    g[field] = patch[field]
+        msgs = {m.get("id"): m for m in base.get("messages") or [] if m.get("id") not in deleted}
+        for m in sorted(incoming.get("messages") or [], key=lambda m: m.get("ts", 0)):
+            mid = m.get("id")
+            if not mid or mid in deleted:
+                continue
+            if mid in msgs:
+                # 撤回只更新内容，不允许旧快照修改 role/ts 来伪造新一轮。
+                if m.get("recalled") and msgs[mid].get("role") == "user":
+                    msgs[mid] = dict(msgs[mid], recalled=True, text="", image="")
+                continue
+            if base and not background and not edits.get("importHistory") and m.get("role") != "user":
+                # 旧 APK 仍可能生成回复；拒绝后同步墓碑，让旧设备也移除它。
+                deleted.add(mid)
+                deleted_ids.append(mid)
+                print("[GROUP] source=client-rejected group=%s message=%s" % (g.get("id"), mid), flush=True)
+                continue
+            if background and m.get("role") != "user":
+                current_group = dict(g, messages=sorted(msgs.values(), key=lambda x: x.get("ts", 0)))
+                if not group_can_speak(current_group, settings, m.get("authorId")):
+                    print("[GROUP] source=background-rejected group=%s message=%s" % (g.get("id"), mid), flush=True)
+                    continue
+            if base and not edits.get("importHistory"):
+                # 不同设备时钟可能不准，实时消息按服务端接收顺序确定轮次。
+                m = dict(m, ts=max(m.get("ts", 0), max((x.get("ts", 0) for x in msgs.values()), default=0) + 1))
+            msgs[mid] = m
+        g["messages"] = sorted(msgs.values(), key=lambda m: m.get("ts", 0))
+        g["turnCounts"] = group_usage(g)[1]
         groups.append(g)
     keptg = {g.get("id") for g in groups}
     for g in old.get("groups") or []:
@@ -303,15 +355,10 @@ def load_state(uid="local"):
         with open(path, "r", encoding="utf-8") as f:
             state = json.load(f)
     except Exception as e:
-        bad = path + ".corrupt-%d" % int(time.time())
-        try:
-            os.replace(path, bad)
-        except Exception:
-            pass
-        print("[state] 读取失败，原文件另存为 %s：%s" % (bad, e), flush=True)
-        return base
+        # 保留原文件并阻止后续写入；不能把读取失败伪装成新账号。
+        raise StateReadError("状态文件读取失败，已停止保存：%s" % path) from e
     if not isinstance(state, dict):
-        return base
+        raise StateReadError("状态文件格式错误，已停止保存：%s" % path)
 
     for key in ("version", "rev", "me", "friends", "groups", "moments", "pending",
                 "deleted", "drafts", "social"):
@@ -335,13 +382,16 @@ def load_state(uid="local"):
     return base
 
 
+class StateReadError(RuntimeError):
+    pass
+
+
 def save_merged(uid, st):
     """后台任务保存前先和磁盘上的状态合并，避免覆盖用户刚做的删除/修改。"""
     with STATE_LOCK:
         cur = load_state(uid)
-        merged = merge_state(cur, st)
+        merged = merge_state(cur, st, background=True)
         merged["social"] = st.get("social") or merged.get("social")
-        merged["settings"] = st.get("settings") or merged.get("settings")
         save_state(merged, uid)
 
 
@@ -360,10 +410,15 @@ def save_state(state, uid="local"):
             pass
     state["rev"] = int(state.get("rev") or 0) + 1
     path = user_state_path(uid)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -417,6 +472,13 @@ class Handler(SimpleHTTPRequestHandler):
         return (data.get("sessions") or {}).get(tok)
 
     def do_GET(self):
+        try:
+            return self._do_GET()
+        except StateReadError as e:
+            print("[state]", e, flush=True)
+            return self._json(503, {"error": "状态文件读取失败，请恢复备份后重试"})
+
+    def _do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/authinfo":
             data = load_users()
@@ -440,6 +502,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
+                    "build": "v25",
+                    "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
+                                   "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
                 return
 
@@ -453,6 +518,13 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
+        try:
+            return self._do_POST()
+        except StateReadError as e:
+            print("[state]", e, flush=True)
+            return self._json(503, {"error": "状态文件读取失败，未保存任何修改"})
+
+    def _do_POST(self):
         path = self.path.split("?")[0]
         if path == "/api/register":
             return self._handle_register()
@@ -470,7 +542,10 @@ class Handler(SimpleHTTPRequestHandler):
                 merged = merge_state(cur, payload)
                 merged["rev"] = int(cur.get("rev") or 0)
                 save_state(merged, uid)
-            return self._json(200, {"ok": True, "moments": len(merged.get("moments") or [])})
+            print("[SYNC] client=%s deleted_in=%d deleted_saved=%d rev=%d" % (
+                self.headers.get("X-Qingliao-Build", "legacy"), len(payload.get("deleted") or []),
+                len(merged.get("deleted") or []), merged["rev"]), flush=True)
+            return self._json(200, {"ok": True, "rev": merged["rev"], "moments": len(merged.get("moments") or [])})
         if path == "/api/chat":
             return self._handle_chat()
         if path == "/api/ping":
@@ -791,12 +866,17 @@ def gen_dm_text(friend, owner_name, moment_text, settings, key):
     return _clean(text, 60)
 
 
-def gen_group_line(friend, author_name, moment_text, prev_lines, settings, key):
+def group_prompt_text(group_prompt):
+    return "\n\n【群设定：群内所有成员共同遵守】\n" + group_prompt + "\n\n" if group_prompt else ""
+
+
+def gen_group_line(friend, author_name, moment_text, prev_lines, settings, key, group_prompt=""):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
         + "你们在一个群里聊天。" + author_name + " 刚发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
     )
+    sys += group_prompt_text(group_prompt)
     if prev_lines:
         sys += "群里已经有人说：\n" + "\n".join(prev_lines) + "\n\n"
     sys += "你要在群里说一句，聊的就是这条。10~25 字，口语，像群里随口插一句。只输出这一句。"
@@ -821,12 +901,13 @@ def gen_proactive_text(friend, last_text, settings, key):
     return _clean(text, 50)
 
 
-def gen_group_smalltalk(friend, group_name, recent_lines, settings, key):
+def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_prompt=""):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
         "你们在一个叫「" + (group_name or "群") + "」的群里。\n"
     )
+    sys += group_prompt_text(group_prompt)
     if recent_lines:
         sys += "最近群里聊的是：\n" + "\n".join(recent_lines) + "\n\n"
     sys += ("你想起来一句，随口发到群里。10~20 字，口语，别问句式的套话。"
@@ -838,9 +919,10 @@ def gen_group_smalltalk(friend, group_name, recent_lines, settings, key):
     return _clean(text, 50)
 
 
-def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False, reply_to=""):
+def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False, reply_to="", group_prompt=""):
     sys = "你就是" + (friend.get("name") or "") + "。\n" + (friend.get("persona") or "") + "\n\n"
     if in_group:
+        sys += group_prompt_text(group_prompt)
         sys += ("你们在群「" + (conv_name or "群") + "」里聊天。只以你自己的身份说话，"
                 "不要加名字前缀，不要替别人说。\n")
         if reply_to and reply_to != (friend.get("name") or ""):
@@ -880,6 +962,54 @@ def _last_user(msgs):
         if msgs[i].get("role") == "user":
             return i
     return -1
+
+
+def group_limits(settings):
+    def cap(key, default, maximum):
+        try:
+            return max(1, min(maximum, int(settings.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+    # 总上限独立于每人上限，允许「每人 2 条、总共 1 条」。
+    return cap("groupBursts", 3, 10), cap("groupRoundMax", 10, 60)
+
+
+def group_usage(group):
+    msgs = group.get("messages") or []
+    counts = {}
+    total = 0
+    for m in msgs[_last_user(msgs) + 1:]:
+        if m.get("role") == "user":
+            continue
+        total += 1
+        author = m.get("authorId")
+        if author:
+            counts[author] = counts.get(author, 0) + 1
+    return total, counts
+
+
+def group_can_speak(group, settings, author):
+    per_cap, round_max = group_limits(settings)
+    total, counts = group_usage(group)
+    return author in (group.get("members") or []) and total < round_max and counts.get(author, 0) < per_cap
+
+
+def append_group_reply(group, settings, author, text, source):
+    if not text or not group_can_speak(group, settings, author):
+        return False
+    group.setdefault("messages", []).append({
+        "id": "m" + secrets.token_hex(12), "role": "peer", "authorId": author,
+        "text": text, "ts": max(int(time.time() * 1000),
+                                 max((m.get("ts", 0) for m in group.get("messages") or []), default=0) + 1),
+        "source": source,
+    })
+    total, counts = group_usage(group)
+    group["turnCounts"] = counts
+    group["lastSpurtAt"] = time.time()
+    group["unread"] = int(group.get("unread") or 0) + 1
+    print("[GROUP] source=%s group=%s total=%d/%d counts=%s" % (
+        source, group.get("id"), total, group_limits(settings)[1], counts), flush=True)
+    return True
 
 
 def create_moment_for(st, key, author):
@@ -1071,37 +1201,20 @@ def run_pending(st, p, key):
         g = next((x for x in st.get("groups") or [] if x.get("id") == p.get("targetId")), None)
         if not g:
             return False
-        # 和自动群聊用同一套上限，避免朋友圈带起来的群聊绕过限制
-        per_cap = max(1, min(10, int(settings.get("groupBursts") or 3)))
-        round_max = max(per_cap, min(60, int(settings.get("groupRoundMax") or 10)))
-        gmsgs = g.get("messages") or []
-        since_user = 0
-        for mm in reversed(gmsgs):
-            if mm.get("role") == "user":
-                break
-            since_user += 1
-        if since_user >= round_max:
+        if not settings.get("groupAutoTalk", True):
             return False
-        _cnt = {}
-        for _m in gmsgs[_last_user(gmsgs) + 1:]:
-            if _m.get("role") != "user" and _m.get("authorId"):
-                _cnt[_m["authorId"]] = _cnt.get(_m["authorId"], 0) + 1
-        counts = g.setdefault("turnCounts", {})
-        pool = [x for x in friends if x.get("id") in (g.get("members") or [])
-                and _cnt.get(x.get("id"), 0) < per_cap]
+        pool = [x for x in friends if group_can_speak(g, settings, x.get("id"))]
         random.shuffle(pool)
         pool = pool[:2]
         prev = []
         author = names.get(m.get("authorId"), "某人")
         for speaker in pool[:2]:
-            line = gen_group_line(speaker, author, m.get("text", ""), prev, settings, key)
-            if not line:
+            if not group_can_speak(g, settings, speaker.get("id")):
                 continue
-            g.setdefault("messages", []).append({
-                "id": _nid("m"), "role": "peer", "authorId": speaker.get("id"),
-                "text": line, "ts": int(time.time() * 1000),
-            })
-            g["unread"] = int(g.get("unread") or 0) + 1
+            line = gen_group_line(speaker, author, m.get("text", ""), prev, settings, key,
+                                  group_prompt=g.get("prompt") or "")
+            if not append_group_reply(g, settings, speaker.get("id"), line, "moment"):
+                continue
             prev.append("%s：%s" % (speaker.get("name"), line))
         return bool(prev)
 
@@ -1342,32 +1455,12 @@ def social_tick(uid="local"):
             if not s.get("groupAutoTalk", True):
                 continue
             msgs = g.get("messages") or []
-            # 直接数消息，避免计数被旧客户端/合并覆盖
-            _last = -1
-            for _i, _m in enumerate(msgs):
-                if _m.get("role") == "user":
-                    _last = _i
-            counts = {}
-            for _m in msgs[_last + 1:]:
-                if _m.get("role") != "user" and _m.get("authorId"):
-                    counts[_m["authorId"]] = counts.get(_m["authorId"], 0) + 1
+            if not msgs:
+                continue
             lastm = msgs[-1] if msgs else {}
-            if lastm.get("role") == "user":
-                g["turnCounts"] = {}
-                continue
-            per_cap = max(1, min(10, int(s.get("groupBursts") or 3)))
-            # 整轮总量上限：你发一句之后，群里总共最多冒这么多条
-            round_max = max(per_cap, min(60, int(s.get("groupRoundMax") or 10)))
-            since_user = 0
-            for m in reversed(msgs):
-                if m.get("role") == "user":
-                    break
-                since_user += 1
-            if since_user >= round_max:
-                continue
             if now - float(g.get("lastSpurtAt") or 0) < 9:
                 continue
-            avail = [m for m in members if int(counts.get(m) or 0) < per_cap]
+            avail = [m for m in members if group_can_speak(g, s, m)]
             if not avail:
                 continue
             # 用户 @ 了谁，谁优先（下一次发言时）
@@ -1394,24 +1487,20 @@ def social_tick(uid="local"):
                 reply_to = name_map.get(lastm.get("authorId")) or ""
             try:
                 line = gen_chat_reply(speaker, g.get("name"), hist, s, key,
-                                      in_group=True, reply_to=reply_to)
+                                      in_group=True, reply_to=reply_to, group_prompt=g.get("prompt") or "")
             except Exception as e:
                 print("[social] 群聊失败：", e)
                 line = ""
-            if line:
-                g.setdefault("messages", []).append({
-                    "id": _nid("m"), "role": "peer", "authorId": speaker_id,
-                    "text": line, "ts": int(time.time() * 1000),
-                })
-                counts[speaker_id] = int(counts.get(speaker_id) or 0) + 1
-                g["turnCounts"] = counts
-                g["unread"] = int(g.get("unread") or 0) + 1
+            if append_group_reply(g, s, speaker_id, line, "reply"):
                 changed = True
 
         # 群里自己聊两句
         for g in st.get("groups") or []:
             members = [m for m in (g.get("members") or []) if m in name_map]
-            if len(members) < 2:
+            if len(members) < 2 or not s.get("groupAutoTalk", True):
+                continue
+            available = [m for m in members if group_can_speak(g, s, m)]
+            if not available or now - float(g.get("lastSpurtAt") or 0) < 9:
                 continue
             lastc = float(g.get("lastChatAt") or 0)
             gap = 7200 * (0.6 + random.random() * 1.2)
@@ -1426,20 +1515,16 @@ def social_tick(uid="local"):
                 who = name_map.get(m.get("authorId")) or (st.get("me") or {}).get("name") or "我"
                 if m.get("text"):
                     recent.append("%s：%s" % (who, m["text"][:40]))
-            speaker = friend_by_id(st, random.choice(members))
+            speaker = friend_by_id(st, random.choice(available))
             if not speaker:
                 break
             try:
-                line = gen_group_smalltalk(speaker, g.get("name"), recent, s, key)
+                line = gen_group_smalltalk(speaker, g.get("name"), recent, s, key,
+                                          group_prompt=g.get("prompt") or "")
             except Exception as e:
                 print("[social] 群聊失败：", e)
                 line = ""
-            if line:
-                g.setdefault("messages", []).append({
-                    "id": _nid("m"), "role": "peer", "authorId": speaker.get("id"),
-                    "text": line, "ts": int(time.time() * 1000),
-                })
-                g["unread"] = int(g.get("unread") or 0) + 1
+            append_group_reply(g, s, speaker.get("id"), line, "smalltalk")
             break
 
         if changed:
