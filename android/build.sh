@@ -32,14 +32,20 @@ rm -rf "$HERE/assets"
 mkdir -p "$HERE/assets/www"
 cp -R "$HERE/../web/." "$HERE/assets/www/"
 
-# strip-statusbar: APK 里不要网页自带的模拟状态栏（真机已有）
+# 真机自带状态栏，网页里那个模拟状态栏由 CSS（html.native .statusbar）隐藏即可。
+# 千万别再把它从 HTML 里删掉：app.js 的 startClock() 依赖 #clock 元素，删掉后
+# init() 会抛 TypeError，而「启动同步轮询」的 setInterval 恰好在它后面——
+# 结果就是群里说完话永远不刷新、只有杀进程重开才看到回复（2026-10 的线上事故）。
 python3 - "$HERE/assets/www/index.html" <<'PYEOF'
 import re, sys
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
-s2 = re.sub(r'\n\s*<div class="statusbar">.*?</div>\s*\n', "\n", s, count=1, flags=re.S)
-open(p, "w", encoding="utf-8").write(s2)
-print("[strip-statusbar]", "removed" if s2 != s else "not found")
+if 'id="clock"' not in s:
+    s2 = re.sub(r'(<body[^>]*>)', r'\1\n<div class="statusbar" style="display:none"><span id="clock"></span></div>', s, count=1)
+    open(p, "w", encoding="utf-8").write(s2)
+    print("[ensure-clock]", "injected hidden clock")
+else:
+    print("[ensure-clock]", "ok")
 PYEOF
 
 echo "[1/6] aapt2 compile"

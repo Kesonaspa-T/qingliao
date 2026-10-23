@@ -36,14 +36,55 @@ let TOKEN = localStorage.getItem(TOKEN_KEY) || '';
 let SERVER = (localStorage.getItem(SERVER_KEY) || '').replace(/\/+$/, '');
 let lastRev = -1;
 
-function isCloud() { return NATIVE ? !!SERVER : true; }
+let LOCAL_MODE = localStorage.getItem('ql.local') === '1';
+const IN_APP = /Android/i.test(navigator.userAgent);
+const IS_LOCAL_SERVER = location.hostname === '127.0.0.1';
+function isCloud() { return LOCAL_MODE ? false : (IN_APP ? !!SERVER : true); }
+
+// 单个接口的默认超时（毫秒）。没有上限的话，一个卡住的请求就能让同步永久停摆。
+const API_TIMEOUT = 25000;
 
 function apiFetch(path, opts) {
-  const o = opts || {};
+  const o = Object.assign({}, opts || {});
   const headers = Object.assign({}, o.headers || {});
   headers['X-Qingliao-Build'] = APP_BUILD;
   if (TOKEN) headers.Authorization = 'Bearer ' + TOKEN;
-  return fetch(SERVER + path, Object.assign({}, o, { headers }));
+  const target = SERVER + path;
+
+  // 默认给每个请求一个上限：卡住的请求会永远吊着 await，把同步循环彻底堵死
+  // （表现就是「只有重启才更新」）。timeout=0 表示不限时（流式对话）。
+  const budget = o.timeout === undefined ? API_TIMEOUT : Number(o.timeout) || 0;
+  delete o.timeout;
+  if (budget > 0 && typeof AbortController === 'function') {
+    const ctrl = new AbortController();
+    const outer = o.signal;
+    if (outer) {
+      if (outer.aborted) ctrl.abort();
+      else if (outer.addEventListener) {
+        outer.addEventListener('abort', () => { try { ctrl.abort(); } catch (_) {} }, { once: true });
+      }
+    }
+    o.signal = ctrl.signal;
+    setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, budget);
+  }
+
+  // App 跑在 http://127.0.0.1 上：所有云端接口也交给原生代理，避免跨域
+  if (IS_LOCAL_SERVER && /^https?:\/\//.test(target)) {
+    const method = (o.method || 'GET').toUpperCase();
+    const ph = Object.assign({}, headers, {
+      'Content-Type': 'application/json',
+      'X-Target-Url': target,
+      'X-Method': method,
+    });
+    return fetch('/__proxy', {
+      method: 'POST',
+      headers: ph,
+      body: method === 'GET' ? '{}' : (o.body || '{}'),
+      signal: o.signal,
+    });
+  }
+
+  return fetch(target, Object.assign({}, o, { headers }));
 }
 
 const EMOJIS = ['😊','😂','🥺','😳','😴','😭','😅','🤔','😌','🥰','😘','💕','🌙','☁️','🍚','🍜','🐱','🐰','✨','🎧','📚','🫧','😤','🙃','😉','💤','🍰','🧋','🌧️','🌻','🫶','😶','🥲','🫠','💭','🍂','🧸','🎐','🌊','🍊'];
@@ -173,8 +214,9 @@ function makeGroup(o = {}) {
 }
 
 let state = defaultState();
-let pendingEdits = { settings: {}, groups: {} };
+let pendingEdits = { settings: {}, groups: {}, friends: {} };
 const GROUP_FIELDS = ['name', 'avatar', 'members', 'prompt'];
+const FRIEND_FIELDS = ['name', 'avatar', 'persona', 'relations', 'dmMoment'];
 
 function changedFields(before, after, fields) {
   const patch = {};
@@ -186,7 +228,24 @@ function changedFields(before, after, fields) {
 
 function importEdits(s) {
   return { settings: { ...s.settings }, importHistory: uid('import'),
-    groups: Object.fromEntries(s.groups.map(g => [g.id, Object.fromEntries(GROUP_FIELDS.map(k => [k, g[k]]))])) };
+    groups: Object.fromEntries(s.groups.map(g => [g.id, Object.fromEntries(GROUP_FIELDS.map(k => [k, g[k]]))])),
+    friends: Object.fromEntries(s.friends.map(f => [f.id, {
+      ...Object.fromEntries(FRIEND_FIELDS.map(k => [k, f[k]])),
+      settings: { ...(f.settings || {}) },
+    }])) };
+}
+
+/** 把一组「用户刚改的字段」记进待同步编辑，等保存成功后再清掉。 */
+function rememberFriendEdit(f, patch) {
+  if (!f || !patch || !Object.keys(patch).length) return;
+  const cur = pendingEdits.friends[f.id] || (pendingEdits.friends[f.id] = {});
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === 'settings') {
+      cur.settings = Object.assign(cur.settings || {}, value);
+    } else {
+      cur[key] = value;
+    }
+  }
 }
 const rt = new Map();
 
@@ -308,12 +367,18 @@ const Store = {
     if (Store.saving) { Store.again = true; return; }
     Store.saving = true;
     const edits = JSON.parse(JSON.stringify(pendingEdits));
+    const hint = saveHint;
+    saveHint = '';
     let failed = false;
     try {
       const res = await apiFetch('/api/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...s, _edits: edits }),
+        body: JSON.stringify({
+          ...s, _edits: edits, _diag: syncDiagSnapshot(),
+          _hint: hint || undefined,
+        }),
+        timeout: 90000,      // 整份状态可能有一两兆，慢网下别被默认超时打断
       });
       // 保存回执不代表已经读到合并后的状态；lastRev 只能由成功拉取更新。
       if (!res.ok) throw new Error('save failed');
@@ -326,9 +391,18 @@ const Store = {
       for (const [id, patch] of Object.entries(edits.groups)) {
         if (pendingEdits.groups[id]) clear(pendingEdits.groups[id], patch);
       }
+      for (const [id, patch] of Object.entries(edits.friends || {})) {
+        const pending = pendingEdits.friends[id];
+        if (!pending) continue;
+        clear(pending.settings || (pending.settings = {}), patch.settings || {});
+        clear(pending, Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'settings')));
+        if (pending.settings && !Object.keys(pending.settings).length) delete pending.settings;
+        if (!Object.keys(pending).length) delete pendingEdits.friends[id];
+      }
       if (edits.importHistory && pendingEdits.importHistory === edits.importHistory) delete pendingEdits.importHistory;
     } catch (_) {
       failed = true;
+      if (hint) saveHint = saveHint || hint;   // 保存没成功，提示留给下一次
       toast('保存失败，正在重试');
     } finally {
       Store.saving = false;
@@ -343,6 +417,7 @@ const Store = {
 
 let saveTimer = null;
 let localRevision = 0;
+let saveHint = '';          // 下次保存顺带给服务端的一个提示（例如「我刚在群里发言」）
 function rememberDeleted(ids) {
   // 离线设备可能很久以后才提交旧状态，不能按数量丢弃删除标记。
   state.deleted = [...new Set([...(state.deleted || []), ...ids])];
@@ -1264,6 +1339,13 @@ function toolsUrl(path) {
 }
 
 function requestJson(url, key, body) {
+  if (IS_LOCAL_SERVER) {
+    return fetch('/__proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Target-Url': url, 'X-Target-Key': key || '' },
+      body: JSON.stringify(body),
+    }).then((r) => r.json());
+  }
   if (NATIVE && !SERVER && window.AndroidChat.post) {
     return new Promise((resolve, reject) => {
       const id = 'j' + Date.now() + Math.random().toString(36).slice(2, 5);
@@ -1421,6 +1503,30 @@ function startStream({ url, key, body, onDelta, onDone, onError }) {
 
   const ctrl = new AbortController();
   (async () => {
+    if (IS_LOCAL_SERVER) {
+      // 单机版走本地代理，直接要完整结果，不折腾流式
+      const nb = Object.assign({}, body, { stream: false });
+      const pr = await fetch('/__proxy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Target-Url': url,
+          'X-Target-Key': key || '',
+        },
+        body: JSON.stringify(nb),
+        signal: ctrl.signal,
+      });
+      const raw = await pr.text();
+      let j = null;
+      try { j = JSON.parse(raw); } catch (_) {}
+      const content = (j && j.choices && j.choices[0] && j.choices[0].message
+        && j.choices[0].message.content) || '';
+      if (!content) throw new Error('接口返回异常：' + raw.slice(0, 120));
+      if (onDelta) onDelta(content);
+      onDone();
+      return;
+    }
+
     const res = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1895,10 +2001,33 @@ function splitReply(text, limit) {
   return parts.slice(0, max);
 }
 
+let cloudGroupTypingTimer = null;
+
+/** 云端群聊由服务器生成回复：这里只负责“她们正在输入…”的提示，让等待有反馈。 */
+function cloudGroupAwait(group) {
+  clearTimeout(cloudGroupTypingTimer);
+  const started = Date.now();
+  const step = () => {
+    if (!isActive('group', group.id)) { cloudGroupTypingTimer = null; return; }
+    const msgs = group.messages || [];
+    let lastUser = -1;
+    for (let i = msgs.length - 1; i >= 0; i -= 1) { if (msgs[i].role === 'user') { lastUser = i; break; } }
+    const replied = lastUser >= 0 && msgs.slice(lastUser + 1).some((m) => m.role !== 'user');
+    if (replied || Date.now() - started > 60000) {
+      cloudGroupTypingTimer = null;
+      setStatus('在线');
+      return;
+    }
+    setStatus('她们正在输入…');
+    cloudGroupTypingTimer = setTimeout(step, 2000);
+  };
+  cloudGroupTypingTimer = setTimeout(step, 1200);
+}
+
 function afterUserMessage(kind, conv) {
   if (kind === 'group') {
     // 云端模式下群聊统一由服务器生成，客户端不再插一手（否则两边各发各的，条数失控）
-    if (isCloud()) return;
+    if (isCloud()) { cloudGroupAwait(conv); return; }
     const r = rtOf(convKey('group', conv.id));
     // 上一轮卡死超过两分钟，直接放行，别再排队等
     if (r.phase !== 'idle' && r.since && Date.now() - r.since > 120000) {
@@ -1931,6 +2060,7 @@ async function send(raw) {
   autosize();
   closeEmoji();
   lastActivity = Date.now();
+  if (kind === 'group' && isCloud()) saveHint = 'social';   // 让服务器马上接话
   persist();
   renderConversations();
   afterUserMessage(kind, conv);
@@ -1946,6 +2076,7 @@ async function sendImage(dataUrl) {
   renderMessage(msg, { conv, kind });
   scrollBottom(true);
   lastActivity = Date.now();
+  if (kind === 'group' && isCloud()) saveHint = 'social';
   persist();
   renderConversations();
   afterUserMessage(kind, conv);
@@ -2211,8 +2342,7 @@ function fillForm() {
   const gr = $('#fGroupRound'); if (gr) gr.value = s.groupRoundMax || 10;
   $('#fTheme').value = s.theme || 'auto';
   const freq = Number(s.momentInterval) || 43200;
-  const sel = $('#fMomentFreq');
-  sel.value = Array.from(sel.options).some((o) => o.value === String(freq)) ? String(freq) : '43200';
+  $('#fMomentFreq').value = Math.max(1, Math.round(freq / 60));
   $('#fProactive').checked = !!s.proactive;
   $('#fIdle').value = s.idleMin ?? 20;
   syncChips();
@@ -2257,7 +2387,7 @@ function saveForm() {
   const grEl = $('#fGroupRound');
   if (grEl) s.groupRoundMax = Math.max(1, Math.min(60, Number(grEl.value) || 10));
   s.theme = $('#fTheme').value;
-  s.momentInterval = Number($('#fMomentFreq').value) || 43200;
+  s.momentInterval = Math.max(60, (Number($('#fMomentFreq').value) || 720) * 60);
   s.proactive = $('#fProactive').checked;
   s.idleMin = Math.max(3, Number($('#fIdle').value) || 20);
   const patch = changedFields(before, s, Object.keys(s));
@@ -2291,6 +2421,18 @@ $('#btnTest').addEventListener('click', async () => {
     const id = 'p' + Date.now();
     nativePing[id] = (ok, msg) => toast(ok ? '连通了 ✓' : '连不上：' + msg, 4000);
     window.AndroidChat.ping(id, base + '/models', key);
+    return;
+  }
+  if (IS_LOCAL_SERVER) {
+    try {
+      const j = await requestJson(base + '/chat/completions', key, {
+        model: state.settings.model || 'deepseek-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1,
+        stream: false,
+      });
+      toast(j && j.choices ? '连通了 ✓' : '连不上：返回异常', 4000);
+    } catch (e) { toast('连不上：' + (e.message || e), 4000); }
     return;
   }
   try {
@@ -2395,6 +2537,27 @@ function readFriendRhythm() {
   return out;
 }
 
+const FRIEND_RHYTHM_KEYS = ['bursts', 'delayMin', 'delayMax', 'nudgeAfter',
+  'momentInterval', 'proactive', 'greet'];
+const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true };
+
+/** 面板上的值 vs 这个好友当前的 settings → 只给出真正变了的那几项。 */
+function friendSettingsPatch(friend, want) {
+  const cur = (friend && friend.settings) || {};
+  const patch = {};
+  for (const key of FRIEND_RHYTHM_KEYS) {
+    const has = Object.prototype.hasOwnProperty.call(cur, key);
+    const value = want[key];
+    if (value === undefined) {
+      if (has) patch[key] = null;                    // 清空输入 = 跟随全局
+      continue;
+    }
+    const now = has ? cur[key] : FRIEND_RHYTHM_DEFAULTS[key];
+    if (JSON.stringify(value) !== JSON.stringify(now)) patch[key] = value;
+  }
+  return patch;
+}
+
 function openFriendSheet(friend, mode) {
   friendEditMode = mode || (friend ? 'edit' : 'new');
   editingFriendId = friend ? friend.id : null;
@@ -2477,7 +2640,15 @@ $('#btnFSave').addEventListener('click', () => {
 
   if (friendEditMode === 'new') {
     const f = makeFriend({ name, avatar, persona, relations: [] });
-    f.settings = rhythm;
+    // 新朋友只写真正填了的项，没填的留空＝跟随全局
+    const own = {};
+    for (const key of FRIEND_RHYTHM_KEYS) {
+      const value = rhythm[key];
+      if (value === undefined) continue;
+      if (FRIEND_RHYTHM_DEFAULTS[key] === true && value === true) continue;
+      own[key] = value;
+    }
+    if (Object.keys(own).length) f.settings = own;
     state.friends.push(f);
     persist();
     closeFriendSheet();
@@ -2489,12 +2660,32 @@ $('#btnFSave').addEventListener('click', () => {
 
   const f = friendById(editingFriendId);
   if (f) {
+    const patch = {};
+    if (f.name !== name) patch.name = name;
+    if ((f.avatar || '') !== avatar) patch.avatar = avatar;
+    if ((f.persona || '') !== persona) patch.persona = persona;
+    const relations = $$('#relationList input:checked').map((cb) => cb.dataset.id);
+    if (JSON.stringify(f.relations || []) !== JSON.stringify(relations)) patch.relations = relations;
+    const dmMoment = $('#fDm').checked;
+    if ((f.dmMoment !== false) !== dmMoment) patch.dmMoment = dmMoment;
+    const settingsPatch = friendSettingsPatch(f, rhythm);
+    if (Object.keys(settingsPatch).length) patch.settings = settingsPatch;
+
     f.name = name;
     f.avatar = avatar;
     f.persona = persona;
-    f.relations = $$('#relationList input:checked').map((cb) => cb.dataset.id);
-    f.dmMoment = $('#fDm').checked;
-    f.settings = readFriendRhythm();
+    f.relations = relations;
+    f.dmMoment = dmMoment;
+    if (Object.keys(settingsPatch).length) {
+      const next = Object.assign({}, f.settings || {});
+      for (const [key, value] of Object.entries(settingsPatch)) {
+        if (value === null) delete next[key]; else next[key] = value;
+      }
+      if (Object.keys(next).length) f.settings = next; else delete f.settings;
+    }
+    // 只把「用户真的改过的字段」记进 _edits.friends：服务端据此合并且不会
+    // 拿整份旧快照把另一台设备刚改的设置覆盖回去。
+    rememberFriendEdit(f, patch);
     persist();
     renderChat();
     renderConversations();
@@ -2948,15 +3139,43 @@ async function clientSocialTick(force) {
 /* ---------------- 和服务端同步 ---------------- */
 
 function mergeRemote(remote) {
-  if (!remote || !Array.isArray(remote.friends)) return false;
+  const result = { changed: false, friends: false, groups: false, moments: false };
+  if (!remote || !Array.isArray(remote.friends)) return result;
   let changed = false;
   const mergeFields = (local, remoteObject, fields, dirty = {}) => {
+    let hit = false;
     for (const field of fields) {
       if (Object.prototype.hasOwnProperty.call(dirty, field) || remoteObject[field] === undefined) continue;
       if (JSON.stringify(local[field]) !== JSON.stringify(remoteObject[field])) {
-        local[field] = remoteObject[field]; changed = true;
+        local[field] = remoteObject[field]; changed = true; hit = true;
       }
     }
+    return hit;
+  };
+  // 好友的 settings 是嵌套对象，必须按 key 合并：整块替换会把另一台设备刚改的勾选抹掉。
+  const mergeFriendSettings = (local, remoteFriend, dirty) => {
+    const dirtyKeys = (dirty && dirty.settings) || {};
+    const remoteSettings = (remoteFriend.settings && typeof remoteFriend.settings === 'object')
+      ? remoteFriend.settings : {};
+    const base = (local.settings && typeof local.settings === 'object') ? local.settings : {};
+    const next = {};
+    for (const [key, value] of Object.entries(remoteSettings)) {
+      if (Object.prototype.hasOwnProperty.call(dirtyKeys, key)) {
+        if (base[key] !== undefined) next[key] = base[key];   // 本地还没发出去的编辑优先
+      } else if (value !== undefined && value !== null) {
+        next[key] = value;
+      }
+    }
+    for (const key of Object.keys(dirtyKeys)) {
+      if (base[key] !== undefined && next[key] === undefined) next[key] = base[key];
+    }
+    const has = Object.keys(next).length > 0;
+    const had = Object.keys(base).length > 0;
+    if (has !== had || JSON.stringify(next) !== JSON.stringify(base)) {
+      if (has) local.settings = next; else delete local.settings;
+      return true;
+    }
+    return false;
   };
   mergeFields(state.settings, remote.settings || {}, Object.keys(DEFAULT_SETTINGS), pendingEdits.settings);
 
@@ -2968,86 +3187,227 @@ function mergeRemote(remote) {
   const dead = new Set(state.deleted || []);
   if (pruneDeleted(state)) changed = true;
   const mergeMsgs = (local, list, kind) => {
+    let hit = false;
     const have = new Set(local.messages.map((m) => m.id));
     const byId = new Map(local.messages.map(m => [m.id, m]));
     for (const m of list || []) {
       if (dead.has(m.id)) continue;
       const existing = byId.get(m.id);
       if (kind === 'group' && existing && existing.ts !== m.ts) {
-        existing.ts = m.ts; changed = true;
+        existing.ts = m.ts; changed = true; hit = true;
       }
       if (!have.has(m.id)) {
         local.messages.push(m);
         if (m.role !== 'user' && !isActive(kind, local.id)) local.unread = (local.unread || 0) + 1;
-        changed = true;
+        changed = true; hit = true;
       }
     }
     local.messages.sort((a, b) => a.ts - b.ts);
+    return hit;
   };
 
   for (const rf of remote.friends) {
     if (dead.has(rf.id)) continue;
     const lf = friendById(rf.id);
-    if (!lf) { state.friends.push(normalizeFriend(rf)); changed = true; continue; }
-    mergeMsgs(lf, rf.messages, 'friend');
+    if (!lf) { state.friends.push(normalizeFriend(rf)); changed = true; result.friends = true; continue; }
+    const dirty = pendingEdits.friends[rf.id] || {};
+    if (mergeFriendSettings(lf, rf, dirty)) { changed = true; result.friends = true; }
+    if (mergeFields(lf, rf, FRIEND_FIELDS, dirty)) { changed = true; result.friends = true; }
+    if (mergeMsgs(lf, rf.messages, 'friend')) result.friends = true;
   }
   for (const rg of remote.groups || []) {
     if (dead.has(rg.id)) continue;
     const lg = groupById(rg.id);
-    if (!lg) { state.groups.push(normalizeGroup(rg)); changed = true; continue; }
-    mergeFields(lg, rg, GROUP_FIELDS, pendingEdits.groups[rg.id]);
-    mergeMsgs(lg, rg.messages, 'group');
+    if (!lg) { state.groups.push(normalizeGroup(rg)); changed = true; result.groups = true; continue; }
+    if (mergeFields(lg, rg, GROUP_FIELDS, pendingEdits.groups[rg.id])) result.groups = true;
+    if (mergeMsgs(lg, rg.messages, 'group')) { changed = true; result.groups = true; }
   }
   for (const rm of remote.moments || []) {
     if (dead.has(rm.id)) continue;
     const lm = state.moments.find((x) => x.id === rm.id);
-    if (!lm) { state.moments.push(rm); changed = true; continue; }
+    if (!lm) { state.moments.push(rm); changed = true; result.moments = true; continue; }
     lm.likes = lm.likes || [];
-    for (const x of rm.likes || []) if (!lm.likes.includes(x)) { lm.likes.push(x); changed = true; }
+    for (const x of rm.likes || []) if (!lm.likes.includes(x)) { lm.likes.push(x); changed = true; result.moments = true; }
     lm.comments = lm.comments || [];
     const have = new Set(lm.comments.map((c) => c.id));
-    for (const c of rm.comments || []) if (!have.has(c.id)) { lm.comments.push(c); changed = true; }
+    for (const c of rm.comments || []) if (!have.has(c.id)) { lm.comments.push(c); changed = true; result.moments = true; }
   }
   state.moments.sort((a, b) => b.ts - a.ts);
   // 新加入的会话也可能来自含有已删消息的旧快照。
   if (pruneDeleted(state)) changed = true;
-  return changed;
+  result.changed = changed;
+  return result;
 }
 
-let syncing = false;
+function chatCounts() {
+  let n = 0;
+  for (const c of state.friends || []) n += (c.messages || []).length;
+  for (const c of state.groups || []) n += (c.messages || []).length;
+  return n;
+}
 
-async function syncTick() {
-  if (!isCloud() || !TOKEN || syncing || Store.saving || saveTimer) return;
-  syncing = true;
-  const startedAt = localRevision;
-  try {
-    const r = await apiFetch('/api/rev');
-    if (!r.ok) return;
-    const info = await r.json();
-    if (Number(info.rev) <= lastRev) return;
-    const res = await apiFetch('/api/state');
-    if (!res.ok) return;
-    const remote = await res.json();
-    if (localRevision !== startedAt || Store.saving || saveTimer) return;
-    if (mergeRemote(remote)) {
-      if (state.conv && !currentConv()) closeChat();
-      const cur = $$('button', tabbar).find((b) => b.classList.contains('active'));
-      const tab = cur ? cur.dataset.tab : 'msg';
-      if (tab === 'moments') renderMoments();
-      if (tab === 'msg') renderConversations();
-      if (tab === 'contacts') renderContacts();
-      if (pageChat.classList.contains('open') && currentConv()) {
-        $('#peerName').textContent = currentConv().name;
-        const r = rtOf(convKey(state.conv.kind, state.conv.id));
-        if (r.phase === 'idle') { renderChat(); scrollBottom(true); }
-      }
-    }
-    lastRev = Number(remote.rev);
-  } catch (_) {
-    // 拉取失败时保留旧版本号，下次轮询继续重试。
-  } finally {
-    syncing = false;
+function isNearBottom() {
+  return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 120;
+}
+
+let savedScroll = null;
+function rememberScroll() {
+  savedScroll = { top: chatEl.scrollTop, h: chatEl.scrollHeight, atBottom: isNearBottom() };
+}
+function restoreScrollIfNeeded() {
+  if (!savedScroll) return;
+  if (savedScroll.atBottom) scrollBottom(true);
+  else chatEl.scrollTop = savedScroll.top + (chatEl.scrollHeight - savedScroll.h);
+  savedScroll = null;
+}
+
+/* 同步循环
+ *
+ * 以前是 setInterval(syncTick, 4000) + 一个 syncing 布尔锁：任何一次请求
+ * 卡住（弱网、切后台、慢到 800KB 的状态读取）都会让 syncing 永远为 true，
+ * 之后所有轮询被静默挡掉——只在杀掉重开时才恢复。现在改成：
+ *   - 每次请求都有超时，卡住的请求会被 abort；
+ *   - 轮次用 setTimeout 自排队，finally 里一定会排下一轮，异常也杀不死它；
+ *   - 超过 SYNC_STALE_MS 还没收尾就强制放弃上一轮；
+ *   - 回到前台、网络恢复时立刻补一次；
+ *   - 即使 rev 没变，也定期整份合并一次兜底；
+ *   - 每次保存时把自检信息带给服务端，方便以后定位。
+ */
+const SYNC_INTERVAL = 4000;
+const SYNC_STALE_MS = 50000;          // 单轮超过这个时间就判定卡死
+const SYNC_FULL_REFRESH_MS = 120000;  // rev 不变也强制整份合并的周期
+let syncTimer = null;
+let syncRunning = false;
+let syncStartedAt = 0;
+let syncAborter = null;
+let syncFailures = 0;
+let syncLastOkAt = 0;
+let syncStaleCount = 0;
+let syncLastFullAt = 0;
+let syncLastError = '';
+let syncGeneration = 0;
+
+function syncDiagSnapshot() {
+  return {
+    build: APP_BUILD,
+    cloud: isCloud(),
+    token: !!TOKEN,
+    running: syncRunning,
+    stuck: syncRunning ? Date.now() - syncStartedAt : 0,
+    rev: lastRev,
+    failures: syncFailures,
+    stale: syncStaleCount,
+    lastOkAgo: syncLastOkAt ? Math.round((Date.now() - syncLastOkAt) / 1000) : -1,
+    err: syncLastError,
+    online: navigator.onLine !== false,
+    hidden: document.hidden,
+  };
+}
+
+function syncSchedule(ms) {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(syncStep, Math.max(0, ms));
+}
+
+function syncWake(reason) {
+  if (!isCloud() || !TOKEN) return;
+  if (syncRunning && Date.now() - syncStartedAt < SYNC_STALE_MS) { syncSchedule(200); return; }
+  syncSchedule(0);
+  if (reason) syncLastError = '';
+}
+
+async function syncStep() {
+  if (!isCloud() || !TOKEN) { syncSchedule(6000); return; }
+  if (syncRunning) {
+    if (Date.now() - syncStartedAt < SYNC_STALE_MS) { syncSchedule(SYNC_INTERVAL); return; }
+    // 上一轮卡住了：作废它、掐掉它，重新开始，绝不把循环拖死
+    syncStaleCount += 1;
+    syncGeneration += 1;
+    syncRunning = false;
+    try { if (syncAborter) syncAborter.abort(); } catch (_) {}
   }
+  const gen = ++syncGeneration;
+  syncRunning = true;
+  syncStartedAt = Date.now();
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  syncAborter = ctrl;
+  // 心跳先排上：就算这一轮永远不返回，下一拍也会来检查它是不是卡死了。
+  syncSchedule(SYNC_INTERVAL);
+  let ok = false;
+  try {
+    const force = !lastRev || (Date.now() - syncLastFullAt > SYNC_FULL_REFRESH_MS);
+    ok = await syncTick(ctrl ? ctrl.signal : undefined, force);
+    if (gen !== syncGeneration) return;
+    if (ok) {
+      syncFailures = 0;
+      syncLastOkAt = Date.now();
+      if (force) syncLastFullAt = Date.now();
+    } else {
+      syncFailures = Math.min(syncFailures + 1, 6);
+    }
+  } catch (e) {
+    if (gen !== syncGeneration) return;
+    syncFailures = Math.min(syncFailures + 1, 6);
+    syncLastError = String((e && e.message) || e).slice(0, 120);
+  } finally {
+    if (gen === syncGeneration) {
+      if (syncAborter === ctrl) syncAborter = null;
+      syncRunning = false;
+      const wait = syncFailures
+        ? Math.min(30000, SYNC_INTERVAL * Math.min(8, 2 ** (syncFailures - 1)))
+        : SYNC_INTERVAL;
+      syncSchedule(wait);
+    }
+  }
+}
+
+function startSync() {
+  if (!isCloud() || !TOKEN) return;
+  syncSchedule(300);
+}
+
+async function syncTick(signal, force) {
+  const opts = signal ? { signal } : {};
+  if (!force) {
+    const r = await apiFetch('/api/rev', Object.assign({ timeout: 15000 }, opts));
+    if (!r.ok) throw new Error('rev HTTP ' + r.status);
+    const info = await r.json();
+    if (!(Number(info.rev) > lastRev)) return true;     // 没变化，算一轮成功
+  }
+  const res = await apiFetch('/api/state', Object.assign({ timeout: 45000 }, opts));
+  if (!res.ok) throw new Error('state HTTP ' + res.status);
+  const remote = await res.json();
+  if (!remote || !Array.isArray(remote.friends)) throw new Error('bad state');
+  const before = chatCounts();
+  const merged = mergeRemote(remote);
+  const grew = chatCounts() !== before;
+  if (merged.changed || grew) {
+    if (state.conv && !currentConv()) closeChat();
+    const cur = $$('button', tabbar).find((b) => b.classList.contains('active'));
+    const tab = cur ? cur.dataset.tab : 'msg';
+    if (tab === 'moments') renderMoments();
+    if (tab === 'msg') renderConversations();
+    if (tab === 'contacts') renderContacts();
+    if (merged.friends) refreshOpenFriendSheet();
+    if (pageChat.classList.contains('open') && currentConv()) {
+      $('#peerName').textContent = currentConv().name;
+      // 不再看 r.phase：只要数据变了就重绘，避免群聊卡在“正在输入”期间永不刷新
+      rememberScroll();
+      renderChat();
+      restoreScrollIfNeeded();
+    }
+  }
+  lastRev = Math.max(lastRev, Number(remote.rev) || 0);
+  return true;
+}
+
+/** 另一半设备改了某个好友的开关，如果正开着她的资料页，把控件刷新一下。 */
+function refreshOpenFriendSheet() {
+  if (!friendSheet.classList.contains('open')) return;
+  if (friendEditMode !== 'edit' || !editingFriendId) return;
+  const f = friendById(editingFriendId);
+  if (!f) return;
+  renderFriendRhythm(f, false);
 }
 
 /* ---------------- 登录 ---------------- */
@@ -3094,6 +3454,7 @@ async function doAuth(kind) {
     }
 
     localStorage.setItem(TOKEN_KEY, j.token);
+    localStorage.removeItem('ql.local');   // 登录后切回云端模式
     location.reload();
   } catch (e) {
     say('连不上：' + (e.message || e));
@@ -3101,6 +3462,11 @@ async function doAuth(kind) {
 }
 
 $('#lgLogin').addEventListener('click', () => doAuth('login'));
+const lgLocalBtn = $('#lgLocal');
+if (lgLocalBtn) lgLocalBtn.addEventListener('click', () => {
+  localStorage.setItem('ql.local', '1');
+  location.reload();
+});
 $('#lgReg').addEventListener('click', () => doAuth('register'));
 $('#lgPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') doAuth('login'); });
 
@@ -3349,7 +3715,11 @@ document.addEventListener('click', function askNotify() {
 let clockTimer = null;
 function startClock() {
   clearInterval(clockTimer);
-  const tick = () => { $('#clock').textContent = timeOf(Date.now()); };
+  // 老壳（网页更新了、但 APK 里还是旧 index.html）没有这个元素：以前这里直接
+  // null.textContent 抛异常，会把 init() 后面「启动同步轮询」那几行整个跳过，
+  // 表现在用户那边就是群聊只有重启才更新。
+  if (!$('#clock')) return;
+  const tick = () => { const node = $('#clock'); if (node) node.textContent = timeOf(Date.now()); };
   tick();
   clockTimer = setInterval(tick, 20000);
 }
@@ -3366,7 +3736,16 @@ function normalizeFriend(raw) {
   f.unread = Number(raw && raw.unread) || 0;
   f.dmMoment = !(raw && raw.dmMoment === false);
   f.createdAt = Number(raw && raw.createdAt) || Date.now();
+  // 她自己的节奏设置和服务端写的调度字段必须原样留着：以前这里被 makeFriend
+  // 重建对象时丢掉，等于每次加载都把好友设置清零（多端不同步的另一半原因）。
+  const own = raw && raw.settings;
+  if (own && typeof own === 'object' && Object.keys(own).length) f.settings = { ...own };
+  for (const key of ['memory', 'memoryAt', 'lastGreet', 'lastNudgeAt',
+    'lastFallbackAt', 'nextMomentAt', 'muted']) {
+    if (raw && raw[key] !== undefined && raw[key] !== null) f[key] = raw[key];
+  }
   f.messages = (f.messages || []).map((m) => ({
+    ...m,
     id: m.id || uid('m'),
     role: m.role === 'user' ? 'user' : 'peer',
     authorId: m.authorId || (m.role === 'user' ? undefined : f.id),
@@ -3441,11 +3820,16 @@ async function init() {
 
   if (isCloud()) {
     if (!TOKEN) {
-      showLogin('第一次用？填个名字和密码，点「注册新账号」');
-      return;
+      if (IN_APP && !SERVER) {          // App 里没填服务器 → 直接用本机数据
+        LOCAL_MODE = true;
+        localStorage.setItem('ql.local', '1');
+      } else {
+        showLogin('第一次用？填个名字和密码，点「注册新账号」');
+        return;
+      }
     }
     try {
-      const res = await apiFetch('/api/state');
+      const res = await apiFetch('/api/state', { timeout: 45000 });
       if (res.status === 401) { showLogin('登录过期了，重新登录一下'); return; }
       if (!res.ok) throw new Error('服务器无法读取聊天数据，请稍后重试');
       raw = await res.json();
@@ -3470,17 +3854,25 @@ async function init() {
     }));
   }
 
-  applyTheme();
-  renderMe();
-  renderConversations();
-  renderContacts();
-  renderMoments();
-  switchTab('msg');
-  startClock();
-  updateSendBtn();
+  // 先把同步循环挂起来，再渲染：即使某个渲染函数在老数据上抛异常，
+  // 群聊/多端同步也不会跟着一起死掉（这是「只有重启才更新」的另一半原因）。
+  startSync();
+
+  try {
+    applyTheme();
+    renderMe();
+    renderConversations();
+    renderContacts();
+    renderMoments();
+    switchTab('msg');
+    startClock();
+    updateSendBtn();
+  } catch (e) {
+    console.error('[init] 渲染失败', e);
+    toast('界面渲染出错：' + ((e && e.message) || e));
+  }
 
   setInterval(proactiveTick, 30000);
-  setInterval(syncTick, 4000);
   setInterval(clientSocialTick, 30000);
 
   document.documentElement.classList.toggle('native', NATIVE);
@@ -3505,4 +3897,17 @@ async function init() {
 }
 
 document.addEventListener('wheel', wheelFallback, { passive: true });
+
+// 回到前台 / 网络恢复时立刻补一次同步：手机切后台再回来不该等下一轮轮询。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) syncWake('visible');
+});
+window.addEventListener('online', () => syncWake('online'));
+window.addEventListener('pageshow', () => syncWake('pageshow'));
+// 别让某个漏网的 promise 把同步循环带走。
+window.addEventListener('unhandledrejection', (e) => {
+  syncLastError = String((e && e.reason && e.reason.message) || (e && e.reason) || 'unhandledrejection').slice(0, 120);
+  if (syncRunning && Date.now() - syncStartedAt > SYNC_STALE_MS) syncWake('unhandledrejection');
+});
+
 init();

@@ -118,6 +118,16 @@ desktop/              macOS / Windows clients
 deploy/               systemd unit and install script
 ```
 
+## Changelog
+
+**2026-10-23 — multi-device sync fix**
+
+- Friend-level rhythm settings (`proactive` / `greet` / `bursts` / `nudgeAfter` / `momentInterval`) are now merged field by field on the server and pushed back to every device. A stale snapshot from another device can no longer wipe them.
+- Clients send explicit edits (`_edits.friends[id]`), so only fields you actually changed are written; clearing a field removes the override instead of leaving a stale value.
+- The client sync loop is now self-healing: every request has a timeout, a stuck round is abandoned by a watchdog, the loop reschedules itself in `finally`, and it re-syncs immediately when the app returns to the foreground. Previously one stalled request could stop polling until the app was restarted.
+- Group replies now show a "typing…" hint on the cloud path, and a message you send triggers the server scheduler immediately instead of waiting for the next tick.
+- `android/build.sh` no longer strips the status bar markup from the bundled `index.html`: the page script needs the `#clock` element, and removing it made `init()` throw before the polling timer was registered — group replies only appeared after a restart.
+
 ## License
 
 MIT

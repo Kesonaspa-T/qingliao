@@ -186,6 +186,78 @@ def _by_id(items):
 GROUP_FIELDS = ("name", "avatar", "members", "prompt")
 GROUP_RUNTIME = ("turnCounts", "lastSpurtAt", "lastChatAt")
 
+# 好友身上「用户能改」的字段；其余字段属于服务端/调度，客户端快照不得覆盖。
+FRIEND_FIELDS = ("name", "avatar", "persona", "relations", "dmMoment", "settings")
+# 后台任务写入的好友字段：只有后台合并才允许更新。
+FRIEND_SERVER_FIELDS = ("unread", "lastGreet", "lastNudgeAt", "lastFallbackAt",
+                        "memory", "memoryAt", "nextMomentAt", "muted", "createdAt")
+
+
+def _dict(x):
+    return x if isinstance(x, dict) else {}
+
+
+def merge_friend(base, incoming, patch, *, background=False):
+    """好友不能整块用客户端快照覆盖。
+
+    客户端 normalizeFriend 只会带上已知字段，旧设备/重装后的设备提交的快照里
+    可能既没有 settings，也没有服务端写进去的 lastNudgeAt 之类。整块覆盖等于
+    用旧快照把别的设备刚改的设置和调度状态抹掉（这正是「多端不同步」的成因）。
+    这里改成：用户能改的字段才可能被覆盖，且优先只认显式编辑（_edits.friends）。
+    """
+    base = _dict(base)
+    inc = _dict(incoming)
+    patch = _dict(patch)
+
+    if not base:
+        # 新好友：客户端带来的字段就是初值
+        out = dict(inc)
+        if not isinstance(out.get("settings"), dict) or not out["settings"]:
+            out.pop("settings", None)
+        return out
+
+    out = dict(base)
+    out["id"] = inc.get("id") or base.get("id")
+
+    if background:
+        for field in FRIEND_SERVER_FIELDS:
+            if field in inc:
+                out[field] = inc[field]
+        return out
+
+    # 新客户端会带 _edits.friends[id]，只认里面点名的字段；
+    # 旧客户端没有这条通道，退化成「带了才覆盖」，但空值不覆盖，防止把资料抹成空。
+    if patch:
+        for field in FRIEND_FIELDS:
+            if field != "settings" and field in patch:
+                out[field] = patch[field]
+    else:
+        for field in ("name", "avatar", "persona"):
+            if inc.get(field) not in (None, ""):
+                out[field] = inc[field]
+        for field in ("relations", "dmMoment"):
+            if field in inc:
+                out[field] = inc[field]
+
+    # settings 永远按字段合并：磁盘有、客户端没带的键一律保留。
+    merged = dict(_dict(base.get("settings")))
+    if patch and isinstance(patch.get("settings"), dict):
+        want = patch["settings"]
+    elif not patch and isinstance(inc.get("settings"), dict):
+        want = inc["settings"]
+    else:
+        want = {}
+    for key, value in want.items():
+        if value is None:
+            merged.pop(key, None)          # 显式置空 = 跟随全局
+        else:
+            merged[key] = value
+    if merged:
+        out["settings"] = merged
+    else:
+        out.pop("settings", None)
+    return out
+
 
 def merge_state(old, new, *, background=False):
     """客户端提交的是完整状态，服务器这边可能已经生成了新东西，做并集。"""
@@ -198,6 +270,7 @@ def merge_state(old, new, *, background=False):
     out = dict(old)
     out.update(new)
     edits = out.pop("_edits", {}) or {}
+    out.pop("_diag", None)                 # 客户端诊断信息只用来打日志，不落盘
     # 全量快照不等于用户编辑。只有显式修改的设置/群资料才覆盖磁盘。
     settings = dict(old.get("settings") or {})
     if not background:
@@ -210,6 +283,7 @@ def merge_state(old, new, *, background=False):
     # 版本由当前磁盘状态决定，不能被后台任务持有的旧 rev 拉低。
     out["rev"] = int(old.get("rev") or 0)
 
+    friend_edits = edits.get("friends") or {}
     old_friends = _by_id(old.get("friends"))
     friends = []
     for f in new.get("friends") or []:
@@ -221,12 +295,12 @@ def merge_state(old, new, *, background=False):
         for m in base.get("messages") or []:
             if m.get("id") not in have:
                 msgs.append(m)
-        f = dict(f)
-        f["messages"] = sorted(
+        merged = merge_friend(base, f, friend_edits.get(f.get("id")), background=background)
+        merged["messages"] = sorted(
             [m for m in msgs if m.get("id") not in deleted],
             key=lambda m: m.get("ts", 0),
         )
-        friends.append(f)
+        friends.append(merged)
     kept = {f.get("id") for f in friends}
     for f in old.get("friends") or []:
         if f.get("id") in kept or f.get("id") in deleted:
@@ -502,7 +576,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v25",
+                    "build": "v26",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -542,9 +616,18 @@ class Handler(SimpleHTTPRequestHandler):
                 merged = merge_state(cur, payload)
                 merged["rev"] = int(cur.get("rev") or 0)
                 save_state(merged, uid)
+            build = self.headers.get("X-Qingliao-Build", "legacy")
             print("[SYNC] client=%s deleted_in=%d deleted_saved=%d rev=%d" % (
-                self.headers.get("X-Qingliao-Build", "legacy"), len(payload.get("deleted") or []),
+                build, len(payload.get("deleted") or []),
                 len(merged.get("deleted") or []), merged["rev"]), flush=True)
+            diag = payload.get("_diag")
+            if isinstance(diag, dict):
+                # 客户端同步自检：syncTick 卡住/一直失败时，这里能直接看出来。
+                print("[SYNC-DIAG] client=%s %s" % (
+                    build, json.dumps(diag, ensure_ascii=False, sort_keys=True)[:400]), flush=True)
+            if payload.get("_hint") == "social":
+                # 用户在群里刚说完话：不用等 20 秒的轮询，马上让她们接话。
+                threading.Thread(target=run_social_now, args=(uid,), daemon=True).start()
             return self._json(200, {"ok": True, "rev": merged["rev"], "moments": len(merged.get("moments") or [])})
         if path == "/api/chat":
             return self._handle_chat()
@@ -1546,6 +1629,14 @@ def social_loop():
         except Exception as e:
             print("[social]", e)
         time.sleep(20)
+
+
+def run_social_now(uid):
+    """客户端说自己刚发了言：立刻跑一轮调度，别等 20 秒的定时器。"""
+    try:
+        social_tick(uid)
+    except Exception as e:
+        print("[social] 即时调度失败：", e)
 
 
 def main():

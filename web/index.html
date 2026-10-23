@@ -19,6 +19,7 @@
     <input id="lgPass" type="password" placeholder="密码（至少 6 位）">
     <button id="lgLogin">登录</button>
     <button id="lgReg">注册新账号</button>
+    <button id="lgLocal" style="background:none;color:#3aa1e0">不连服务器，单机使用</button>
     <div class="lg-hint" id="lgMsg"></div>
   </div>
 </section>
@@ -221,13 +222,7 @@
           </label>
           <label class="field">
             <span>朋友圈频率</span>
-            <select id="fMomentFreq">
-              <option value="86400">一天一条</option>
-              <option value="43200">半天一条</option>
-              <option value="21600">6 小时一条</option>
-              <option value="7200">2 小时一条</option>
-              <option value="3600">1 小时一条</option>
-            </select>
+            <input id="fMomentFreq" type="number" min="1" max="1440" step="1"> <span style="color:var(--sub);font-size:13px">分钟一条</span>
           </label>
           <label class="field row-inline"><span>她主动找你</span><input id="fProactive" type="checkbox" class="switch"></label>
           <label class="field"><span>空闲多少分钟后</span><input id="fIdle" type="number" min="3" max="180" step="1"></label>
@@ -364,6 +359,6 @@
   </div>
 </div>
 
-<script src="app.js?v=25"></script>
+<script src="app.js?v=27"></script>
 </body>
 </html>
