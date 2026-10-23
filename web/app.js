@@ -26,6 +26,7 @@ const tabbar = $('#tabbar');
 
 const NATIVE = !!(window.AndroidChat && window.AndroidChat.start);
 const isDesk = () => window.matchMedia('(min-width: 900px)').matches;
+const APP_BUILD = 'v18';
 
 const TOKEN_KEY = 'ql.token';
 const SERVER_KEY = 'ql.server';
@@ -1673,11 +1674,15 @@ async function groupTurn(group) {
     const lastUser = [...(group.messages || [])].reverse().find((m) => m.role === 'user');
     const mentioned = lastUser ? mentionedIn(group, lastUser.text || '') : [];
     const speakers = mentioned.length ? mentioned : pickSpeakers(group);
+    const cap = Math.max(1, Math.min(10, Number(state.settings.groupBursts) || 3));
+    group.turnCounts = group.turnCounts || {};
 
     for (const fid of speakers) {
       if (r.stopped) break;
       const f = friendById(fid);
       if (!f) continue;
+      const used = Number(group.turnCounts[fid] || 0);
+      if (used >= cap) continue;
 
       await sleep(delayFor());
       if (r.stopped) break;
@@ -1692,7 +1697,11 @@ async function groupTurn(group) {
         if (!k) throw new Error('还没填 API Key，点「我的」→ 设置');
         const text = await runChat(f, group, r, null);
         if (holder) holder.row.remove();
-        if (text.trim()) await deliver('group', group, text, f.id);
+        if (text.trim()) {
+          const left = cap - Number(group.turnCounts[fid] || 0);
+          await deliver('group', group, text, f.id, left);
+          group.turnCounts[fid] = Number(group.turnCounts[fid] || 0) + Math.max(1, Math.min(left, splitReply(text, left).length));
+        }
         else if (holder) holder.row.remove();
       } catch (e) {
         const msg = (e && e.message) ? e.message : '出错了';
@@ -1709,7 +1718,9 @@ async function groupTurn(group) {
     // 她们之间接一句（不 @ 的时候才有，让群里像在对话）
     if (!mentioned.length && group.members.length > 1 && Math.random() < 0.7) {
       const last = [...(group.messages || [])].reverse().find((m) => m.role !== 'user' && m.text);
-      const others = group.members.filter((id) => friendById(id) && (!last || id !== last.authorId));
+      const others = group.members.filter((id) => friendById(id)
+        && (!last || id !== last.authorId)
+        && Number((group.turnCounts || {})[id] || 0) < Math.max(1, Math.min(10, Number(state.settings.groupBursts) || 3)));
       const second = others[Math.floor(Math.random() * others.length)];
       if (second) {
         const f2 = friendById(second);
@@ -1747,8 +1758,23 @@ function notifyPeer(name, text) {
   try { new Notification(name, { body: text.slice(0, 60) }); } catch (_) {}
 }
 
-async function deliver(kind, conv, text, authorId) {
-  const limit = kind === 'group' ? (state.settings.groupBursts || 10) : (state.settings.bursts || 5);
+async function deliver(kind, conv, text, authorId, maxParts) {
+  let limit = kind === 'group' ? (state.settings.groupBursts || 3) : (state.settings.bursts || 5);
+
+  // 群聊硬闸门：以「你上一条发言之后这个人已经说了几条」为准，不看计数器
+  if (kind === 'group') {
+    const cap = Math.max(1, Math.min(10, Number(state.settings.groupBursts) || 3));
+    let lastUserAt = -1;
+    for (let i = conv.messages.length - 1; i >= 0; i -= 1) {
+      if (conv.messages[i].role === 'user') { lastUserAt = i; break; }
+    }
+    const sent = conv.messages.slice(lastUserAt + 1).filter((m) => m.authorId === authorId && !m.recalled).length;
+    const left = cap - sent;
+    if (left <= 0) return;
+    limit = Math.min(limit, left);
+  }
+
+  if (maxParts != null) limit = Math.max(1, Math.min(limit, maxParts));
   const parts = splitReply(text, limit);
   const now = Date.now();
   const active = isActive(kind, conv.id);
@@ -1802,6 +1828,8 @@ function splitReply(text, limit) {
 
 function afterUserMessage(kind, conv) {
   if (kind === 'group') {
+    // 云端模式下群聊统一由服务器生成，客户端不再插一手（否则两边各发各的，条数失控）
+    if (isCloud()) return;
     const r = rtOf(convKey('group', conv.id));
     // 上一轮卡死超过两分钟，直接放行，别再排队等
     if (r.phase !== 'idle' && r.since && Date.now() - r.since > 120000) {
@@ -1821,6 +1849,7 @@ async function send(raw) {
   if (!text) return;
   const kind = state.conv.kind;
 
+  if (kind === 'group') conv.turnCounts = {};
   const msg = { id: uid('m'), role: 'user', text, ts: Date.now() };
   if (quoteFor) { msg.quote = quoteFor; quoteFor = null; showQuoteBar(); }
   conv.messages.push(msg);
@@ -2559,7 +2588,7 @@ if (!document.getElementById('btnStatus')) {
       const r = await apiFetch('/api/status');
       const j = await r.json();
       const msg = [
-        '版本 ' + (j.version || '-') + '　rev ' + j.rev,
+        '客户端 ' + APP_BUILD + '　服务端 ' + (j.version || '-') + '　rev ' + j.rev,
         '好友 ' + j.friends + '　群 ' + j.groups + '　朋友圈 ' + j.moments,
         '上次调度 ' + (j.last_social_at ? new Date(j.last_social_at * 1000).toLocaleString() : '还没跑过'),
       ].join('\n');

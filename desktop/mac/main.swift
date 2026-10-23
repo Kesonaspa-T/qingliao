@@ -78,7 +78,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func load(_ address: String) {
         guard let url = URL(string: address) else { return }
-        webView.load(URLRequest(url: url))
+        // 每次启动都绕过本地缓存，避免改完服务器后客户端还跑旧 JS
+        var req = URLRequest(url: url)
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        webView.load(req)
+    }
+
+    @objc func hardReload() {
+        guard let url = URL(string: serverURL()) else { return }
+        var req = URLRequest(url: url)
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        webView.load(req)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

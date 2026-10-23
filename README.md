@@ -8,7 +8,7 @@ It's not a "prompt box". It's *her*.
 
 ## Why I built this
 
-A few days ago I started looking into QQ bots. Chatting with 大肥鱼 was genuinely fun.
+A few days ago I started looking into QQ bots. Chatting with DeepSeek girl was genuinely fun.
 
 As a student I don't have much time to tinker, so I went with the simplest stack: AstrBot + NapCat. But Tencent's risk control is brutal — the account was banned within seconds, every single time. For a student that's terrifying. I just wanted to put my own OC in there and simulate talking to a real person.
 

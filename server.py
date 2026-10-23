@@ -1255,12 +1255,19 @@ def social_tick(uid="local"):
             if lastm.get("role") == "user":
                 g["turnCounts"] = {}
                 continue
-            per_cap = max(1, min(10, int(s.get("groupBursts") or 10)))
+            per_cap = max(1, min(10, int(s.get("groupBursts") or 3)))
             if now - float(g.get("lastSpurtAt") or 0) < 9:
                 continue
             avail = [m for m in members if int(counts.get(m) or 0) < per_cap]
             if not avail:
                 continue
+            # 用户 @ 了谁，谁优先（下一次发言时）
+            if lastm.get("role") == "user" and lastm.get("text"):
+                for m in members:
+                    nm2 = name_map.get(m)
+                    if nm2 and ("@" + nm2) in lastm["text"] and m in avail:
+                        avail = [m]
+                        break
             # 尽量换个人说，形成交叉对话
             last_speaker = lastm.get("authorId")
             if len(avail) > 1 and last_speaker in avail:
