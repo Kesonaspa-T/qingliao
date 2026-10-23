@@ -32,6 +32,16 @@ rm -rf "$HERE/assets"
 mkdir -p "$HERE/assets/www"
 cp -R "$HERE/../web/." "$HERE/assets/www/"
 
+# strip-statusbar: APK 里不要网页自带的模拟状态栏（真机已有）
+python3 - "$HERE/assets/www/index.html" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+s2 = re.sub(r'\n\s*<div class="statusbar">.*?</div>\s*\n', "\n", s, count=1, flags=re.S)
+open(p, "w", encoding="utf-8").write(s2)
+print("[strip-statusbar]", "removed" if s2 != s else "not found")
+PYEOF
+
 echo "[1/6] aapt2 compile"
 "$BT/aapt2" compile --dir "$HERE/res" -o "$OUT/res.zip"
 

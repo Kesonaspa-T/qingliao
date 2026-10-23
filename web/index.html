@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f7f8fa">
 <title>轻聊</title>
-<link rel="stylesheet" href="style.css?v=17">
+<link rel="stylesheet" href="style.css?v=18">
 <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
@@ -204,7 +204,8 @@
           <label class="field"><span>最长（秒）</span><input id="fDelayMax" type="number" min="0" max="600" step="1"></label>
           <label class="field row-inline"><span>正在输入特效</span><input id="fTypingFx" type="checkbox" class="switch"></label>
           <label class="field"><span>私聊最多几条</span><input id="fBursts" type="number" min="1" max="5" step="1"></label>
-          <label class="field"><span>群聊最多几条</span><input id="fGroupBursts" type="number" min="1" max="10" step="1"></label>
+          <label class="field"><span>群聊每人最多几条</span><input id="fGroupBursts" type="number" min="1" max="10" step="1"></label>
+          <label class="field"><span>群里一轮总共最多几条</span><input id="fGroupRound" type="number" min="1" max="60" step="1"></label>
           <p class="hint">她一次回复会拆成 1 到这么多条气泡。群聊里 @ 谁，谁就接着说。</p>
         </div>
 
@@ -363,6 +364,6 @@
   </div>
 </div>
 
-<script src="app.js?v=19"></script>
+<script src="app.js?v=25"></script>
 </body>
 </html>

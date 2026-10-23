@@ -47,7 +47,14 @@ public class MainActivity extends Activity {
         s.setUseWideViewPort(false);
         s.setLoadWithOverviewMode(false);
 
-        web.setWebViewClient(new WebViewClient());
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                // 原生壳里不要网页自带的模拟状态栏（真机本来就有）
+                view.evaluateJavascript(
+                        "document.documentElement.classList.add('native');", null);
+            }
+        });
 
         web.setWebChromeClient(new WebChromeClient() {
             @Override
@@ -67,7 +74,8 @@ public class MainActivity extends Activity {
             }
         });
 
-        web.addJavascriptInterface(new Bridge(this, web), "AndroidChat");
+        // 不再注入 JS 桥：APK 只作为网页容器，避免被安全软件判定为高风险 WebView 壳
+        // （本地无服务器模式已不再支持，登录后一切请求都走 HTTP）
 
         // Android 13+ 的手势返回 / 三键返回都走这里
         if (Build.VERSION.SDK_INT >= 33) {

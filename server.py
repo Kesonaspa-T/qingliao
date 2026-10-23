@@ -274,12 +274,18 @@ def merge_state(old, new):
     old_pending = _by_id(old.get("pending"))
     pending = list(new.get("pending") or [])
     have = {p.get("id") for p in pending}
+    _now = time.time()
     for pid, p in old_pending.items():
-        if pid not in have:
-            pending.append(p)
+        if pid in have:
+            continue
+        # 已经到期的旧任务不再从磁盘捞回来：它要么已执行，要么是僵尸
+        if float(p.get("dueAt") or 0) <= _now:
+            continue
+        pending.append(p)
+    cutoff = time.time() - 3600          # 一小时前就该执行却还留着的，说明对象已经没了，直接清掉
     out["pending"] = [p for p in pending if not any(
         p.get(key) in deleted for key in ("id", "momentId", "by", "targetId")
-    )]
+    ) and float(p.get("dueAt") or 0) > cutoff]
 
     social = dict(new.get("social") or {})
     social.update(old.get("social") or {})
@@ -869,6 +875,42 @@ def _nid(prefix):
     return prefix + str(int(time.time() * 1000)) + str(random.randint(100, 999))
 
 
+def _last_user(msgs):
+    for i in range(len(msgs) - 1, -1, -1):
+        if msgs[i].get("role") == "user":
+            return i
+    return -1
+
+
+def create_moment_for(st, key, author):
+    text = gen_moment_text(author, st.get("settings") or {}, key)
+    if not text:
+        return False
+    now_ms = int(time.time() * 1000)
+    m = {
+        "id": _nid("mo"),
+        "authorId": author.get("id"),
+        "text": text,
+        "ts": now_ms,
+        "likes": [],
+        "comments": [],
+    }
+    st.setdefault("moments", []).insert(0, m)
+    del st["moments"][300:]
+    for f in pick_reactors(st, m)[:3]:
+        if random.random() < 0.8:
+            st.setdefault("pending", []).append({
+                "id": _nid("p"), "kind": "like", "momentId": m["id"],
+                "by": f.get("id"), "dueAt": time.time() + random.randint(30, 600),
+            })
+        if random.random() < 0.5:
+            st.setdefault("pending", []).append({
+                "id": _nid("p"), "kind": "comment", "momentId": m["id"],
+                "by": f.get("id"), "dueAt": time.time() + random.randint(90, 1500),
+            })
+    return True
+
+
 def create_moment(st, key):
     friends = st.get("friends") or []
     if not friends:
@@ -1029,8 +1071,26 @@ def run_pending(st, p, key):
         g = next((x for x in st.get("groups") or [] if x.get("id") == p.get("targetId")), None)
         if not g:
             return False
-        pool = [x for x in friends if x.get("id") in (g.get("members") or [])]
+        # 和自动群聊用同一套上限，避免朋友圈带起来的群聊绕过限制
+        per_cap = max(1, min(10, int(settings.get("groupBursts") or 3)))
+        round_max = max(per_cap, min(60, int(settings.get("groupRoundMax") or 10)))
+        gmsgs = g.get("messages") or []
+        since_user = 0
+        for mm in reversed(gmsgs):
+            if mm.get("role") == "user":
+                break
+            since_user += 1
+        if since_user >= round_max:
+            return False
+        _cnt = {}
+        for _m in gmsgs[_last_user(gmsgs) + 1:]:
+            if _m.get("role") != "user" and _m.get("authorId"):
+                _cnt[_m["authorId"]] = _cnt.get(_m["authorId"], 0) + 1
+        counts = g.setdefault("turnCounts", {})
+        pool = [x for x in friends if x.get("id") in (g.get("members") or [])
+                and _cnt.get(x.get("id"), 0) < per_cap]
         random.shuffle(pool)
+        pool = pool[:2]
         prev = []
         author = names.get(m.get("authorId"), "某人")
         for speaker in pool[:2]:
@@ -1085,6 +1145,8 @@ def social_tick(uid="local"):
                     changed = True
             except Exception as e:
                 print("[social] 互动失败：", e)
+        if len(keep) != len(st.get("pending") or []):
+            changed = True
         st["pending"] = keep
 
         hour = datetime.datetime.now().hour
@@ -1097,6 +1159,27 @@ def social_tick(uid="local"):
             social["nextMomentAt"] = nxt
             social["lastMomentAt"] = last
             changed = True
+        # 每个人独立的朋友圈排期（没设就跟随全局）
+        if 8 <= hour <= 23:
+            for f in st.get("friends") or []:
+                own = f.get("settings") or {}
+                iv = own.get("momentInterval")
+                if iv is None:
+                    continue          # 跟随全局窗口机制
+                iv = max(300, float(iv))
+                fn = float(f.get("nextMomentAt") or 0)
+                if fn <= 0:
+                    f["nextMomentAt"] = now + iv * (0.5 + random.random())
+                    changed = True
+                    continue
+                if now >= fn:
+                    try:
+                        create_moment_for(st, key, f)
+                    except Exception as e:
+                        print("[social] 单人朋友圈失败：", e)
+                    f["nextMomentAt"] = now + iv * (0.7 + random.random() * 0.8)
+                    changed = True
+
         if 8 <= hour <= 23 and now >= nxt:
             # 一个窗口里安排 3~5 个人发，时间随机打散
             friends_now = [f for f in (st.get("friends") or []) if not f.get("muted")]
@@ -1152,6 +1235,8 @@ def social_tick(uid="local"):
             stamp = today + ":" + slot
             if slot and (st.get("social", {}).get("lastGreet") or "") != stamp:
                 for f in st.get("friends") or []:
+                    if (f.get("settings") or {}).get("greet") is False:
+                        continue
                     if (f.get("lastGreet") or "") == today + slot:
                         continue
                     msgs = f.get("messages") or []
@@ -1212,22 +1297,29 @@ def social_tick(uid="local"):
                 changed = True
             break
 
-        # 主动找人说话
+        # 主动找人说话：安静够久就冒个泡
         if s.get("proactive"):
+            quiet_min = float(s.get("idleMin") or 30) * 2
             for f in st.get("friends") or []:
+                own = f.get("settings") or {}
+                if own.get("proactive") is False:
+                    continue
                 msgs = f.get("messages") or []
                 if not msgs:
                     continue
-                last = msgs[-1]
-                if last.get("role") != "user":
-                    continue
-                idle_min = float(s.get("idleMin") or 20)
-                if (now * 1000 - float(last.get("ts") or 0)) < idle_min * 60000:
+                q = float(own.get("nudgeAfter") or quiet_min)
+                last_ts = float(msgs[-1].get("ts") or 0) / 1000.0
+                if now - last_ts < q * 60:
                     continue
                 if now - float(f.get("lastNudgeAt") or 0) < 3 * 3600:
                     continue
+                hist = []
+                for m in msgs[-6:]:
+                    who = "我" if m.get("role") == "user" else (f.get("name") or "她")
+                    if m.get("text"):
+                        hist.append("%s：%s" % (who, m["text"][:50]))
                 try:
-                    txt = gen_proactive_text(f, last.get("text") or "", s, key)
+                    txt = gen_chat_reply(f, f.get("name"), hist, s, key)
                 except Exception as e:
                     print("[social] 主动消息失败：", e)
                     txt = ""
@@ -1249,13 +1341,30 @@ def social_tick(uid="local"):
                 continue
             if not s.get("groupAutoTalk", True):
                 continue
-            counts = g.get("turnCounts") or {}
             msgs = g.get("messages") or []
+            # 直接数消息，避免计数被旧客户端/合并覆盖
+            _last = -1
+            for _i, _m in enumerate(msgs):
+                if _m.get("role") == "user":
+                    _last = _i
+            counts = {}
+            for _m in msgs[_last + 1:]:
+                if _m.get("role") != "user" and _m.get("authorId"):
+                    counts[_m["authorId"]] = counts.get(_m["authorId"], 0) + 1
             lastm = msgs[-1] if msgs else {}
             if lastm.get("role") == "user":
                 g["turnCounts"] = {}
                 continue
             per_cap = max(1, min(10, int(s.get("groupBursts") or 3)))
+            # 整轮总量上限：你发一句之后，群里总共最多冒这么多条
+            round_max = max(per_cap, min(60, int(s.get("groupRoundMax") or 10)))
+            since_user = 0
+            for m in reversed(msgs):
+                if m.get("role") == "user":
+                    break
+                since_user += 1
+            if since_user >= round_max:
+                continue
             if now - float(g.get("lastSpurtAt") or 0) < 9:
                 continue
             avail = [m for m in members if int(counts.get(m) or 0) < per_cap]

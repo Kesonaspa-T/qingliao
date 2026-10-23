@@ -26,7 +26,9 @@ const tabbar = $('#tabbar');
 
 const NATIVE = !!(window.AndroidChat && window.AndroidChat.start);
 const isDesk = () => window.matchMedia('(min-width: 900px)').matches;
-const APP_BUILD = 'v18';
+const isAndroidWebView = /Android/i.test(navigator.userAgent) && !/Chrome\/\d+\.\d+ (?!.*Mobile)/.test('');
+if (/Android/i.test(navigator.userAgent)) document.documentElement.classList.add('native');
+const APP_BUILD = 'v' + (new URLSearchParams((document.currentScript?.getAttribute('src') || '').split('?')[1] || '').get('v') || 'dev');
 
 const TOKEN_KEY = 'ql.token';
 const SERVER_KEY = 'ql.server';
@@ -39,6 +41,7 @@ function isCloud() { return NATIVE ? !!SERVER : true; }
 function apiFetch(path, opts) {
   const o = opts || {};
   const headers = Object.assign({}, o.headers || {});
+  headers['X-Qingliao-Build'] = APP_BUILD;
   if (TOKEN) headers.Authorization = 'Bearer ' + TOKEN;
   return fetch(SERVER + path, Object.assign({}, o, { headers }));
 }
@@ -112,7 +115,9 @@ const DEFAULT_SETTINGS = {
   delayMax: 30,
   typingFx: true,
   bursts: 5,
-  groupBursts: 10,
+  groupBursts: 3,
+  groupRoundMax: 10,
+  groupAutoTalk: true,
   theme: 'auto',
   proactive: false,
   idleMin: 20,
@@ -159,6 +164,7 @@ function makeGroup(o = {}) {
     id: o.id || uid('g'),
     name: o.name || '群聊',
     avatar: o.avatar || '',
+    prompt: o.prompt || '',
     members: Array.isArray(o.members) ? o.members : [],
     messages: Array.isArray(o.messages) ? o.messages : [],
     unread: 0,
@@ -167,6 +173,21 @@ function makeGroup(o = {}) {
 }
 
 let state = defaultState();
+let pendingEdits = { settings: {}, groups: {} };
+const GROUP_FIELDS = ['name', 'avatar', 'members', 'prompt'];
+
+function changedFields(before, after, fields) {
+  const patch = {};
+  for (const key of fields) {
+    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) patch[key] = after[key];
+  }
+  return patch;
+}
+
+function importEdits(s) {
+  return { settings: { ...s.settings }, importHistory: uid('import'),
+    groups: Object.fromEntries(s.groups.map(g => [g.id, Object.fromEntries(GROUP_FIELDS.map(k => [k, g[k]]))])) };
+}
 const rt = new Map();
 
 let lastTs = 0;
@@ -275,6 +296,7 @@ const Store = {
     }
     const res = await apiFetch('/api/state');
     if (res.status === 401) return { __needLogin: true };
+    if (!res.ok) throw new Error('无法读取服务器状态，请稍后重试');
     return await res.json();
   },
   async save(s) {
@@ -283,19 +305,44 @@ const Store = {
       catch (e) { toast('存储空间满了，清理一下'); }
       return;
     }
+    if (Store.saving) { Store.again = true; return; }
+    Store.saving = true;
+    const edits = JSON.parse(JSON.stringify(pendingEdits));
+    let failed = false;
     try {
       const res = await apiFetch('/api/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(s),
+        body: JSON.stringify({ ...s, _edits: edits }),
       });
       // 保存回执不代表已经读到合并后的状态；lastRev 只能由成功拉取更新。
-      if (!res.ok) toast('保存失败，请稍后重试');
-    } catch (_) {}
+      if (!res.ok) throw new Error('save failed');
+      const clear = (pending, sent) => {
+        for (const key of Object.keys(sent)) {
+          if (JSON.stringify(pending[key]) === JSON.stringify(sent[key])) delete pending[key];
+        }
+      };
+      clear(pendingEdits.settings, edits.settings);
+      for (const [id, patch] of Object.entries(edits.groups)) {
+        if (pendingEdits.groups[id]) clear(pendingEdits.groups[id], patch);
+      }
+      if (edits.importHistory && pendingEdits.importHistory === edits.importHistory) delete pendingEdits.importHistory;
+    } catch (_) {
+      failed = true;
+      toast('保存失败，正在重试');
+    } finally {
+      Store.saving = false;
+      if (failed || Store.again) {
+        Store.again = false;
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => { saveTimer = null; return Store.save(state); }, failed ? 4000 : 0);
+      }
+    }
   },
 };
 
 let saveTimer = null;
+let localRevision = 0;
 function rememberDeleted(ids) {
   // 离线设备可能很久以后才提交旧状态，不能按数量丢弃删除标记。
   state.deleted = [...new Set([...(state.deleted || []), ...ids])];
@@ -325,9 +372,10 @@ function pruneDeleted(s) {
 }
 
 function persist() {
+  localRevision += 1;
   pruneDeleted(state);
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => Store.save(state), 250);
+  saveTimer = setTimeout(() => { saveTimer = null; return Store.save(state); }, 250);
 }
 
 /* ---------------- 主题 / 头像 ---------------- */
@@ -825,13 +873,16 @@ function addComment(momentId, text, replyTo) {
   if (replyTo) c.replyTo = replyTo;
   m.comments.push(c);
 
-  // 被回复的那个人一定要接话
+  // 被回复的那个人一定要接话（无论他是作者还是普通评论者）
   if (replyTo && replyTo !== 'me' && friendById(replyTo)) {
-    state.pending.push({
-      id: uid('p'), kind: 'reply', momentId, by: replyTo,
-      toComment: text.slice(0, 200),
-      dueAt: Date.now() / 1000 + 40 + Math.random() * 360,
-    });
+    const dup = state.pending.some((p) => p.kind === 'reply' && p.momentId === momentId && p.by === replyTo);
+    if (!dup) {
+      state.pending.push({
+        id: uid('p'), kind: 'reply', momentId, by: replyTo,
+        toComment: text.slice(0, 200),
+        dueAt: Date.now() / 1000 + 30 + Math.random() * 240,
+      });
+    }
   }
 
   if (m.authorId && m.authorId !== 'me' && m.authorId !== replyTo) {
@@ -925,7 +976,7 @@ function enqueueReactions(m) {
   if (m.visibility === 'private') return;
   let pool = relatedFriends(m.authorId);
   if (m.visibility === 'relations') pool = pool.filter((f) => (f.relations || []).length > 0);
-  pool = pool.sort(() => Math.random() - 0.5).slice(0, 3);
+  pool = pool.sort(() => Math.random() - 0.5).slice(0, 5);
   const nowSec = Date.now() / 1000;
   for (const f of pool) {
     if (Math.random() < 0.85 && !pendingExists('like', m.id, f.id)) {
@@ -934,7 +985,7 @@ function enqueueReactions(m) {
         dueAt: nowSec + 20 + Math.random() * 600,
       });
     }
-    if (Math.random() < 0.55 && !pendingExists('comment', m.id, f.id)) {
+    if (Math.random() < 0.85 && !pendingExists('comment', m.id, f.id)) {
       state.pending.push({
         id: uid('p'), kind: 'comment', momentId: m.id, by: f.id,
         dueAt: nowSec + 90 + Math.random() * 1500,
@@ -1317,7 +1368,7 @@ function buildMessages(friend, conv, nudge) {
 
   const bursts = isGroup
     ? Math.max(1, Math.min(10, Number(s.groupBursts) || 10))
-    : Math.max(1, Math.min(5, Number(s.bursts) || 5));
+    : Math.max(1, Math.min(5, Number(fs(friend, 'bursts', 5)) || 5));
   if (bursts > 1) {
     sys += `\n\n【发送方式】想说两句以上时，用换行拆成 2~${bursts} 条短消息，每条不超过 20 字；只说一句就只写一句。`;
   }
@@ -1524,8 +1575,19 @@ function updateSendBtn() {
   sendBtn.disabled = false;
 }
 
-function delayFor() {
-  const s = state.settings;
+function fs(friend, key, fallback) {
+  const own = friend && friend.settings ? friend.settings[key] : undefined;
+  if (own !== undefined && own !== null && own !== '') return own;
+  const g = state.settings[key];
+  return g !== undefined ? g : fallback;
+}
+
+function delayFor(friend) {
+  const s = {
+    delayOn: fs(friend, 'delayOn', true),
+    delayMin: fs(friend, 'delayMin', 5),
+    delayMax: fs(friend, 'delayMax', 20),
+  };
   if (!s.delayOn) return 400;
   const min = Math.max(0, Number(s.delayMin) || 0);
   const max = Math.max(min, Number(s.delayMax) || min);
@@ -1544,7 +1606,7 @@ function scheduleReply(kind, conv, isNew) {
   clearTypingFx(r);
   if (active) { setStatus('在线'); updateSendBtn(); }
 
-  let delay = delayFor();
+  let delay = delayFor(kind === 'friend' ? conv : null);
   const waited = Date.now() - r.since;
   const cap = Math.max(Number(state.settings.delayMax) || 30, 45) * 1000;
   if (waited + delay > cap) delay = Math.max(1200, cap - waited);
@@ -1662,6 +1724,7 @@ function pickSpeakers(group) {
 }
 
 async function groupTurn(group) {
+  if (isCloud()) return;
   const key = convKey('group', group.id);
   const r = rtOf(key);
   if (r.phase !== 'idle') { r.queued = true; return; }
@@ -1684,7 +1747,7 @@ async function groupTurn(group) {
       const used = Number(group.turnCounts[fid] || 0);
       if (used >= cap) continue;
 
-      await sleep(delayFor());
+      await sleep(delayFor(f));
       if (r.stopped) break;
 
       if (isActive('group', group.id)) setStatus(f.name + ' 正在输入…');
@@ -1724,7 +1787,7 @@ async function groupTurn(group) {
       const second = others[Math.floor(Math.random() * others.length)];
       if (second) {
         const f2 = friendById(second);
-        await sleep(delayFor());
+        await sleep(delayFor(f2));
         if (!r.stopped && f2) {
           if (isActive('group', group.id)) setStatus(f2.name + ' 正在输入…');
           const h2 = isActive('group', group.id)
@@ -1759,7 +1822,11 @@ function notifyPeer(name, text) {
 }
 
 async function deliver(kind, conv, text, authorId, maxParts) {
-  let limit = kind === 'group' ? (state.settings.groupBursts || 3) : (state.settings.bursts || 5);
+  if (kind === 'group' && isCloud()) return;
+  const owner = kind === 'friend' ? conv : null;
+  let limit = kind === 'group'
+    ? (state.settings.groupBursts || 3)
+    : Math.max(1, Math.min(5, Number(fs(owner, 'bursts', 5)) || 5));
 
   // 群聊硬闸门：以「你上一条发言之后这个人已经说了几条」为准，不看计数器
   if (kind === 'group') {
@@ -1768,8 +1835,10 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     for (let i = conv.messages.length - 1; i >= 0; i -= 1) {
       if (conv.messages[i].role === 'user') { lastUserAt = i; break; }
     }
-    const sent = conv.messages.slice(lastUserAt + 1).filter((m) => m.authorId === authorId && !m.recalled).length;
-    const left = cap - sent;
+    const replies = conv.messages.slice(lastUserAt + 1).filter((m) => m.role !== 'user');
+    const sent = replies.filter((m) => m.authorId === authorId).length;
+    const roundMax = Math.max(1, Math.min(60, Number(state.settings.groupRoundMax) || 10));
+    const left = Math.min(cap - sent, roundMax - replies.length);
     if (left <= 0) return;
     limit = Math.min(limit, left);
   }
@@ -2123,6 +2192,7 @@ async function copyText(text) {
 
 function fillForm() {
   const s = state.settings;
+  settingsFormBase = { ...s };
   $('#fBase').value = s.baseUrl || '';
   $('#fKey').value = s.apiKey || '';
   $('#fModel').value = s.model || '';
@@ -2137,7 +2207,8 @@ function fillForm() {
   $('#fDelayMax').value = s.delayMax ?? 30;
   $('#fTypingFx').checked = !!s.typingFx;
   $('#fBursts').value = s.bursts || 5;
-  $('#fGroupBursts').value = s.groupBursts || 10;
+  $('#fGroupBursts').value = s.groupBursts || 3;
+  const gr = $('#fGroupRound'); if (gr) gr.value = s.groupRoundMax || 10;
   $('#fTheme').value = s.theme || 'auto';
   const freq = Number(s.momentInterval) || 43200;
   const sel = $('#fMomentFreq');
@@ -2164,8 +2235,11 @@ function closeSheet() {
   sheet.setAttribute('aria-hidden', 'true');
 }
 
+let settingsFormBase = null;
+
 function saveForm() {
-  const s = state.settings;
+  const s = { ...state.settings };
+  const before = settingsFormBase || state.settings;
   s.baseUrl = $('#fBase').value.trim();
   s.apiKey = $('#fKey').value.trim();
   s.model = $('#fModel').value.trim();
@@ -2179,11 +2253,16 @@ function saveForm() {
   s.delayMax = Math.max(s.delayMin, Math.min(600, Number($('#fDelayMax').value) || s.delayMin));
   s.typingFx = $('#fTypingFx').checked;
   s.bursts = Math.max(1, Math.min(5, Number($('#fBursts').value) || 5));
-  s.groupBursts = Math.max(1, Math.min(10, Number($('#fGroupBursts').value) || 10));
+  s.groupBursts = Math.max(1, Math.min(10, Number($('#fGroupBursts').value) || 3));
+  const grEl = $('#fGroupRound');
+  if (grEl) s.groupRoundMax = Math.max(1, Math.min(60, Number(grEl.value) || 10));
   s.theme = $('#fTheme').value;
   s.momentInterval = Number($('#fMomentFreq').value) || 43200;
   s.proactive = $('#fProactive').checked;
   s.idleMin = Math.max(3, Number($('#fIdle').value) || 20);
+  const patch = changedFields(before, s, Object.keys(s));
+  Object.assign(state.settings, patch);
+  Object.assign(pendingEdits.settings, patch);
   applyTheme();
   persist();
   closeSheet();
@@ -2266,6 +2345,56 @@ function renderRelations(selected) {
   }
 }
 
+function renderFriendRhythm(target, isMe) {
+  let box = document.getElementById('rhythmBox');
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'group';
+    box.id = 'rhythmBox';
+    box.innerHTML = '<div class="group-title">她自己的节奏（留空=跟随全局）</div>'
+      + '<label class="field"><span>一次最多几条</span><input id="rBursts" type="number" min="1" max="5" placeholder="跟随全局"></label>'
+      + '<label class="field"><span>最少隔几秒</span><input id="rDelayMin" type="number" min="0" max="300" placeholder="跟随全局"></label>'
+      + '<label class="field"><span>最多隔几秒</span><input id="rDelayMax" type="number" min="0" max="300" placeholder="跟随全局"></label>'
+      + '<label class="field"><span>静默多久主动找你（分钟）</span><input id="rNudge" type="number" min="10" max="1440" placeholder="跟随全局"></label>'
+      + '<label class="field"><span>多久发一条朋友圈（小时）</span><input id="rMomentIv" type="number" min="0.2" max="72" step="0.5" placeholder="跟随全局"></label>'
+      + '<label class="field row-inline"><span>会主动找我</span><input id="rProactive" type="checkbox" class="switch"></label>'
+      + '<label class="field row-inline"><span>每天早晚问候</span><input id="rGreet" type="checkbox" class="switch"></label>';
+    const anchor = document.getElementById('relationGroup');
+    anchor.parentNode.insertBefore(box, anchor);
+  }
+  box.style.display = isMe ? 'none' : '';
+  const own = (target && target.settings) || {};
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = (v === undefined || v === null) ? '' : v; };
+  const chk = (id, v, dflt) => { const el = document.getElementById(id); if (el) el.checked = v === undefined ? dflt : !!v; };
+  set('rBursts', own.bursts);
+  set('rDelayMin', own.delayMin);
+  set('rDelayMax', own.delayMax);
+  set('rNudge', own.nudgeAfter);
+  set('rMomentIv', own.momentInterval ? (own.momentInterval / 3600) : undefined);
+  chk('rProactive', own.proactive, true);
+  chk('rGreet', own.greet, true);
+}
+
+function readFriendRhythm() {
+  const num = (id) => {
+    const el = document.getElementById(id);
+    if (!el || el.value === '') return undefined;
+    const n = Number(el.value);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const out = {
+    bursts: num('rBursts'),
+    delayMin: num('rDelayMin'),
+    delayMax: num('rDelayMax'),
+    nudgeAfter: num('rNudge'),
+    momentInterval: (() => { const h = num('rMomentIv'); return h ? Math.round(h * 3600) : undefined; })(),
+    proactive: document.getElementById('rProactive').checked,
+    greet: document.getElementById('rGreet').checked,
+  };
+  Object.keys(out).forEach((k) => { if (out[k] === undefined) delete out[k]; });
+  return out;
+}
+
 function openFriendSheet(friend, mode) {
   friendEditMode = mode || (friend ? 'edit' : 'new');
   editingFriendId = friend ? friend.id : null;
@@ -2293,6 +2422,7 @@ function openFriendSheet(friend, mode) {
     $('#fDm').checked = target.dmMoment !== false;
   }
 
+  renderFriendRhythm(target, isMe);
   friendSheet.classList.add('open');
   friendSheet.setAttribute('aria-hidden', 'false');
 }
@@ -2343,8 +2473,11 @@ $('#btnFSave').addEventListener('click', () => {
     return;
   }
 
+  const rhythm = readFriendRhythm();
+
   if (friendEditMode === 'new') {
     const f = makeFriend({ name, avatar, persona, relations: [] });
+    f.settings = rhythm;
     state.friends.push(f);
     persist();
     closeFriendSheet();
@@ -2361,6 +2494,7 @@ $('#btnFSave').addEventListener('click', () => {
     f.persona = persona;
     f.relations = $$('#relationList input:checked').map((cb) => cb.dataset.id);
     f.dmMoment = $('#fDm').checked;
+    f.settings = readFriendRhythm();
     persist();
     renderChat();
     renderConversations();
@@ -2563,6 +2697,7 @@ if (!document.getElementById('btnBackup')) {
       const data = JSON.parse(await file.text());
       if (!data || !Array.isArray(data.friends)) throw new Error('不是轻聊的备份文件');
       state = migrate(data);
+      pendingEdits = importEdits(state);
       persist();
       renderMe();
       renderConversations();
@@ -2588,7 +2723,7 @@ if (!document.getElementById('btnStatus')) {
       const r = await apiFetch('/api/status');
       const j = await r.json();
       const msg = [
-        '客户端 ' + APP_BUILD + '　服务端 ' + (j.version || '-') + '　rev ' + j.rev,
+        '客户端 ' + APP_BUILD + '　服务端 ' + (j.build || j.version || '-') + '　rev ' + j.rev,
         '好友 ' + j.friends + '　群 ' + j.groups + '　朋友圈 ' + j.moments,
         '上次调度 ' + (j.last_social_at ? new Date(j.last_social_at * 1000).toLocaleString() : '还没跑过'),
       ].join('\n');
@@ -2753,6 +2888,7 @@ async function clientSocialTick(force) {
           changed = true;
         }
       } else if (p.kind === 'groupchat') {
+        if (isCloud()) { state.pending = state.pending.filter((x) => x !== p); continue; }
         const g = groupById(p.targetId);
         if (g) {
           const pool = g.members.map(friendById).filter(Boolean).sort(() => Math.random() - 0.5).slice(0, 2);
@@ -2814,6 +2950,15 @@ async function clientSocialTick(force) {
 function mergeRemote(remote) {
   if (!remote || !Array.isArray(remote.friends)) return false;
   let changed = false;
+  const mergeFields = (local, remoteObject, fields, dirty = {}) => {
+    for (const field of fields) {
+      if (Object.prototype.hasOwnProperty.call(dirty, field) || remoteObject[field] === undefined) continue;
+      if (JSON.stringify(local[field]) !== JSON.stringify(remoteObject[field])) {
+        local[field] = remoteObject[field]; changed = true;
+      }
+    }
+  };
+  mergeFields(state.settings, remote.settings || {}, Object.keys(DEFAULT_SETTINGS), pendingEdits.settings);
 
   if (Array.isArray(remote.deleted) && remote.deleted.length) {
     const merged = new Set([...(state.deleted || []), ...remote.deleted]);
@@ -2824,8 +2969,13 @@ function mergeRemote(remote) {
   if (pruneDeleted(state)) changed = true;
   const mergeMsgs = (local, list, kind) => {
     const have = new Set(local.messages.map((m) => m.id));
+    const byId = new Map(local.messages.map(m => [m.id, m]));
     for (const m of list || []) {
       if (dead.has(m.id)) continue;
+      const existing = byId.get(m.id);
+      if (kind === 'group' && existing && existing.ts !== m.ts) {
+        existing.ts = m.ts; changed = true;
+      }
       if (!have.has(m.id)) {
         local.messages.push(m);
         if (m.role !== 'user' && !isActive(kind, local.id)) local.unread = (local.unread || 0) + 1;
@@ -2845,6 +2995,7 @@ function mergeRemote(remote) {
     if (dead.has(rg.id)) continue;
     const lg = groupById(rg.id);
     if (!lg) { state.groups.push(normalizeGroup(rg)); changed = true; continue; }
+    mergeFields(lg, rg, GROUP_FIELDS, pendingEdits.groups[rg.id]);
     mergeMsgs(lg, rg.messages, 'group');
   }
   for (const rm of remote.moments || []) {
@@ -2866,8 +3017,9 @@ function mergeRemote(remote) {
 let syncing = false;
 
 async function syncTick() {
-  if (!isCloud() || !TOKEN || syncing) return;
+  if (!isCloud() || !TOKEN || syncing || Store.saving || saveTimer) return;
   syncing = true;
+  const startedAt = localRevision;
   try {
     const r = await apiFetch('/api/rev');
     if (!r.ok) return;
@@ -2876,6 +3028,7 @@ async function syncTick() {
     const res = await apiFetch('/api/state');
     if (!res.ok) return;
     const remote = await res.json();
+    if (localRevision !== startedAt || Store.saving || saveTimer) return;
     if (mergeRemote(remote)) {
       if (state.conv && !currentConv()) closeChat();
       const cur = $$('button', tabbar).find((b) => b.classList.contains('active'));
@@ -2884,6 +3037,7 @@ async function syncTick() {
       if (tab === 'msg') renderConversations();
       if (tab === 'contacts') renderContacts();
       if (pageChat.classList.contains('open') && currentConv()) {
+        $('#peerName').textContent = currentConv().name;
         const r = rtOf(convKey(state.conv.kind, state.conv.id));
         if (r.phase === 'idle') { renderChat(); scrollBottom(true); }
       }
@@ -2930,10 +3084,11 @@ async function doAuth(kind) {
     const local = localStorage.getItem('qingliao.state');
     if (local) {
       try {
+        const imported = migrate(JSON.parse(local));
         await fetch(SERVER + '/api/state', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + j.token },
-          body: local,
+          body: JSON.stringify({ ...imported, _edits: importEdits(imported) }),
         });
       } catch (_) {}
     }
@@ -2977,9 +3132,11 @@ $('#btnLogout').addEventListener('click', () => {
 /* ---------------- 群资料 ---------------- */
 
 let groupInfoId = null;
+let groupInfoBase = null;
 
 function openGroupInfo(g) {
   groupInfoId = g.id;
+  groupInfoBase = JSON.parse(JSON.stringify(g));
   $('#fGIName').value = g.name || '';
   $('#fGIPrompt').value = g.prompt || '';
   const box = $('#groupInfoMembers');
@@ -3014,9 +3171,11 @@ $('#btnGISave').addEventListener('click', () => {
   const name = $('#fGIName').value.trim();
   const members = $$('#groupInfoMembers input:checked').map((cb) => cb.dataset.id);
   if (members.length < 2) return toast('至少留两个人');
-  g.name = name || g.name;
-  g.members = members;
-  g.prompt = $('#fGIPrompt').value.trim();
+  const patch = changedFields(groupInfoBase || g, {
+    ...g, name: name || g.name, members, prompt: $('#fGIPrompt').value.trim(),
+  }, GROUP_FIELDS);
+  Object.assign(g, patch);
+  pendingEdits.groups[g.id] = Object.assign(pendingEdits.groups[g.id] || {}, patch);
   persist();
   renderContacts();
   renderConversations();
@@ -3220,6 +3379,7 @@ function normalizeFriend(raw) {
 
 function normalizeGroup(raw) {
   const g = makeGroup({
+    ...raw,
     id: raw && raw.id,
     name: raw && raw.name,
     members: raw && raw.members,
@@ -3228,6 +3388,7 @@ function normalizeGroup(raw) {
   });
   g.unread = Number(raw && raw.unread) || 0;
   g.messages = (g.messages || []).map((m) => ({
+    ...m,
     id: m.id || uid('m'),
     role: m.role === 'user' ? 'user' : 'peer',
     authorId: m.authorId,
@@ -3286,6 +3447,7 @@ async function init() {
     try {
       const res = await apiFetch('/api/state');
       if (res.status === 401) { showLogin('登录过期了，重新登录一下'); return; }
+      if (!res.ok) throw new Error('服务器无法读取聊天数据，请稍后重试');
       raw = await res.json();
       lastRev = Number(raw.rev) || 0;
     } catch (e) {
