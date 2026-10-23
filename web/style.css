@@ -98,12 +98,14 @@ html[data-theme="dark"] body {
   }
 }
 
-/* 状态栏 */
+/* 状态栏：这个「模拟状态栏」已经全局隐藏。
+   手机上真机自带系统状态栏，再叠一条假的既多余又占 42px；
+   元素保留在 DOM 里只是为了 app.js 的 startClock() 不拿到 null。 */
 .statusbar {
+  display: none !important;
   flex: 0 0 auto;
   height: 42px;
   padding: 6px 24px 0;
-  display: flex;
   align-items: center;
   justify-content: space-between;
   font-size: 13px;
