@@ -1,0 +1,44 @@
+# ---- 数据（绝对不要提交：含聊天记录、账号密码哈希、API Key）----
+/data/
+/backups/
+*.corrupt-*
+/pre-*.json
+
+# ---- 部署私钥 / 证书 ----
+.deploy/
+*.pem
+*.key
+
+# ---- 构建产物 ----
+*.apk
+*.aab
+*.zip
+*.tar.gz
+*.dmg
+/desktop/*.app/
+/desktop/mac/*-bin
+/desktop/mac/*-x86
+/desktop/mac/*-universal
+/desktop/icon.iconset/
+/desktop/*.icns
+/android/assets/
+/android/build/
+/android/build.sh.bak
+
+# ---- 签名文件（保留在本地）----
+*.keystore
+*.jks
+*.idsig
+
+# ---- 杂项 ----
+__pycache__/
+*.pyc
+.DS_Store
+.cache/
+tmp/
+node_modules/
+.venv/
+
+# 打包出来的 .app 副本
+/desktop/*含修复*/
+/desktop/*.app

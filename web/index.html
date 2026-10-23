@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f7f8fa">
+<title>轻聊</title>
+<link rel="stylesheet" href="style.css?v=15">
+<link rel="manifest" href="manifest.webmanifest">
+</head>
+<body>
+
+<section class="login" id="login" hidden>
+  <div class="login-box">
+    <div class="login-logo">轻</div>
+    <div class="login-title">轻聊</div>
+    <input id="lgServer" placeholder="服务器地址（留空=当前站点）" autocapitalize="off" autocorrect="off">
+    <input id="lgName" placeholder="名字">
+    <input id="lgPass" type="password" placeholder="密码（至少 6 位）">
+    <button id="lgLogin">登录</button>
+    <button id="lgReg">注册新账号</button>
+    <div class="lg-hint" id="lgMsg"></div>
+  </div>
+</section>
+
+<div class="stage">
+  <div class="phone" id="phone">
+
+    <div class="statusbar">
+      <span id="clock">21:30</span>
+      <span class="sb-right">
+        <svg viewBox="0 0 18 12" class="sb-icon"><rect x="0" y="8" width="2.4" height="4" rx=".8"/><rect x="4" y="6" width="2.4" height="6" rx=".8"/><rect x="8" y="3.5" width="2.4" height="8.5" rx=".8"/><rect x="12" y="1" width="2.4" height="11" rx=".8"/></svg>
+        <svg viewBox="0 0 16 12" class="sb-icon"><path d="M8 10.6 1.2 4.4a9.6 9.6 0 0 1 13.6 0L8 10.6z"/></svg>
+        <svg viewBox="0 0 24 12" class="sb-icon"><rect x=".8" y="1" width="19" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="2.6" y="2.8" width="13" height="6.4" rx="1.6"/><path d="M21.4 4.2v3.6a2 2 0 0 0 0-3.6z"/></svg>
+      </span>
+    </div>
+
+    <div class="pages">
+
+      <!-- 消息 -->
+      <section class="page" id="pageMsg">
+        <header class="topbar">
+          <h1>消息</h1>
+          <button class="icon-btn" id="btnMsgAdd" aria-label="新建朋友">＋</button>
+        </header>
+        <div class="scroll" id="convList"></div>
+      </section>
+
+      <!-- 通讯录 -->
+      <section class="page" id="pageContacts" hidden>
+        <header class="topbar">
+          <h1>通讯录</h1>
+          <button class="icon-btn" id="btnAddFriend" aria-label="新建朋友">＋</button>
+        </header>
+        <div class="scroll" id="contactList"></div>
+      </section>
+
+      <!-- 我的 -->
+      <section class="page" id="pageMe" hidden>
+        <header class="topbar"><h1>我的</h1></header>
+        <div class="scroll">
+          <button class="me-hero" id="meHero">
+            <div class="avatar big" id="meAvatar">我</div>
+            <div class="me-info">
+              <div class="me-name" id="meName">我</div>
+              <div class="me-sub">点这里改名字和头像</div>
+            </div>
+            <span class="chev">›</span>
+          </button>
+
+          <div class="menu-group">
+            <button class="menu-item" id="btnNewFriend"><span>新建朋友</span><b>＋</b></button>
+            <button class="menu-item" id="btnNewGroup"><span>新建群聊</span><b>＋</b></button>
+            <button class="menu-item" id="btnSettings"><span>设置</span><b>›</b></button>
+            <button class="menu-item" id="btnExportAll"><span>导出聊天记录</span><b>›</b></button>
+            <button class="menu-item" id="btnLogout"><span>退出登录</span><b>›</b></button>
+          </div>
+
+          <p class="footnote" id="footnote">所有数据都存在这台设备上，不会上传到别处。</p>
+        </div>
+      </section>
+
+      <!-- 朋友圈 -->
+      <section class="page" id="pageMoments" hidden>
+        <header class="topbar">
+          <h1>朋友圈</h1>
+          <button class="icon-btn" id="btnNewMoment" aria-label="发朋友圈">＋</button>
+        </header>
+        <div class="scroll" id="momentList"></div>
+      </section>
+
+      <!-- 聊天（覆盖页） -->
+      <section class="chat-page" id="pageChat">
+        <header class="nav">
+          <button class="nav-btn" id="btnBack" aria-label="返回">
+            <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+          </button>
+          <div class="peer-info">
+            <div class="peer-name" id="peerName">林小满</div>
+            <div class="peer-status" id="peerStatus">在线</div>
+          </div>
+          <button class="nav-btn nav-dots" id="btnFriendInfo" aria-label="资料">
+            <svg viewBox="0 0 24 24" class="fill"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+          </button>
+        </header>
+
+        <main class="chat" id="chat"></main>
+
+        <button class="fab" id="scrollFab" hidden aria-label="回到最新">
+          <svg viewBox="0 0 24 24"><path d="M6 10l6 6 6-6"/></svg>
+          <i id="fabBadge" hidden>1</i>
+        </button>
+
+        <div class="emoji-panel" id="emojiPanel" hidden></div>
+
+        <footer class="composer">
+          <button class="tool" id="btnEmoji" aria-label="表情">
+            <svg viewBox="0 0 24 24" class="ic">
+              <circle cx="12" cy="12" r="9.1"/>
+              <circle cx="8.7" cy="9.9" r="1.15" fill="currentColor" stroke="none"/>
+              <circle cx="15.3" cy="9.9" r="1.15" fill="currentColor" stroke="none"/>
+              <path d="M7.9 14.2c.9 1.7 2.3 2.6 4.1 2.6s3.2-.9 4.1-2.6"/>
+            </svg>
+          </button>
+          <textarea id="input" rows="1" placeholder="说点什么…" autocomplete="off"></textarea>
+          <button class="tool" id="btnImage" aria-label="图片">
+            <svg viewBox="0 0 24 24" class="ic">
+              <rect x="3.4" y="5.4" width="17.2" height="13.2" rx="3"/>
+              <circle cx="8.6" cy="10.2" r="1.4"/>
+              <path d="M4.6 17.4l4.5-4.3 3.1 2.9 2.6-2.1 4.6 3.9"/>
+            </svg>
+          </button>
+          <button class="send" id="btnSend">发送</button>
+        </footer>
+      </section>
+    </div>
+
+    <div class="desk-empty desktop-only" id="deskEmpty">选择左侧的会话开始聊天</div>
+
+    <nav class="tabbar" id="tabbar">
+      <button data-tab="msg" class="active">
+        <svg viewBox="0 0 24 24"><path d="M20.5 11.6c0 4.1-3.8 7.4-8.5 7.4-1 0-2-.2-2.9-.5L4 20.2l1.3-3.4C4 15.4 3.5 13.6 3.5 11.6c0-4.1 3.8-7.4 8.5-7.4s8.5 3.3 8.5 7.4z"/></svg>
+        <span>消息</span>
+      </button>
+      <button data-tab="contacts">
+        <svg viewBox="0 0 24 24"><circle cx="9.2" cy="8" r="3.4"/><path d="M3.4 19.2c0-3.2 2.6-5.4 5.8-5.4s5.8 2.2 5.8 5.4"/><circle cx="17.2" cy="9" r="2.4"/><path d="M15.4 14.4c2.8.1 4.8 1.9 4.8 4.4"/></svg>
+        <span>通讯录</span>
+      </button>
+      <button data-tab="moments">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M12 3.4l2.6 6.4 6.9.3-5.4 4.3 1.9 6.6L12 17.4 6 21l1.9-6.6-5.4-4.3 6.9-.3z"/></svg>
+        <span>朋友圈</span>
+      </button>
+      <button data-tab="me">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.8 20c0-3.6 3.2-6 7.2-6s7.2 2.4 7.2 6"/></svg>
+        <span>我的</span>
+      </button>
+    </nav>
+
+    <input type="file" id="fileInput" accept="image/*" hidden>
+
+    <!-- 设置 -->
+    <section class="sheet" id="sheet" aria-hidden="true">
+      <header class="sheet-nav">
+        <button class="text-btn" id="btnSheetClose">关闭</button>
+        <span class="sheet-title">设置</span>
+        <button class="text-btn primary" id="btnSheetSave">完成</button>
+      </header>
+
+      <div class="sheet-body">
+        <div class="group">
+          <div class="group-title">接哪个 AI</div>
+          <div class="chips" id="modelChips">
+            <button type="button" class="chip" data-model="deepseek-flash">deepseek-flash</button>
+            <button type="button" class="chip" data-model="deepseek-v4-pro">deepseek-v4-pro</button>
+          </div>
+          <label class="field"><span>Base URL</span><input id="fBase" placeholder="https://api.deepseek.com"></label>
+          <label class="field"><span>API Key</span><input id="fKey" type="password" placeholder="sk-..."></label>
+          <label class="field"><span>模型</span><input id="fModel" placeholder="deepseek-flash"></label>
+          <label class="field">
+            <span>思考模式</span>
+            <select id="fThinking">
+              <option value="off">关闭（回得快）</option>
+              <option value="low">低</option>
+              <option value="high">高</option>
+              <option value="max">最大</option>
+            </select>
+          </label>
+          <label class="field"><span>温度</span><input id="fTemp" type="range" min="0" max="1.5" step="0.1"><b id="fTempOut">0.9</b></label>
+          <label class="field"><span>记忆条数</span><input id="fCtx" type="number" min="6" max="2000" step="10"></label>
+          <p class="hint" id="ctxHint">deepseek-flash 上下文 1M token，塞得下很多条。</p>
+          <label class="field row-inline"><span>让她看图</span><input id="fVision" type="checkbox" class="switch"></label>
+          <label class="field row-inline"><span>联网搜索</span><input id="fSearch" type="checkbox" class="switch"></label>
+          <p class="hint" id="searchHint">打开后她遇到不知道的事会自己上网查（DeepSeek 的 Search 接口，按次计费，很便宜）。</p>
+          <div class="row-btns">
+            <button type="button" class="ghost" id="btnTest">测试连接</button>
+          </div>
+          <p class="hint">DeepSeek 用 <code>https://api.deepseek.com</code>。Ollama 用 <code>http://localhost:11434/v1</code>。</p>
+        </div>
+
+        <div class="group">
+          <div class="group-title">回复节奏</div>
+          <label class="field row-inline"><span>随机延迟</span><input id="fDelayOn" type="checkbox" class="switch"></label>
+          <label class="field"><span>最短（秒）</span><input id="fDelayMin" type="number" min="0" max="600" step="1"></label>
+          <label class="field"><span>最长（秒）</span><input id="fDelayMax" type="number" min="0" max="600" step="1"></label>
+          <label class="field row-inline"><span>正在输入特效</span><input id="fTypingFx" type="checkbox" class="switch"></label>
+          <label class="field"><span>私聊最多几条</span><input id="fBursts" type="number" min="1" max="5" step="1"></label>
+          <label class="field"><span>群聊最多几条</span><input id="fGroupBursts" type="number" min="1" max="10" step="1"></label>
+          <p class="hint">她一次回复会拆成 1 到这么多条气泡。群聊里 @ 谁，谁就接着说。</p>
+        </div>
+
+        <div class="group">
+          <div class="group-title">其他</div>
+          <label class="field">
+            <span>主题</span>
+            <select id="fTheme">
+              <option value="auto">跟随系统</option>
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>朋友圈频率</span>
+            <select id="fMomentFreq">
+              <option value="86400">一天一条</option>
+              <option value="43200">半天一条</option>
+              <option value="21600">6 小时一条</option>
+              <option value="7200">2 小时一条</option>
+              <option value="3600">1 小时一条</option>
+            </select>
+          </label>
+          <label class="field row-inline"><span>她主动找你</span><input id="fProactive" type="checkbox" class="switch"></label>
+          <label class="field"><span>空闲多少分钟后</span><input id="fIdle" type="number" min="3" max="180" step="1"></label>
+          <div class="row-btns">
+            <button type="button" class="ghost danger-text" id="btnClearAll">清空所有聊天</button>
+            <button type="button" class="ghost danger-text" id="btnWipe">删除所有数据</button>
+          </div>
+        </div>
+
+        <p class="footnote">数据存在本机，不会上传到别处。</p>
+      </div>
+    </section>
+
+    <!-- 朋友资料 / 新建朋友 -->
+    <section class="sheet" id="friendSheet" aria-hidden="true">
+      <header class="sheet-nav">
+        <button class="text-btn" id="btnFClose">关闭</button>
+        <span class="sheet-title" id="friendSheetTitle">朋友资料</span>
+        <button class="text-btn primary" id="btnFSave">保存</button>
+      </header>
+
+      <div class="sheet-body">
+        <div class="group">
+          <div class="avatar-row">
+            <label class="avatar-pick" for="fFAvatarInput">
+              <div class="ap-img" id="fFAvatarPreview">她</div>
+              <div class="ap-label">点我换头像</div>
+              <input type="file" id="fFAvatarInput" accept="image/*" hidden>
+            </label>
+          </div>
+          <label class="field"><span>名字</span><input id="fFName" placeholder="她叫什么"></label>
+          <label class="field col">
+            <span>人设</span>
+            <textarea id="fFPersona" rows="9"></textarea>
+          </label>
+        </div>
+
+        <div class="group" id="relationGroup">
+          <div class="group-title">和谁算好友（影响朋友圈给谁看、谁来评论）</div>
+          <div id="relationList"></div>
+          <label class="field row-inline"><span>会私聊聊我的朋友圈</span><input id="fDm" type="checkbox" class="switch"></label>
+        </div>
+
+        <div class="group">
+          <div class="group-title">不想写？套个模板</div>
+          <div class="chips" id="presetChips">
+            <button type="button" class="chip" data-preset="warm">温柔型</button>
+            <button type="button" class="chip" data-preset="cool">冷淡型</button>
+            <button type="button" class="chip" data-preset="sunny">活泼型</button>
+            <button type="button" class="chip" data-preset="bookish">文艺型</button>
+          </div>
+          <p class="hint">套模板会覆盖上面的人设文字，名字也会跟着改。改完记得点保存。</p>
+        </div>
+
+        <div class="row-btns" id="friendDanger">
+          <button type="button" class="ghost danger-text" id="btnFDelete">删除这个人</button>
+        </div>
+
+        <p class="footnote">每个人的聊天记录是分开存的。</p>
+      </div>
+    </section>
+
+    <!-- 新建群聊 -->
+    <section class="sheet" id="groupSheet" aria-hidden="true">
+      <header class="sheet-nav">
+        <button class="text-btn" id="btnGClose">关闭</button>
+        <span class="sheet-title">新建群聊</span>
+        <button class="text-btn primary" id="btnGCreate">创建</button>
+      </header>
+      <div class="sheet-body">
+        <div class="group">
+          <label class="field"><span>群名</span><input id="fGName" placeholder="随便起个"></label>
+        </div>
+        <div class="group">
+          <div class="group-title">拉谁进来</div>
+          <div id="groupMembers"></div>
+        </div>
+        <p class="hint">至少选两个人。群里的她们能看见彼此说的话。</p>
+      </div>
+    </section>
+
+    <!-- 发朋友圈 -->
+    <section class="sheet" id="momentSheet" aria-hidden="true">
+      <header class="sheet-nav">
+        <button class="text-btn" id="btnMClose">关闭</button>
+        <span class="sheet-title">发朋友圈</span>
+        <button class="text-btn primary" id="btnMPost">发布</button>
+      </header>
+      <div class="sheet-body">
+        <div class="group">
+          <label class="field col">
+            <textarea id="fMomentText" rows="6" placeholder="说点什么…"></textarea>
+          </label>
+        </div>
+        <p class="hint">发出去之后，和你是好友的人会来点赞、评论，可能过几分钟，也可能过一小时。</p>
+      </div>
+    </section>
+
+    <!-- 群资料 -->
+    <section class="sheet" id="groupInfoSheet" aria-hidden="true">
+      <header class="sheet-nav">
+        <button class="text-btn" id="btnGIClose">关闭</button>
+        <span class="sheet-title">群聊资料</span>
+        <button class="text-btn primary" id="btnGISave">保存</button>
+      </header>
+      <div class="sheet-body">
+        <div class="group">
+          <label class="field"><span>群名</span><input id="fGIName"></label>
+        </div>
+        <div class="group">
+          <div class="group-title">成员</div>
+          <div id="groupInfoMembers"></div>
+        </div>
+        <div class="group">
+          <div class="group-title">群设定（她们在这个群里怎么说话）</div>
+          <label class="field col">
+            <textarea id="fGIPrompt" rows="5" placeholder="比如：这是个损友群，说话随意、互相拆台，不超过两句。"></textarea>
+          </label>
+        </div>
+        <div class="row-btns">
+          <button type="button" class="ghost danger-text" id="btnGIDelete">删除并退出群聊</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="msg-menu" id="msgMenu" hidden>
+      <button data-act="copy">复制</button>
+      <button data-act="regen">重新生成</button>
+      <button data-act="del" class="danger-text">删除</button>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+
+  </div>
+</div>
+
+<script src="app.js?v=15"></script>
+</body>
+</html>
