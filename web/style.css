@@ -284,6 +284,7 @@ html[data-theme="dark"] .bubble.error { background: #3a2224; color: #ff9b93; bor
 
 /* 输入区 */
 .composer {
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   align-items: flex-end;
@@ -362,6 +363,42 @@ html[data-theme="dark"] .bubble.error { background: #3a2224; color: #ff9b93; bor
   border-top: .5px solid var(--line);
 }
 .emoji-panel[hidden] { display: none; }
+
+/* @ 提及：输入 @ 后自动弹出的群成员选择 */
+.mention-pop {
+  position: absolute;
+  left: 8px; right: 8px;
+  bottom: calc(100% + 2px);
+  max-height: min(232px, 42vh);
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 14px;
+  background: var(--card);
+  border: .5px solid var(--line);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .16);
+  z-index: 30;
+  -webkit-overflow-scrolling: touch;
+}
+.mention-pop[hidden] { display: none; }
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 14.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.mention-item.active { background: rgba(18, 183, 245, .13); }
+.mention-item .avatar { width: 26px; height: 26px; border-radius: 8px; font-size: 12px; }
+.mention-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-hint { padding: 6px 10px 2px; color: var(--sub); font-size: 12px; }
 .emoji-panel button {
   height: 38px;
   border: 0; border-radius: 10px;
@@ -834,6 +871,12 @@ html.native .phone {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.conv-muted {
+  flex: 0 0 auto;
+  width: 15px; height: 15px;
+  opacity: .5;
+  color: var(--sub);
 }
 .unread {
   flex: 0 0 auto;

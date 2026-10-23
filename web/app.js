@@ -208,6 +208,7 @@ function makeGroup(o = {}) {
     prompt: o.prompt || '',
     members: Array.isArray(o.members) ? o.members : [],
     messages: Array.isArray(o.messages) ? o.messages : [],
+    muted: !!o.muted,
     unread: 0,
     createdAt: o.createdAt || Date.now(),
   };
@@ -215,7 +216,7 @@ function makeGroup(o = {}) {
 
 let state = defaultState();
 let pendingEdits = { settings: {}, groups: {}, friends: {} };
-const GROUP_FIELDS = ['name', 'avatar', 'members', 'prompt'];
+const GROUP_FIELDS = ['name', 'avatar', 'members', 'prompt', 'muted'];
 const FRIEND_FIELDS = ['name', 'avatar', 'persona', 'relations', 'dmMoment'];
 
 function changedFields(before, after, fields) {
@@ -625,7 +626,14 @@ function renderConversations() {
     preview.textContent = convPreview(data, kind);
     bottom.append(preview);
 
-    if (data.unread > 0) {
+    if (kind === 'group' && data.muted) {
+      // 免打扰：不冒红点，只留一个小标记
+      const mute = document.createElement('span');
+      mute.className = 'conv-muted';
+      mute.title = '消息免打扰';
+      mute.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 8.5a6 6 0 0 1 12 0c0 4 1.4 5.4 1.4 5.4H4.6S6 12.5 6 8.5z"/><path d="M9.8 17.6a2.4 2.4 0 0 0 4.4 0"/><path d="M4 4l16 16"/></svg>';
+      bottom.append(mute);
+    } else if (data.unread > 0) {
       const badge = document.createElement('i');
       badge.className = 'unread';
       badge.textContent = data.unread > 99 ? '99+' : String(data.unread);
@@ -725,7 +733,8 @@ function renderMe() {
 }
 
 function renderTabBadge() {
-  const unreadChats = [...state.friends, ...state.groups].reduce((n, c) => n + (c.unread || 0), 0);
+  const unreadChats = [...state.friends, ...state.groups]
+    .reduce((n, c) => n + ((c.muted ? 0 : (c.unread || 0))), 0);
   const btn = tabbar.querySelector('[data-tab="msg"]');
   let badge = btn.querySelector('.tbadge');
   if (!unreadChats) {
@@ -1104,6 +1113,7 @@ function openChat(kind, id) {
   if (r.phase === 'streaming' || r.phase === 'waiting') setStatus('对方正在输入…');
 
   startClock();
+  closeMention();
   if (!COARSE) inputEl.focus();
   persist();
 }
@@ -1112,6 +1122,7 @@ function closeChat() {
   pageChat.classList.remove('open');
   phone.classList.remove('chat-open');
   state.conv = null;
+  closeMention();
   renderConversations();
   persist();
 }
@@ -2059,6 +2070,7 @@ async function send(raw) {
   state.drafts[convKey(kind, conv.id)] = '';
   autosize();
   closeEmoji();
+  closeMention();
   lastActivity = Date.now();
   if (kind === 'group' && isCloud()) saveHint = 'social';   // 让服务器马上接话
   persist();
@@ -2100,8 +2112,132 @@ function restoreDraft() {
   autosize();
 }
 
+/* ---------------- @ 提及群成员 ---------------- */
+
+const mentionPop = $('#mentionPop');
+let mentionCtx = null;      // { at, query, pos } —— 当前光标前那个 @ 的位置
+let mentionItems = [];
+let mentionIndex = 0;
+
+function mentionMembers() {
+  if (!state.conv || state.conv.kind !== 'group') return [];
+  const conv = currentConv();
+  if (!conv) return [];
+  return (conv.members || []).map(friendById).filter(Boolean);
+}
+
+/** 光标是不是正停在一个「还没写完的 @」后面。 */
+function mentionContext() {
+  if (document.activeElement !== inputEl) return null;
+  const pos = inputEl.selectionStart;
+  if (pos == null || pos !== inputEl.selectionEnd) return null;
+  const before = inputEl.value.slice(0, pos);
+  const at = before.lastIndexOf('@');
+  if (at < 0) return null;
+  // @ 必须在开头或紧跟空白，避免把邮箱之类的东西也当成提及
+  if (at > 0 && !/[\s\n]/.test(before[at - 1])) return null;
+  const query = before.slice(at + 1);
+  if (query.length > 24) return null;
+  if (/[\s@]/.test(query)) return null;    // 打了空格就是不要提及了
+  return { at, query, pos };
+}
+
+function closeMention() {
+  mentionCtx = null;
+  mentionItems = [];
+  mentionIndex = 0;
+  if (mentionPop) { mentionPop.hidden = true; mentionPop.textContent = ''; }
+}
+
+function paintMention() {
+  if (!mentionPop) return;
+  mentionPop.textContent = '';
+  if (!mentionItems.length) { mentionPop.hidden = true; return; }
+  const hint = document.createElement('div');
+  hint.className = 'mention-hint';
+  hint.textContent = '选一个人 @ 她';
+  mentionPop.append(hint);
+  mentionItems.forEach((f, i) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'mention-item' + (i === mentionIndex ? ' active' : '');
+    row.dataset.id = f.id;
+    row.append(avatarEl(f));
+    const name = document.createElement('span');
+    name.className = 'mention-name';
+    name.textContent = f.name;
+    row.append(name);
+    // 用 mousedown 里 preventDefault，点的时候输入框不会先失焦
+    row.addEventListener('mousedown', (e) => e.preventDefault());
+    row.addEventListener('click', (e) => { e.preventDefault(); pickMention(f); });
+    mentionPop.append(row);
+  });
+  mentionPop.hidden = false;
+  const active = mentionPop.querySelector('.mention-item.active');
+  if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
+}
+
+/** 每次输入 / 移动光标都重算一次，决定弹不弹、弹谁。 */
+function updateMentionPicker() {
+  const ctx = mentionContext();
+  if (!ctx) { closeMention(); return; }
+  const members = mentionMembers();
+  if (!members.length) { closeMention(); return; }
+  const q = ctx.query.trim().toLowerCase();
+  const items = q
+    ? members.filter((f) => (f.name || '').toLowerCase().includes(q))
+    : members.slice();
+  if (!items.length) { closeMention(); return; }
+  // 同一个人被同一次输入反复筛出来时保持高亮不跳
+  const keepId = mentionItems[mentionIndex] && mentionItems[mentionIndex].id;
+  mentionCtx = ctx;
+  mentionItems = items;
+  const kept = keepId ? items.findIndex((f) => f.id === keepId) : -1;
+  mentionIndex = kept >= 0 ? kept : 0;
+  paintMention();
+}
+
+function pickMention(f) {
+  const ctx = mentionCtx;
+  if (!ctx || !f || !f.name) { closeMention(); return; }
+  const value = inputEl.value;
+  const insert = '@' + f.name + ' ';
+  const after = value.slice(ctx.pos);
+  inputEl.value = value.slice(0, ctx.at) + insert + after;
+  const caret = ctx.at + insert.length;
+  closeMention();
+  try { inputEl.focus(); inputEl.setSelectionRange(caret, caret); } catch (_) {}
+  autosize();
+  // 走一遍正常的 input 流程：存草稿、按钮状态
+  inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/** 返回 true 表示这个按键被选择器吃掉了，别再触发发送。 */
+function mentionKeydown(e) {
+  if (!mentionCtx || !mentionItems.length) return false;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    mentionIndex = (mentionIndex + step + mentionItems.length) % mentionItems.length;
+    paintMention();
+    e.preventDefault();
+    return true;
+  }
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    pickMention(mentionItems[mentionIndex]);
+    e.preventDefault();
+    return true;
+  }
+  if (e.key === 'Escape') {
+    closeMention();
+    e.preventDefault();
+    return true;
+  }
+  return false;
+}
+
 inputEl.addEventListener('input', () => {
   autosize();
+  updateMentionPicker();
   clearTimeout(draftTimer);
   draftTimer = setTimeout(() => {
     const conv = currentConv();
@@ -2111,7 +2247,14 @@ inputEl.addEventListener('input', () => {
   }, 400);
 });
 
+inputEl.addEventListener('blur', () => { setTimeout(closeMention, 120); });
+inputEl.addEventListener('click', () => { setTimeout(updateMentionPicker, 0); });
+inputEl.addEventListener('keyup', (e) => {
+  if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) updateMentionPicker();
+});
+
 inputEl.addEventListener('keydown', (e) => {
+  if (mentionKeydown(e)) return;
   if (e.key !== 'Enter') return;
   if (e.isComposing || e.shiftKey) return;
   if (COARSE) return;
@@ -2150,7 +2293,7 @@ for (const emo of EMOJIS) {
   emojiPanel.append(b);
 }
 
-function openEmoji() { emojiPanel.hidden = false; scrollBottom(true); }
+function openEmoji() { closeMention(); emojiPanel.hidden = false; scrollBottom(true); }
 function closeEmoji() { emojiPanel.hidden = true; }
 
 $('#btnEmoji').addEventListener('click', () => {
@@ -2591,6 +2734,7 @@ function openFriendSheet(friend, mode) {
 }
 
 function closeFriendSheet() {
+  blurInside(friendSheet);
   friendSheet.classList.remove('open');
   friendSheet.setAttribute('aria-hidden', 'true');
 }
@@ -2788,7 +2932,14 @@ function openMomentSheet() {
   setTimeout(() => $('#fMomentText').focus(), 200);
 }
 
+/** 关弹层时把焦点还回去，安卓上输入法才会跟着收起。 */
+function blurInside(el) {
+  const a = document.activeElement;
+  if (el && a && el.contains(a) && a.blur) { try { a.blur(); } catch (_) {} }
+}
+
 function closeMomentSheet() {
+  blurInside(momentSheet);
   momentSheet.classList.remove('open');
   momentSheet.setAttribute('aria-hidden', 'true');
 }
@@ -3239,6 +3390,31 @@ function mergeRemote(remote) {
   return result;
 }
 
+/* 用户正在打字（尤其是写朋友圈）的时候，别因为同步把界面重排：
+   安卓上输入法很容易被这种布局变动顶掉，键盘会自己收起来。 */
+let deferredRender = false;
+
+function anySheetOpen() {
+  return !!document.querySelector('.sheet.open');
+}
+
+function flushDeferredRender() {
+  if (!deferredRender) return;
+  deferredRender = false;
+  try {
+    renderConversations();
+    renderMoments();
+    renderContacts();
+    if (pageChat.classList.contains('open') && currentConv()) {
+      rememberScroll();
+      renderChat();
+      restoreScrollIfNeeded();
+    }
+  } catch (e) {
+    console.error('[render] 补刷新失败', e);
+  }
+}
+
 function chatCounts() {
   let n = 0;
   for (const c of state.friends || []) n += (c.messages || []).length;
@@ -3382,19 +3558,24 @@ async function syncTick(signal, force) {
   const merged = mergeRemote(remote);
   const grew = chatCounts() !== before;
   if (merged.changed || grew) {
-    if (state.conv && !currentConv()) closeChat();
-    const cur = $$('button', tabbar).find((b) => b.classList.contains('active'));
-    const tab = cur ? cur.dataset.tab : 'msg';
-    if (tab === 'moments') renderMoments();
-    if (tab === 'msg') renderConversations();
-    if (tab === 'contacts') renderContacts();
-    if (merged.friends) refreshOpenFriendSheet();
-    if (pageChat.classList.contains('open') && currentConv()) {
-      $('#peerName').textContent = currentConv().name;
-      // 不再看 r.phase：只要数据变了就重绘，避免群聊卡在“正在输入”期间永不刷新
-      rememberScroll();
-      renderChat();
-      restoreScrollIfNeeded();
+    if (anySheetOpen()) {
+      // 抽屉/弹层开着（多半是在写朋友圈）：数据已合并，等关掉弹层再统一重绘
+      deferredRender = true;
+    } else {
+      if (state.conv && !currentConv()) closeChat();
+      const cur = $$('button', tabbar).find((b) => b.classList.contains('active'));
+      const tab = cur ? cur.dataset.tab : 'msg';
+      if (tab === 'moments') renderMoments();
+      if (tab === 'msg') renderConversations();
+      if (tab === 'contacts') renderContacts();
+      if (merged.friends) refreshOpenFriendSheet();
+      if (pageChat.classList.contains('open') && currentConv()) {
+        $('#peerName').textContent = currentConv().name;
+        // 不再看 r.phase：只要数据变了就重绘，避免群聊卡在“正在输入”期间永不刷新
+        rememberScroll();
+        renderChat();
+        restoreScrollIfNeeded();
+      }
     }
   }
   lastRev = Math.max(lastRev, Number(remote.rev) || 0);
@@ -3504,6 +3685,7 @@ function openGroupInfo(g) {
   groupInfoId = g.id;
   groupInfoBase = JSON.parse(JSON.stringify(g));
   $('#fGIName').value = g.name || '';
+  $('#fGIMuted').checked = !!g.muted;
   $('#fGIPrompt').value = g.prompt || '';
   const box = $('#groupInfoMembers');
   box.textContent = '';
@@ -3525,6 +3707,7 @@ function openGroupInfo(g) {
 }
 
 function closeGroupInfo() {
+  blurInside(groupInfoSheet);
   groupInfoSheet.classList.remove('open');
   groupInfoSheet.setAttribute('aria-hidden', 'true');
 }
@@ -3539,6 +3722,7 @@ $('#btnGISave').addEventListener('click', () => {
   if (members.length < 2) return toast('至少留两个人');
   const patch = changedFields(groupInfoBase || g, {
     ...g, name: name || g.name, members, prompt: $('#fGIPrompt').value.trim(),
+    muted: $('#fGIMuted').checked,
   }, GROUP_FIELDS);
   Object.assign(g, patch);
   pendingEdits.groups[g.id] = Object.assign(pendingEdits.groups[g.id] || {}, patch);
@@ -3766,6 +3950,7 @@ function normalizeGroup(raw) {
     createdAt: raw && raw.createdAt,
   });
   g.unread = Number(raw && raw.unread) || 0;
+  g.muted = !!(raw && raw.muted);
   g.messages = (g.messages || []).map((m) => ({
     ...m,
     id: m.id || uid('m'),
@@ -3895,6 +4080,14 @@ async function init() {
   if (q.has('chat')) { const f = state.friends[0]; if (f) openChat('friend', f.id); }
   if (q.has('group') && state.groups[0]) openChat('group', state.groups[0].id);
 }
+
+// 弹层（写朋友圈、群资料…）关掉后，把攒下的刷新补上
+const sheetWatcher = new MutationObserver(() => {
+  if (!anySheetOpen() && deferredRender) setTimeout(flushDeferredRender, 80);
+});
+document.querySelectorAll('.sheet').forEach((el) => {
+  sheetWatcher.observe(el, { attributes: true, attributeFilter: ['class'] });
+});
 
 document.addEventListener('wheel', wheelFallback, { passive: true });
 

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f7f8fa">
 <title>轻聊</title>
-<link rel="stylesheet" href="style.css?v=19">
+<link rel="stylesheet" href="style.css?v=21">
 <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
@@ -115,6 +115,7 @@
         <div class="emoji-panel" id="emojiPanel" hidden></div>
 
         <footer class="composer">
+          <div class="mention-pop" id="mentionPop" hidden></div>
           <button class="tool" id="btnEmoji" aria-label="表情">
             <svg viewBox="0 0 24 24" class="ic">
               <circle cx="12" cy="12" r="9.1"/>
@@ -331,6 +332,7 @@
       <div class="sheet-body">
         <div class="group">
           <label class="field"><span>群名</span><input id="fGIName"></label>
+          <label class="field row-inline"><span>消息免打扰</span><input id="fGIMuted" type="checkbox" class="switch"></label>
         </div>
         <div class="group">
           <div class="group-title">成员</div>
@@ -359,6 +361,6 @@
   </div>
 </div>
 
-<script src="app.js?v=27"></script>
+<script src="app.js?v=29"></script>
 </body>
 </html>

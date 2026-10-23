@@ -183,7 +183,7 @@ def _by_id(items):
     return out
 
 
-GROUP_FIELDS = ("name", "avatar", "members", "prompt")
+GROUP_FIELDS = ("name", "avatar", "members", "prompt", "muted")
 GROUP_RUNTIME = ("turnCounts", "lastSpurtAt", "lastChatAt")
 
 # 好友身上「用户能改」的字段；其余字段属于服务端/调度，客户端快照不得覆盖。
@@ -1577,8 +1577,10 @@ def social_tick(uid="local"):
             if append_group_reply(g, s, speaker_id, line, "reply"):
                 changed = True
 
-        # 群里自己聊两句
+        # 群里自己聊两句（免打扰的群不再主动开话题）
         for g in st.get("groups") or []:
+            if g.get("muted"):
+                continue
             members = [m for m in (g.get("members") or []) if m in name_map]
             if len(members) < 2 or not s.get("groupAutoTalk", True):
                 continue
