@@ -1452,9 +1452,12 @@ def social_tick(uid="local"):
                     changed = True
 
         if 8 <= hour <= 23 and now >= nxt:
-            # 一个窗口里安排 3~5 个人发，时间随机打散
+            # 一个窗口里安排几个人发。
+            # 窗口周期 interval 里会排 k 个人，所以「1 分钟一条」如果还排 3~5 个，
+            # 实际就变成「1 分钟 3~5 条」。这里按间隔收一收：每 2 分钟最多排 1 个人。
             friends_now = [f for f in (st.get("friends") or []) if not f.get("muted")]
-            k = min(len(friends_now), random.randint(3, 5)) if friends_now else 0
+            per_window = max(1, int(interval // 120))
+            k = min(len(friends_now), random.randint(3, 5), per_window) if friends_now else 0
             social["lastMomentAt"] = now
             social["momentQueue"] = k
             social["nextMomentAt"] = now + interval * (0.8 + random.random() * 0.7)
