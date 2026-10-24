@@ -1077,12 +1077,14 @@ function enqueueReactions(m) {
     }
   }
 
+  // 「她因为这条朋友圈私聊你」：以前 20% 概率 + 等 2~22 分钟，基本遇不到。
+  // 云端模式由服务端也会排一次（去重靠 momentId），单机模式只靠这里。
   const dmPool = state.friends.filter((f) => f.dmMoment !== false);
-  if (dmPool.length && Math.random() < 0.2) {
+  if (dmPool.length && Math.random() < 0.45) {
     const f = dmPool[Math.floor(Math.random() * dmPool.length)];
     state.pending.push({
       id: uid('p'), kind: 'dm', momentId: m.id, by: f.id,
-      dueAt: nowSec + 120 + Math.random() * 1200,
+      dueAt: nowSec + 90 + Math.random() * 390,
     });
   }
 }

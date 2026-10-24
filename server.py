@@ -1312,6 +1312,7 @@ def run_pending(st, p, key):
                            image=m.get("image", ""))
         if not text:
             return False
+        print("[MOMENT] dm sent by=%s moment=%s" % (by, m.get("id")), flush=True)
         f.setdefault("messages", []).append({
             "id": _nid("m"), "role": "peer", "authorId": f.get("id"),
             "text": text, "ts": int(time.time() * 1000),
@@ -1394,6 +1395,32 @@ def social_tick(uid="local"):
             social["nextMomentAt"] = nxt
             social["lastMomentAt"] = last
             changed = True
+        # 我发了新朋友圈 → 安排一个「她因为这条来找你」的私聊。
+        # 以前只有客户端排（postMoment 里 20% 概率），概率太低、还要等十几分钟，
+        # 用户基本遇不到；这里改成服务端也排一次，老客户端也能生效。
+        for m in (st.get("moments") or [])[:6]:
+            if m.get("authorId") != "me" or m.get("visibility") == "private":
+                continue
+            if m.get("dmAt"):
+                continue
+            age = now - float(m.get("ts") or 0) / 1000.0
+            if age < 0 or age > 7200:
+                continue
+            m["dmAt"] = now
+            changed = True
+            if any(q.get("kind") == "dm" and q.get("momentId") == m.get("id")
+                   for q in st.get("pending") or []):
+                continue                    # 客户端已经排过了，别重复
+            pool = [f for f in (st.get("friends") or []) if f.get("dmMoment") is not False]
+            if not pool or random.random() > 0.6:
+                continue
+            who = random.choice(pool)
+            st.setdefault("pending", []).append({
+                "id": _nid("p"), "kind": "dm", "momentId": m.get("id"), "by": who.get("id"),
+                "dueAt": now + random.randint(90, 480),
+            })
+            print("[MOMENT] dm queued by=%s moment=%s" % (who.get("id"), m.get("id")), flush=True)
+
         # 每个人独立的朋友圈排期（没设就跟随全局）
         if 8 <= hour <= 23:
             for f in st.get("friends") or []:
