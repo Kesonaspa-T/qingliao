@@ -24,6 +24,9 @@
 /android/assets/
 /android/build/
 /android/build.sh.bak
+/desktop/windows/dist/
+/desktop/windows/release/
+/desktop/windows/build/
 
 # ---- 签名文件（保留在本地）----
 *.keystore

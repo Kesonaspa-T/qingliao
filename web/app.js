@@ -1325,6 +1325,33 @@ window.QingliaoNative = {
   },
 };
 
+/** 把浏览器的原始报错翻译成人话，别再直接把 "Failed to fetch" 甩给用户。 */
+function friendlyError(e) {
+  const raw = String((e && e.message) || e || '');
+  if (/Failed to fetch|NetworkError|Load failed|network error/i.test(raw)) {
+    return '网络不通（检查 Base URL、API Key 和网络）';
+  }
+  if (/abort/i.test(raw)) return '请求超时';
+  return raw || '未知错误';
+}
+
+/** 响应非 2xx 时抛一个能看懂的错。 */
+async function ensureOk(res) {
+  if (res.ok) return;
+  let detail = '';
+  try {
+    const text = await res.text();
+    try {
+      const j = JSON.parse(text);
+      detail = (j.error && (j.error.message || j.error)) || text;
+    } catch (_) { detail = text; }
+  } catch (_) {}
+  const msg = res.status === 401 || res.status === 403
+    ? `接口拒绝了这次请求（${res.status}），多半是 API Key 不对或者没余额。`
+    : `接口返回 ${res.status}：${String(detail).slice(0, 200)}`;
+  throw new Error(msg);
+}
+
 function chatUrl() {
   return (state.settings.baseUrl || '').trim().replace(/\/+$/, '') + '/chat/completions';
 }
@@ -1363,6 +1390,17 @@ function requestJson(url, key, body) {
       nativePosts[id] = { resolve, reject };
       try { window.AndroidChat.post(id, url, key, JSON.stringify(body)); }
       catch (e) { delete nativePosts[id]; reject(e); }
+    });
+  }
+  // 本地模式：直接从网页调（联网搜索、模型列表都走这里）
+  if (!isCloud()) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (key || '') },
+      body: JSON.stringify(body),
+    }).then((r) => {
+      if (!r.ok) throw new Error('接口返回 ' + r.status);
+      return r.json();
     });
   }
   return apiFetch('/api/search', {
@@ -1538,26 +1576,34 @@ function startStream({ url, key, body, onDelta, onDone, onError }) {
       return;
     }
 
+    // 本地模式（没有服务器、也没有原生桥）：直接从网页调模型接口。
+    // 安卓 WebView 开了 setAllowUniversalAccessFromFileURLs，file:// 页面可以跨域请求。
+    // 这就是「单机版」唯一能聊天的路径 —— 以前靠 Java 的 JS 桥，桥删掉之后就断了。
+    if (!isCloud()) {
+      const base = (state.settings.baseUrl || '').trim().replace(/\/+$/, '');
+      if (!base) throw new Error('还没填 Base URL，去「我的 → 设置」里填一下');
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + (key || ''),
+        },
+        body: JSON.stringify(Object.assign({}, body, { stream: true })),
+        signal: ctrl.signal,
+      });
+      await ensureOk(res);
+      await readSse(res, onDelta);
+      onDone();
+      return;
+    }
+
     const res = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url, key, body }),
       signal: ctrl.signal,
     });
-    if (!res.ok) {
-      let detail = '';
-      try {
-        const text = await res.text();
-        try {
-          const j = JSON.parse(text);
-          detail = (j.error && (j.error.message || j.error)) || text;
-        } catch (_) { detail = text; }
-      } catch (_) {}
-      const msg = res.status === 401 || res.status === 403
-        ? `接口拒绝了这次请求（${res.status}），多半是 API Key 不对或者没余额。`
-        : `接口返回 ${res.status}：${String(detail).slice(0, 200)}`;
-      throw new Error(msg);
-    }
+    await ensureOk(res);
     await readSse(res, onDelta);
     onDone();
   })().catch((err) => {
@@ -2575,7 +2621,25 @@ $('#btnTest').addEventListener('click', async () => {
         stream: false,
       });
       toast(j && j.choices ? '连通了 ✓' : '连不上：返回异常', 4000);
-    } catch (e) { toast('连不上：' + (e.message || e), 4000); }
+    } catch (e) { toast('连不上：' + friendlyError(e), 4000); }
+    return;
+  }
+  // 本地模式：手机直接访问 /models
+  if (!isCloud()) {
+    try {
+      const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, 20000) : null;
+      const res = await fetch(base.replace(/\/+$/, '') + '/models', {
+        headers: { Authorization: 'Bearer ' + key },
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+      if (timer) clearTimeout(timer);
+      if (!res.ok) {
+        throw new Error(res.status === 401 || res.status === 403
+          ? 'Key 不对，或者这个 Key 没有余额' : '接口返回 ' + res.status);
+      }
+      toast('连通了 ✓', 4000);
+    } catch (e) { toast('连不上：' + friendlyError(e), 4000); }
     return;
   }
   try {
@@ -3061,6 +3125,11 @@ if (!document.getElementById('btnStatus')) {
   const grp = document.getElementById('btnSettings').closest('.menu-group');
   grp.insertBefore(st, document.getElementById('btnSettings').nextSibling);
   st.addEventListener('click', async () => {
+    if (!isCloud()) {
+      alert('当前是本地模式（数据都在这台设备上），没有服务器状态可看。\n'
+        + '想连服务器的话：我的 → 登录账号（多端同步）。');
+      return;
+    }
     try {
       const r = await apiFetch('/api/status');
       const j = await r.json();
@@ -3187,7 +3256,7 @@ async function genGroupLine(f, authorName, momentText, prev) {
 }
 
 async function clientSocialTick(force) {
-  if (!NATIVE && !force) return;
+  if (isCloud() && !force) return;   // 云端模式这些活由服务器干
   if (!(state.settings.apiKey || '').trim()) return;
 
   const nowSec = Date.now() / 1000;
