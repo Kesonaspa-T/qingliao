@@ -192,7 +192,10 @@ GROUP_RUNTIME = ("turnCounts", "lastSpurtAt", "lastChatAt")
 FRIEND_FIELDS = ("name", "avatar", "persona", "relations", "dmMoment", "settings")
 # 后台任务写入的好友字段：只有后台合并才允许更新。
 FRIEND_SERVER_FIELDS = ("unread", "lastGreet", "lastNudgeAt", "lastFallbackAt",
-                        "memory", "memoryAt", "nextMomentAt", "muted", "createdAt")
+                        "memory", "memoryAt", "nextMomentAt", "muted", "createdAt",
+                        # 服务端用掉「下一条主动消息」的指令后要能写回磁盘：
+                        # settings 里清掉 nextProactive，并打 proactiveUsedAt 告诉客户端
+                        "settings", "proactiveUsedAt")
 
 
 def _dict(x):
@@ -1037,6 +1040,66 @@ def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_p
     return _clean(text, 50)
 
 
+def dm_history(friend, me_name, msgs, n=6):
+    """私聊历史：「我」永远指这个角色自己，对方用他的名字。
+    以前这里把用户的话标成「我」，模型会误以为那是自己说的，
+    主动消息就会出现「我回家了」这种把自己当成对方的句子。"""
+    out = []
+    you = me_name or "对方"
+    for m in msgs[-n:]:
+        t = (m.get("text") or "").strip()
+        if not t:
+            continue
+        if "<svg" in t.lower():
+            t = re.sub(r"(?is)<svg[\s\S]*?</svg>", "", t).strip() + "［画了一张图］"
+        who = "我" if m.get("role") != "user" else you
+        out.append("%s：%s" % (who, t[:60]))
+    return out
+
+
+def _clean_multiline(text, limit=600):
+    """主动消息：允许换行和 SVG（_clean 只留第一行，会把画截掉）。"""
+    t = (text or "").strip().strip('"“”「」')
+    m = re.search(r"(?is)<svg[\s\S]*?</svg>", t)
+    if m:
+        before = t[:m.start()].strip().strip('"“”「」').split("\n")[0].strip()
+        return (before + "\n" + m.group(0)) if before else m.group(0)
+    return t.split("\n")[0].strip()[:limit]
+
+
+def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", allow_draw=False):
+    """她主动找他说话：跟前文只沾一点点，多为中性，绝不替他说话。"""
+    name = friend.get("name") or ""
+    sys = (
+        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n\n"
+    )
+    if recent_lines:
+        sys += ("你们最近说过的话（只当背景，不要复述、不要接着追问）：\n"
+                + "\n".join(recent_lines[-4:]) + "\n\n")
+    sys += (
+        "现在安静了一阵，你想主动发一条消息给他。要求：\n"
+        "- 只说你自己此刻的事：在做什么、看到什么、想到什么无关紧要的小事\n"
+        "- 跟上面那段最多若隐若现地沾一点（比如上次在等，就说一句“还等着呢”），"
+        "不要接着那个话题追问，也不要提他说过的话\n"
+        "- 中性、随口、一到两句，10~30 字\n"
+        "- 不要“在吗”“干嘛呢”“想我了吗”这种套话\n"
+    )
+    if directive:
+        sys += ("【他给你留了一条指令，这一条必须照它写】" + directive + "\n")
+    if allow_draw:
+        sys += ("- 如果这条消息里你想给他看点什么，可以顺手画一张：正文后面另起一行输出 "
+                "<svg viewBox=\"0 0 240 240\">…</svg>，只用 rect/circle/ellipse/line/polygon/path/text，"
+                "扁平配色、简单，不要外部图片、不要 script\n")
+    sys += "只输出你要发的那条消息本身，不要解释，不要加引号。"
+    budget = 700 if allow_draw else 120
+    text = call_llm(
+        settings.get("baseUrl"), key, settings.get("model"),
+        [{"role": "system", "content": sys}], max_tokens=budget, temperature=0.95,
+    )
+    return _clean_multiline(text, 400)
+
+
 def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False,
                    reply_to="", group_prompt="", being_called=False, images=None):
     sys = "你就是" + (friend.get("name") or "") + "。\n" + (friend.get("persona") or "") + "\n\n"
@@ -1563,11 +1626,10 @@ def social_tick(uid="local"):
                 continue
             if float(f.get("lastFallbackAt") or 0) == float(last.get("ts") or 0):
                 continue
-            hist = []
-            for m in msgs[-8:]:
-                who = "我" if m.get("role") == "user" else (f.get("name") or "她")
-                if m.get("text"):
-                    hist.append("%s：%s" % (who, m["text"][:60]))
+            me_name = (st.get("me") or {}).get("name") or "对方"
+            if me_name in ("我", "对方"):
+                me_name = "对方"
+            hist = dm_history(f, me_name, msgs, 8)
             try:
                 line = gen_chat_reply(f, f.get("name"), hist, s, key)
             except Exception as e:
@@ -1599,13 +1661,15 @@ def social_tick(uid="local"):
                     continue
                 if now - float(f.get("lastNudgeAt") or 0) < 3 * 3600:
                     continue
-                hist = []
-                for m in msgs[-6:]:
-                    who = "我" if m.get("role") == "user" else (f.get("name") or "她")
-                    if m.get("text"):
-                        hist.append("%s：%s" % (who, m["text"][:50]))
+                me_name = (st.get("me") or {}).get("name") or "对方"
+                if me_name in ("我", "对方"):
+                    me_name = "对方"
+                hist = dm_history(f, me_name, msgs, 4)
+                directive = (own.get("nextProactive") or "").strip()
+                draw_ok = (own.get("doodle") is not False) and (s.get("doodle", True) is not False)
                 try:
-                    txt = gen_chat_reply(f, f.get("name"), hist, s, key)
+                    txt = gen_proactive(f, me_name, hist, s, key,
+                                        directive=directive, allow_draw=draw_ok)
                 except Exception as e:
                     print("[social] 主动消息失败：", e)
                     txt = ""
@@ -1616,6 +1680,13 @@ def social_tick(uid="local"):
                     })
                     f["unread"] = int(f.get("unread") or 0) + 1
                     f["lastNudgeAt"] = now
+                    if directive:
+                        own.pop("nextProactive", None)
+                        # 打上时间戳，客户端同步时据此清掉本地残留的指令，
+                        # 否则下一次快照又把它带回来、重复用一遍
+                        f["proactiveUsedAt"] = now
+                    print("[social] 主动消息 -> %s%s" % (f.get("name"),
+                          "（用了指令）" if directive else ""), flush=True)
                     changed = True
                 break
 

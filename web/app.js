@@ -1566,9 +1566,18 @@ function buildMessages(friend, conv, nudge) {
   // 画图：不是「聊够多少轮就画」，而是由具体的事情触发
   const canDraw = fs(friend, 'doodle', s.doodle !== false);
   if (canDraw) {
+    const lastUser = [...(conv.messages || [])].reverse().find((m) => m.role === 'user');
+    const lastUserText = (lastUser && lastUser.text) || '';
+    const askedToDraw = /(画一|画个|画张|画幅|画点|画啥|画什么|画画|涂鸦|画给|试试画|画吧|画嘛|画呀)/.test(lastUserText);
     const drewRecently = (conv.messages || []).slice(-6)
       .some((m) => m.role !== 'user' && splitSvg(m.text || ''));
-    if (drewRecently) {
+    if (askedToDraw) {
+      sys += '\n\n【画图】他这一条明确让你画了。所以这一条必须真的把图画出来——'
+        + '不要只答应、不要只回「画什么好呢」「我慢慢来」「那我画一个」这种话，那种回复等于没画。'
+        + '先写一句很短的话（也可以不写），然后另起一行直接输出 <svg viewBox="0 0 240 240">…</svg>，不要用代码块包起来。'
+        + '\n画法：只用 rect / circle / ellipse / line / polygon / path / text；扁平配色、简单、像随手涂的；'
+        + '可以写一两个字的标题；不要外部图片、不要 script。画完不要解释画的是什么。';
+    } else if (drewRecently) {
       sys += '\n\n【画图】你刚才已经画过一张了，这次别画，只用文字。';
     } else {
       sys += '\n\n【画图】只有遇到下面这些情况才画，其它时候一律不画：'
@@ -1589,7 +1598,7 @@ function buildMessages(friend, conv, nudge) {
     ? Math.max(1, Math.min(10, Number(s.groupBursts) || 10))
     : Math.max(1, Math.min(5, Number(fs(friend, 'bursts', 5)) || 5));
   if (bursts > 1) {
-    sys += `\n\n【发送方式】想说两句以上时，用换行拆成 2~${bursts} 条短消息，每条不超过 20 字；只说一句就只写一句。`;
+    sys += `\n\n【发送方式】多数时候发 2 条：第一句先接话，第二句补一句自己的反应或小事，用换行分开，每条不超过 20 字；偶尔只发 1 条，最多 ${bursts} 条。`;
   }
 
   const out = [{ role: 'system', content: sys }];
@@ -1928,7 +1937,7 @@ async function startReply(kind, conv) {
   }
 
   try {
-    const text = await runChat(friend, conv, r, null);
+    const text = await runChat(friend, conv, r, r.nudge || null);
     if (holder) holder.row.remove();
 
     if (!text.trim()) {
@@ -1938,6 +1947,14 @@ async function startReply(kind, conv) {
 
     r.stopped = false;
     await deliver(kind, conv, text, authorId);
+    if (r.proactive && friend) {
+      r.proactive = false;
+      if (friend.settings && friend.settings.nextProactive) {
+        delete friend.settings.nextProactive;
+        rememberFriendEdit(friend, { settings: { nextProactive: null } });
+        persist();
+      }
+    }
   } catch (err) {
     if (r.stopped) r.stopped = false;
     else if (holder) {
@@ -1947,6 +1964,8 @@ async function startReply(kind, conv) {
   } finally {
     if (watchdog) clearTimeout(watchdog);
     r.abort = null;
+    r.nudge = null;
+    r.proactive = false;
     r.phase = 'idle';
     if (isActive(kind, conv.id)) {
       setStatus('在线');
@@ -2799,7 +2818,10 @@ function renderFriendRhythm(target, isMe) {
       + '<label class="field"><span>多久发一条朋友圈（小时）</span><input id="rMomentIv" type="number" min="0.2" max="72" step="0.5" placeholder="跟随全局"></label>'
       + '<label class="field row-inline"><span>会主动找我</span><input id="rProactive" type="checkbox" class="switch"></label>'
       + '<label class="field row-inline"><span>每天早晚问候</span><input id="rGreet" type="checkbox" class="switch"></label>'
-      + '<label class="field row-inline"><span>她会画图</span><input id="rDoodle" type="checkbox" class="switch"></label>';
+      + '<label class="field row-inline"><span>她会画图</span><input id="rDoodle" type="checkbox" class="switch"></label>'
+      + '<label class="field col"><span>下一条主动消息发什么（只生效一次）</span>'
+      + '<input id="rNextProactive" type="text" maxlength="300" placeholder="例：发一篇特别抒情的长文章给我"></label>'
+      + '<p class="hint">填了之后，她下次主动找你时一定按这个写；用掉自动清空。留空＝她自己决定。</p>';
     const anchor = document.getElementById('relationGroup');
     anchor.parentNode.insertBefore(box, anchor);
   }
@@ -2815,6 +2837,7 @@ function renderFriendRhythm(target, isMe) {
   chk('rProactive', own.proactive, true);
   chk('rGreet', own.greet, true);
   chk('rDoodle', own.doodle, true);
+  set('rNextProactive', own.nextProactive);
 }
 
 function readFriendRhythm() {
@@ -2833,13 +2856,14 @@ function readFriendRhythm() {
     proactive: document.getElementById('rProactive').checked,
     greet: document.getElementById('rGreet').checked,
     doodle: document.getElementById('rDoodle').checked,
+    nextProactive: (document.getElementById('rNextProactive').value || '').trim() || undefined,
   };
   Object.keys(out).forEach((k) => { if (out[k] === undefined) delete out[k]; });
   return out;
 }
 
 const FRIEND_RHYTHM_KEYS = ['bursts', 'delayMin', 'delayMax', 'nudgeAfter',
-  'momentInterval', 'proactive', 'greet', 'doodle'];
+  'momentInterval', 'proactive', 'greet', 'doodle', 'nextProactive'];
 const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true };
 
 /** 面板上的值 vs 这个好友当前的 settings → 只给出真正变了的那几项。 */
@@ -3293,6 +3317,21 @@ function proactiveTick() {
   if (mins < Math.max(3, Number(state.settings.idleMin) || 20)) return;
   if (conv.nudgeAt && Date.now() - conv.nudgeAt < 20 * 60000) return;
   conv.nudgeAt = Date.now();
+
+  // 主动消息单独一套要求：以前复用「接着聊」，导致她接着上文说话、
+  // 甚至把自己当成对方（「我回家了」）。
+  const directive = (conv.settings && conv.settings.nextProactive) || '';
+  const canDraw = fs(conv, 'doodle', state.settings.doodle !== false);
+  r.proactive = true;
+  r.nudge = [
+    '【主动消息】你们安静了一阵，现在你要主动给他发一条消息。',
+    '要求：只写你自己说的话；不要替他说话、不要假装是他；不要复述他以前说过的话。',
+    '跟上一轮最多若隐若现地沾一点，不要接着那个话题追问；大部分说你此刻在做什么、看到什么、想到什么无关紧要的小事。',
+    '中性、随口、一到两句。不要“在吗”“干嘛呢”“想我了吗”这种套话。',
+    directive ? ('【他给你留了一条指令，这一条必须照它写】' + directive) : '',
+    canDraw ? '如果这条里你想给他看点什么，可以顺手画一张（规则同【画图】）。' : '',
+    '只输出你要发的消息。',
+  ].filter(Boolean).join('\n');
   scheduleReply('friend', conv, true);
 }
 
@@ -3528,6 +3567,17 @@ function mergeRemote(remote) {
     if (mergeFriendSettings(lf, rf, dirty)) { changed = true; result.friends = true; }
     if (mergeFields(lf, rf, FRIEND_FIELDS, dirty)) { changed = true; result.friends = true; }
     if (mergeMsgs(lf, rf.messages, 'friend')) result.friends = true;
+    // 服务端用过一次「下一条主动消息」的指令后，会打上 proactiveUsedAt。
+    // 本地还留着那条指令的话会被下一次快照带回去、重复用，这里清掉。
+    const usedAt = Number(rf.proactiveUsedAt) || 0;
+    if (usedAt && usedAt > (Number(lf.proactiveUsedAt) || 0)) {
+      lf.proactiveUsedAt = usedAt;
+      if (lf.settings && lf.settings.nextProactive) {
+        delete lf.settings.nextProactive;
+        changed = true;
+        result.friends = true;
+      }
+    }
   }
   for (const rg of remote.groups || []) {
     if (dead.has(rg.id)) continue;
