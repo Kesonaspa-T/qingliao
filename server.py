@@ -1002,7 +1002,8 @@ def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_p
     return _clean(text, 50)
 
 
-def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False, reply_to="", group_prompt="", being_called=False):
+def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False,
+                   reply_to="", group_prompt="", being_called=False, images=None):
     sys = "你就是" + (friend.get("name") or "") + "。\n" + (friend.get("persona") or "") + "\n\n"
     if in_group:
         sys += group_prompt_text(group_prompt)
@@ -1014,9 +1015,18 @@ def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=Fal
             sys += "接着「" + reply_to + "」那句往下说，像真人在群里接话。\n"
     sys += "最近的消息：\n" + "\n".join(history_lines[-10:]) + "\n\n"
     sys += "接着聊，回 1~2 句，10~30 字，口语。只输出你要说的话。"
+    msgs = [{"role": "system", "content": sys}]
+    # 群里发的图以前是直接丢掉的（只取 text），所以她「看不见」。
+    # 这里把最近的两张图作为多模态内容带上，让她真的能看图接话。
+    pics = [u for u in (images or [])
+            if isinstance(u, str) and u.startswith("data:image")]
+    if pics and settings.get("vision", True) is not False:
+        parts = [{"type": "text", "text": "（下面是我刚发的图，看一眼再说话）"}]
+        parts += [{"type": "image_url", "image_url": {"url": u}} for u in pics[-2:]]
+        msgs.append({"role": "user", "content": parts})
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        [{"role": "system", "content": sys}], max_tokens=90, temperature=0.95,
+        msgs, max_tokens=90, temperature=0.95,
     )
     return _clean(text, 80)
 
@@ -1577,17 +1587,22 @@ def social_tick(uid="local"):
             speaker_id = random.choice(avail)
             speaker = friend_by_id(st, speaker_id)
             hist = []
+            pics = []
             for m in msgs[-8:]:
                 who = me_name if m.get("role") == "user" else (name_map.get(m.get("authorId")) or me_name)
                 if m.get("text"):
-                    hist.append("%s：%s" % (who, m["text"][:60]))
+                    hist.append("%s：%s%s" % (who, m["text"][:60], "（附图）" if m.get("image") else ""))
+                elif m.get("image"):
+                    hist.append("%s：（发了一张图片）" % who)
+                if m.get("image"):
+                    pics.append(m["image"])
             reply_to = ""
             if lastm.get("role") != "user" and lastm.get("text"):
                 reply_to = name_map.get(lastm.get("authorId")) or ""
             try:
                 line = gen_chat_reply(speaker, g.get("name"), hist, s, key,
                                       in_group=True, reply_to=reply_to, group_prompt=g.get("prompt") or "",
-                                      being_called=speaker_id in mentioned)
+                                      being_called=speaker_id in mentioned, images=pics)
             except Exception as e:
                 print("[social] 群聊失败：", e)
                 line = ""
