@@ -1563,11 +1563,26 @@ function buildMessages(friend, conv, nudge) {
     sys += '\n\n【联网】需要最新消息或不确定的事，用 web_search 查一下再说。不要提“搜索”这个词，别编。';
   }
 
-  if (s.doodle !== false) {
-    sys += '\n\n【画图】有时候光说话不够，你可以随手画一张简笔画发给他（比如他问你在干嘛、你想到什么画面）。'
-      + '\n写法：正文写完，另起一行直接输出 <svg viewBox="0 0 240 240">…</svg>，不要用代码块包起来。'
-      + '\n要求：偶尔画（十几条消息最多一次），别每条都画；只用 rect / circle / ellipse / line / polygon / path / text；'
-      + '扁平配色、简单可爱、像随手涂的；可以用一两个短词当标题；不要外部图片、不要 script、不要 foreignObject。';
+  // 画图：不是「聊够多少轮就画」，而是由具体的事情触发
+  const canDraw = fs(friend, 'doodle', s.doodle !== false);
+  if (canDraw) {
+    const drewRecently = (conv.messages || []).slice(-6)
+      .some((m) => m.role !== 'user' && splitSvg(m.text || ''));
+    if (drewRecently) {
+      sys += '\n\n【画图】你刚才已经画过一张了，这次别画，只用文字。';
+    } else {
+      sys += '\n\n【画图】只有遇到下面这些情况才画，其它时候一律不画：'
+        + '\n- 他问你在干嘛、你在做什么，而你手上正有件画得出来的事'
+        + '\n- 他直接让你画'
+        + '\n- 你想给他看某个具体的东西（你养的猫、你碗里的面、外面的雨、你画了一半的东西）'
+        + '\n- 他情绪低落、生病或者被骂了，你想让他笑一下'
+        + '\n- 你之前答应过要画给他看'
+        + '\n以上都不是，就只说话，不要画。'
+        + '\n真要画的时候：先正常说一句话，然后另起一行直接输出 <svg viewBox="0 0 240 240">…</svg>，不要用代码块包起来。'
+        + '\n画法：只用 rect / circle / ellipse / line / polygon / path / text；扁平配色、简单、像随手涂的；'
+        + '可以写一两个字的标题；不要外部图片、不要 script、不要 foreignObject。'
+        + '\n画完不要解释画的是什么。';
+    }
   }
 
   const bursts = isGroup
@@ -2783,7 +2798,8 @@ function renderFriendRhythm(target, isMe) {
       + '<label class="field"><span>静默多久主动找你（分钟）</span><input id="rNudge" type="number" min="10" max="1440" placeholder="跟随全局"></label>'
       + '<label class="field"><span>多久发一条朋友圈（小时）</span><input id="rMomentIv" type="number" min="0.2" max="72" step="0.5" placeholder="跟随全局"></label>'
       + '<label class="field row-inline"><span>会主动找我</span><input id="rProactive" type="checkbox" class="switch"></label>'
-      + '<label class="field row-inline"><span>每天早晚问候</span><input id="rGreet" type="checkbox" class="switch"></label>';
+      + '<label class="field row-inline"><span>每天早晚问候</span><input id="rGreet" type="checkbox" class="switch"></label>'
+      + '<label class="field row-inline"><span>她会画图</span><input id="rDoodle" type="checkbox" class="switch"></label>';
     const anchor = document.getElementById('relationGroup');
     anchor.parentNode.insertBefore(box, anchor);
   }
@@ -2798,6 +2814,7 @@ function renderFriendRhythm(target, isMe) {
   set('rMomentIv', own.momentInterval ? (own.momentInterval / 3600) : undefined);
   chk('rProactive', own.proactive, true);
   chk('rGreet', own.greet, true);
+  chk('rDoodle', own.doodle, true);
 }
 
 function readFriendRhythm() {
@@ -2815,14 +2832,15 @@ function readFriendRhythm() {
     momentInterval: (() => { const h = num('rMomentIv'); return h ? Math.round(h * 3600) : undefined; })(),
     proactive: document.getElementById('rProactive').checked,
     greet: document.getElementById('rGreet').checked,
+    doodle: document.getElementById('rDoodle').checked,
   };
   Object.keys(out).forEach((k) => { if (out[k] === undefined) delete out[k]; });
   return out;
 }
 
 const FRIEND_RHYTHM_KEYS = ['bursts', 'delayMin', 'delayMax', 'nudgeAfter',
-  'momentInterval', 'proactive', 'greet'];
-const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true };
+  'momentInterval', 'proactive', 'greet', 'doodle'];
+const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true };
 
 /** 面板上的值 vs 这个好友当前的 settings → 只给出真正变了的那几项。 */
 function friendSettingsPatch(friend, want) {
