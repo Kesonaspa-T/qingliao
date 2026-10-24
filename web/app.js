@@ -1077,15 +1077,20 @@ function enqueueReactions(m) {
     }
   }
 
-  // 「她因为这条朋友圈私聊你」：以前 20% 概率 + 等 2~22 分钟，基本遇不到。
-  // 云端模式由服务端也会排一次（去重靠 momentId），单机模式只靠这里。
-  const dmPool = state.friends.filter((f) => f.dmMoment !== false);
-  if (dmPool.length && Math.random() < 0.45) {
+  // 「她因为这条朋友圈私聊你」：
+  //   1) 只针对**你自己发的**朋友圈。以前 AI 自己发的也排，朋友圈一调快
+  //      （1 分钟一条）就变成两分钟被私聊一次，直接刷屏。
+  //   2) 半小时内最多一次，避免设成高频后一直被私聊。
+  const social = state.social || (state.social = {});
+  const lastDm = Number(social.lastMomentDmAt) || 0;
+  const dmPool = m.authorId === 'me' ? state.friends.filter((f) => f.dmMoment !== false) : [];
+  if (dmPool.length && nowSec - lastDm > 1800 && Math.random() < 0.45) {
     const f = dmPool[Math.floor(Math.random() * dmPool.length)];
     state.pending.push({
       id: uid('p'), kind: 'dm', momentId: m.id, by: f.id,
       dueAt: nowSec + 90 + Math.random() * 390,
     });
+    social.lastMomentDmAt = nowSec;
   }
 }
 

@@ -1317,10 +1317,16 @@ def run_pending(st, p, key):
     if kind == "dm":
         if not f:
             return False
+        # 因为朋友圈私聊要限流：朋友圈可以 1 分钟一条，不能每条都私聊你。
+        social = st.setdefault("social", {})
+        now_ts = time.time()
+        if now_ts - float(social.get("lastMomentDmAt") or 0) < 1800:
+            return False
         text = gen_dm_text(f, names.get("me", "我"), m.get("text", ""), settings, key,
                            image=m.get("image", ""))
         if not text:
             return False
+        social["lastMomentDmAt"] = now_ts
         print("[MOMENT] dm sent by=%s moment=%s" % (by, m.get("id")), flush=True)
         f.setdefault("messages", []).append({
             "id": _nid("m"), "role": "peer", "authorId": f.get("id"),
@@ -1420,6 +1426,10 @@ def social_tick(uid="local"):
             if any(q.get("kind") == "dm" and q.get("momentId") == m.get("id")
                    for q in st.get("pending") or []):
                 continue                    # 客户端已经排过了，别重复
+            # 半小时内最多一次：朋友圈频率可以调到 1 分钟一条，
+            # 不能每条都来私聊你一次。
+            if now - float((st.get("social") or {}).get("lastMomentDmAt") or 0) < 1800:
+                continue
             pool = [f for f in (st.get("friends") or []) if f.get("dmMoment") is not False]
             if not pool or random.random() > 0.6:
                 continue
