@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import secrets
 import ssl
 import sys
@@ -96,6 +97,7 @@ def default_state():
             "temperature": 0.9,
             "contextLimit": 60,
             "vision": True,
+            "doodle": True,
             "webSearch": True,
             "delayOn": True,
             "delayMin": 5,
@@ -1666,8 +1668,11 @@ def social_tick(uid="local"):
             pics = []
             for m in msgs[-8:]:
                 who = me_name if m.get("role") == "user" else (name_map.get(m.get("authorId")) or me_name)
-                if m.get("text"):
-                    hist.append("%s：%s%s" % (who, m["text"][:60], "（附图）" if m.get("image") else ""))
+                mt = m.get("text") or ""
+                if "<svg" in mt.lower():
+                    mt = re.sub(r"(?is)<svg[\s\S]*?</svg>", "", mt).strip() + "［画了一张图］"
+                if mt:
+                    hist.append("%s：%s%s" % (who, mt[:60], "（附图）" if m.get("image") else ""))
                 elif m.get("image"):
                     hist.append("%s：（发了一张图片）" % who)
                 if m.get("image"):

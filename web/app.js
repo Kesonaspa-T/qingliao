@@ -150,6 +150,7 @@ const DEFAULT_SETTINGS = {
   temperature: 0.9,
   contextLimit: 200,
   vision: true,
+  doodle: true,
   webSearch: true,
   delayOn: true,
   delayMin: 5,
@@ -574,9 +575,9 @@ function convPreview(c, kind) {
   const prefix = last.role === 'user' ? '我：' : '';
   if (last.image) return prefix + '[图片]';
   if (kind === 'group') {
-    return (last.role === 'user' ? '我：' : nameOf(last.authorId) + '：') + (last.text || '');
+    return (last.role === 'user' ? '我：' : nameOf(last.authorId) + '：') + plainText(last.text || '');
   }
-  return prefix + (last.text || '');
+  return prefix + plainText(last.text || '');
 }
 
 function renderConversations() {
@@ -1166,6 +1167,62 @@ function addDivider(ts) {
   chatEl.append(d);
 }
 
+/* ---------------- 她会画简笔画（SVG） ---------------- */
+
+const SVG_BLOCK = /```(?:svg|xml)?\s*(<svg[\s\S]*?<\/svg>)\s*```|(<svg[\s\S]*?<\/svg>)/i;
+
+/** 从消息文本里切出 SVG，顺便清洗掉脚本和事件属性。 */
+function splitSvg(text) {
+  const src = String(text || '');
+  const m = SVG_BLOCK.exec(src);
+  if (!m) return null;
+  const raw = m[1] || m[2];
+  const svg = sanitizeSvg(raw);
+  if (!svg) return null;
+  const at = src.indexOf(raw);
+  return {
+    before: src.slice(0, at).trim(),
+    after: src.slice(at + raw.length).trim(),
+    svg,
+  };
+}
+
+function sanitizeSvg(raw) {
+  let s = String(raw || '').trim();
+  if (s.length < 24 || s.length > 20000) return '';
+  if (!/^<svg[\s>]/i.test(s)) return '';
+  // 只当 <img> 渲染本来就不会跑脚本，这里再清一遍更保险
+  s = s.replace(/<\s*(script|foreignObject|iframe|image|use|a)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
+  s = s.replace(/<\s*(script|foreignObject|iframe|image)\b[^>]*\/?>/gi, '');
+  s = s.replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '');
+  s = s.replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '');
+  s = s.replace(/javascript:/gi, '');
+  s = s.replace(/\shref\s*=\s*"[^"]*"/gi, '');
+  if (!/xmlns\s*=/.test(s)) s = s.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  return s;
+}
+
+/** 只取文字部分（会话列表预览、通知用）。 */
+function plainText(text) {
+  const parts = splitSvg(text);
+  if (!parts) return String(text || '');
+  return [parts.before, parts.after, parts.svg ? '［画了一张图］' : '']
+    .filter(Boolean).join(' ').trim();
+}
+
+function paintMessageText(bubble, text) {
+  const parts = splitSvg(text);
+  if (!parts) { bubble.textContent = text; return false; }
+  if (parts.before) bubble.append(document.createTextNode(parts.before));
+  const img = document.createElement('img');
+  img.className = 'doodle';
+  img.alt = '';
+  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(parts.svg);
+  bubble.append(img);
+  if (parts.after) bubble.append(document.createTextNode(parts.after));
+  return true;
+}
+
 function renderMessage(msg, opts = {}) {
   const conv = opts.conv || currentConv();
   if (!conv) return { row: null, bubble: null };
@@ -1211,6 +1268,8 @@ function renderMessage(msg, opts = {}) {
     img.src = msg.image;
     img.alt = '';
     bubble.append(img);
+  } else if (msg.text && splitSvg(msg.text)) {
+    paintMessageText(bubble, msg.text);
   } else {
     bubble.textContent = msg.text;
   }
@@ -1502,6 +1561,13 @@ function buildMessages(friend, conv, nudge) {
 
   if (searchEnabled()) {
     sys += '\n\n【联网】需要最新消息或不确定的事，用 web_search 查一下再说。不要提“搜索”这个词，别编。';
+  }
+
+  if (s.doodle !== false) {
+    sys += '\n\n【画图】有时候光说话不够，你可以随手画一张简笔画发给他（比如他问你在干嘛、你想到什么画面）。'
+      + '\n写法：正文写完，另起一行直接输出 <svg viewBox="0 0 240 240">…</svg>，不要用代码块包起来。'
+      + '\n要求：偶尔画（十几条消息最多一次），别每条都画；只用 rect / circle / ellipse / line / polygon / path / text；'
+      + '扁平配色、简单可爱、像随手涂的；可以用一两个短词当标题；不要外部图片、不要 script、不要 foreignObject。';
   }
 
   const bursts = isGroup
@@ -2014,7 +2080,8 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   }
 
   if (maxParts != null) limit = Math.max(1, Math.min(limit, maxParts));
-  const parts = splitReply(text, limit);
+  // 画了图就整条发：按行拆会把 <svg> 拆成两半，图就没了
+  const parts = /<svg[\s>]/i.test(String(text || '')) ? [String(text).trim()] : splitReply(text, limit);
   const now = Date.now();
   const active = isActive(kind, conv.id);
   if (active) clearReadMark();
@@ -2528,6 +2595,7 @@ function fillForm() {
   $('#fTempOut').textContent = Number(s.temperature ?? 0.9).toFixed(1);
   $('#fCtx').value = s.contextLimit ?? 60;
   $('#fVision').checked = !!s.vision;
+  if ($('#fDoodle')) $('#fDoodle').checked = s.doodle !== false;
   $('#fSearch').checked = !!s.webSearch;
   $('#fDelayOn').checked = !!s.delayOn;
   $('#fDelayMin').value = s.delayMin ?? 5;
@@ -2573,6 +2641,7 @@ function saveForm() {
   s.temperature = Number($('#fTemp').value) || 0.9;
   s.contextLimit = Math.max(6, Math.min(2000, Number($('#fCtx').value) || 60));
   s.vision = $('#fVision').checked;
+  if ($('#fDoodle')) s.doodle = $('#fDoodle').checked;
   s.webSearch = $('#fSearch').checked;
   s.delayOn = $('#fDelayOn').checked;
   s.delayMin = Math.max(0, Math.min(600, Number($('#fDelayMin').value) || 0));

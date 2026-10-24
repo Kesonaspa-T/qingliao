@@ -191,6 +191,14 @@ html[data-theme="dark"] body {
 .row.me .avatar { background: var(--me-avatar); }
 .avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
+.bubble img.doodle {
+  display: block;
+  width: 220px; max-width: 100%; height: auto;
+  border-radius: 12px;
+  margin: 2px 0 4px;
+  background: transparent;
+}
+
 .bubble {
   position: relative;
   max-width: 74%;
