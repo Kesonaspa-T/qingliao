@@ -1002,13 +1002,15 @@ def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_p
     return _clean(text, 50)
 
 
-def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False, reply_to="", group_prompt=""):
+def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False, reply_to="", group_prompt="", being_called=False):
     sys = "你就是" + (friend.get("name") or "") + "。\n" + (friend.get("persona") or "") + "\n\n"
     if in_group:
         sys += group_prompt_text(group_prompt)
         sys += ("你们在群「" + (conv_name or "群") + "」里聊天。只以你自己的身份说话，"
                 "不要加名字前缀，不要替别人说。\n")
-        if reply_to and reply_to != (friend.get("name") or ""):
+        if being_called:
+            sys += "主人刚刚点了你的名字（@你），先直接应她一声，别去接别人的话。\n"
+        elif reply_to and reply_to != (friend.get("name") or ""):
             sys += "接着「" + reply_to + "」那句往下说，像真人在群里接话。\n"
     sys += "最近的消息：\n" + "\n".join(history_lines[-10:]) + "\n\n"
     sys += "接着聊，回 1~2 句，10~30 字，口语。只输出你要说的话。"
@@ -1546,13 +1548,27 @@ def social_tick(uid="local"):
             avail = [m for m in members if group_can_speak(g, s, m)]
             if not avail:
                 continue
-            # 用户 @ 了谁，谁优先（下一次发言时）
-            if lastm.get("role") == "user" and lastm.get("text"):
+            # 用户 @ 了谁，谁优先。
+            # 注意要看「最后一条用户消息」，而不是「最后一条消息」：朋友圈互动
+            # （source=moment）会被插进群里，之前用 msgs[-1] 判断，这些插话一来
+            # 就把 @ 的优先权冲掉了，被 @ 的人反而一声不吭。
+            lu = _last_user(msgs)
+            mentioned = []
+            if lu >= 0 and msgs[lu].get("text"):
+                replied_after = {
+                    x.get("authorId") for x in msgs[lu + 1:]
+                    if x.get("role") != "user" and x.get("source") != "moment"
+                }
                 for m in members:
                     nm2 = name_map.get(m)
-                    if nm2 and ("@" + nm2) in lastm["text"] and m in avail:
-                        avail = [m]
-                        break
+                    if not nm2 or ("@" + nm2) not in msgs[lu]["text"]:
+                        continue
+                    if m in avail and m not in replied_after and m not in mentioned:
+                        mentioned.append(m)
+                if mentioned:
+                    avail = mentioned
+                    print("[GROUP] source=mention group=%s who=%s" % (
+                        g.get("id"), ",".join(name_map.get(x, x) for x in mentioned)), flush=True)
             # 尽量换个人说，形成交叉对话
             last_speaker = lastm.get("authorId")
             if len(avail) > 1 and last_speaker in avail:
@@ -1570,7 +1586,8 @@ def social_tick(uid="local"):
                 reply_to = name_map.get(lastm.get("authorId")) or ""
             try:
                 line = gen_chat_reply(speaker, g.get("name"), hist, s, key,
-                                      in_group=True, reply_to=reply_to, group_prompt=g.get("prompt") or "")
+                                      in_group=True, reply_to=reply_to, group_prompt=g.get("prompt") or "",
+                                      being_called=speaker_id in mentioned)
             except Exception as e:
                 print("[social] 群聊失败：", e)
                 line = ""
@@ -1633,10 +1650,37 @@ def social_loop():
         time.sleep(20)
 
 
+def mention_pending(st):
+    """群里最后一条用户消息 @ 了人，而那个人还没接过话。"""
+    names = {f.get("id"): f.get("name") for f in st.get("friends") or []}
+    for g in st.get("groups") or []:
+        msgs = g.get("messages") or []
+        lu = _last_user(msgs)
+        if lu < 0 or not msgs[lu].get("text"):
+            continue
+        text = msgs[lu]["text"]
+        replied = {m.get("authorId") for m in msgs[lu + 1:]
+                   if m.get("role") != "user" and m.get("source") != "moment"}
+        for mid in g.get("members") or []:
+            nm = names.get(mid)
+            if nm and ("@" + nm) in text and mid not in replied:
+                return True
+    return False
+
+
 def run_social_now(uid):
-    """客户端说自己刚发了言：立刻跑一轮调度，别等 20 秒的定时器。"""
+    """客户端说自己刚发了言：立刻跑一轮调度，别等 20 秒的定时器。
+
+    被 @ 的人要「第一个说话」：如果这一轮被节流（刚有朋友圈互动插进群里）或者
+    生成失败，就隔几秒再补两轮，别让一句 @ 白等二十多秒。
+    """
     try:
-        social_tick(uid)
+        for attempt in range(3):
+            social_tick(uid)
+            if not mention_pending(load_state(uid)):
+                return
+            if attempt < 2:
+                time.sleep(8)
     except Exception as e:
         print("[social] 即时调度失败：", e)
 
