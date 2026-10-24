@@ -890,7 +890,19 @@ def thread_text(st, m, limit=10):
     return "\n".join(lines)
 
 
-def gen_comment_text(friend, author_name, moment_text, thread, settings, key):
+def vision_part(image, hint, settings):
+    """朋友圈配图：开了「让她看图」时，拼一条多模态 user 消息；否则 None。"""
+    if not image or not isinstance(image, str) or not image.startswith("data:image"):
+        return None
+    if settings.get("vision", True) is False:
+        return None
+    return {"role": "user", "content": [
+        {"type": "text", "text": hint},
+        {"type": "image_url", "image_url": {"url": image}},
+    ]}
+
+
+def gen_comment_text(friend, author_name, moment_text, thread, settings, key, image=""):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
@@ -907,14 +919,18 @@ def gen_comment_text(friend, author_name, moment_text, thread, settings, key):
         )
     else:
         sys += "用一句评论回应，10~25 字，口语，像熟人随口说的。不客套，不要堆 emoji。只输出评论本身。"
+    msgs = [{"role": "system", "content": sys}]
+    pic = vision_part(image, "（这条朋友圈配了一张图，先看一眼再评论）", settings)
+    if pic:
+        msgs.append(pic)
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        [{"role": "system", "content": sys}], max_tokens=70, temperature=1.0,
+        msgs, max_tokens=70, temperature=1.0,
     )
     return _clean(text, 60)
 
 
-def gen_reply_text(friend, commenter_name, moment_text, comment_text, thread, settings, key):
+def gen_reply_text(friend, commenter_name, moment_text, comment_text, thread, settings, key, image=""):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
@@ -927,14 +943,18 @@ def gen_reply_text(friend, commenter_name, moment_text, comment_text, thread, se
         "回他一句。10~25 字，口语，像真人回评论。别客套，别总结。\n"
         "只输出你自己的一句话，不要加人名前缀，不要替别人说话。"
     )
+    msgs = [{"role": "system", "content": sys}]
+    pic = vision_part(image, "（你这条朋友圈配了一张图，先看一眼再回）", settings)
+    if pic:
+        msgs.append(pic)
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        [{"role": "system", "content": sys}], max_tokens=70, temperature=1.0,
+        msgs, max_tokens=70, temperature=1.0,
     )
     return _clean(text, 60)
 
 
-def gen_dm_text(friend, owner_name, moment_text, settings, key):
+def gen_dm_text(friend, owner_name, moment_text, settings, key, image=""):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
@@ -942,9 +962,13 @@ def gen_dm_text(friend, owner_name, moment_text, settings, key):
         "你想私聊跟他说一句，就为这事儿。10~25 字，口语，像微信上随手发的。"
         "不要提“朋友圈”三个字。只输出你自己这一句，不要扮演对方。"
     )
+    msgs = [{"role": "system", "content": sys}]
+    pic = vision_part(image, "（他这条朋友圈配了一张图，先看一眼再私聊他）", settings)
+    if pic:
+        msgs.append(pic)
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        [{"role": "system", "content": sys}], max_tokens=70, temperature=1.0,
+        msgs, max_tokens=70, temperature=1.0,
     )
     return _clean(text, 60)
 
@@ -1247,7 +1271,8 @@ def run_pending(st, p, key):
         if any(c.get("by") == by for c in (m.get("comments") or [])):
             return False
         author = "我" if m.get("authorId") == "me" else names.get(m.get("authorId"), "某人")
-        text = gen_comment_text(f, author, m.get("text", ""), thread_text(st, m), settings, key)
+        text = gen_comment_text(f, author, m.get("text", ""), thread_text(st, m), settings, key,
+                               image=m.get("image", ""))
         if not text:
             return False
         if not comment_allowed(m, by):
@@ -1268,6 +1293,7 @@ def run_pending(st, p, key):
         text = gen_reply_text(
             f, names.get("me", "我"), m.get("text", ""),
             p.get("toComment") or "", thread_text(st, m), settings, key,
+            image=m.get("image", ""),
         )
         if not text:
             return False
@@ -1282,7 +1308,8 @@ def run_pending(st, p, key):
     if kind == "dm":
         if not f:
             return False
-        text = gen_dm_text(f, names.get("me", "我"), m.get("text", ""), settings, key)
+        text = gen_dm_text(f, names.get("me", "我"), m.get("text", ""), settings, key,
+                           image=m.get("image", ""))
         if not text:
             return False
         f.setdefault("messages", []).append({
