@@ -191,6 +191,24 @@ html[data-theme="dark"] body {
 .row.me .avatar { background: var(--me-avatar); }
 .avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
+.filter-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 4px 12px 8px; padding: 8px 12px; border-radius: 12px;
+  background: var(--card-2, rgba(0,0,0,.04)); font-size: 13px; color: var(--sub);
+}
+
+.profile-head { display: flex; gap: 14px; align-items: center; padding: 4px 2px 12px; }
+.profile-avatar { width: 62px; height: 62px; border-radius: 16px; overflow: hidden; flex: none; background: var(--avatar); }
+.profile-avatar .avatar { width: 62px; height: 62px; border-radius: 16px; font-size: 24px; }
+.profile-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.profile-meta { min-width: 0; }
+.profile-name { font-size: 19px; font-weight: 600; }
+.profile-id { font-size: 12.5px; color: var(--sub); margin-top: 2px; }
+.profile-region { font-size: 12.5px; color: var(--sub); margin-top: 1px; }
+.profile-sign { font-size: 13px; color: var(--text); opacity: .82; margin-top: 6px; line-height: 1.45; }
+.kv { font-size: 13px; color: var(--sub); line-height: 1.9; padding: 2px 2px 8px; }
+.avatar.tappable { cursor: pointer; }
+
 .bubble img.doodle {
   display: block;
   width: 220px; max-width: 100%; height: auto;
@@ -665,6 +683,7 @@ html[data-theme="dark"] .switch { background: #3a3d44; }
   cursor: pointer;
 }
 .ghost:active { opacity: .7; }
+.ghost.solid { background: var(--me); color: var(--me-text, #fff); font-weight: 600; }
 .danger-text { color: #e5484d; }
 
 .footnote {

@@ -218,7 +218,8 @@ function makeGroup(o = {}) {
 let state = defaultState();
 let pendingEdits = { settings: {}, groups: {}, friends: {} };
 const GROUP_FIELDS = ['name', 'avatar', 'members', 'prompt', 'muted'];
-const FRIEND_FIELDS = ['name', 'avatar', 'persona', 'relations', 'dmMoment'];
+const FRIEND_FIELDS = ['name', 'avatar', 'persona', 'relations', 'dmMoment',
+  'note', 'region', 'signature'];
 
 function changedFields(before, after, fields) {
   const patch = {};
@@ -703,7 +704,10 @@ function renderContacts() {
     for (const f of [...state.friends].sort((a, b) => a.name.localeCompare(b.name, 'zh'))) {
       const row = document.createElement('div');
       row.className = 'conv';
-      row.append(avatarEl(f));
+      const cav = avatarEl(f);
+      cav.classList.add('tappable');
+      cav.addEventListener('click', (e) => { e.stopPropagation(); openProfile(f.id); });
+      row.append(cav);
       const main = document.createElement('div');
       main.className = 'conv-main';
       const top = document.createElement('div');
@@ -756,9 +760,29 @@ function momentAuthor(m) {
   return m.authorId === 'me' ? state.me : (friendById(m.authorId) || { name: '某人', avatar: '' });
 }
 
+let momentFilter = null;   // 只看某个人的朋友圈
+
 function renderMoments() {
   momentList.textContent = '';
-  if (!state.moments.length) {
+  if (momentFilter) {
+    const who = friendById(momentFilter);
+    if (!who) momentFilter = null;
+    else {
+      const bar = document.createElement('div');
+      bar.className = 'filter-bar';
+      const txt = document.createElement('span');
+      txt.textContent = '只看 ' + (who.note || who.name);
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'text-btn';
+      clear.textContent = '显示全部';
+      clear.addEventListener('click', () => { momentFilter = null; renderMoments(); });
+      bar.append(txt, clear);
+      momentList.append(bar);
+    }
+  }
+  const feed = momentFilter ? state.moments.filter((m) => m.authorId === momentFilter) : state.moments;
+  if (!feed.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = '朋友圈还空着。\n自己发一条，或者等她们发。';
@@ -767,7 +791,7 @@ function renderMoments() {
     return;
   }
 
-  for (const m of state.moments) {
+  for (const m of feed) {
     if (m.visibility === 'private' && m.authorId !== 'me') continue;
     const card = document.createElement('div');
     card.className = 'moment';
@@ -1290,6 +1314,10 @@ function renderMessage(msg, opts = {}) {
 
   const who = speakerOf(msg, conv);
   const av = avatarEl(who);
+  if (who && who.id && friendById(who.id)) {
+    av.classList.add('tappable');
+    av.addEventListener('click', (e) => { e.stopPropagation(); openProfile(who.id); });
+  }
   av.addEventListener('dblclick', () => {
     conv.messages.push({ id: uid('m'), role: 'system', text: '你拍了拍 ' + who.name, ts: Date.now() });
     persist(); renderChat();
@@ -2804,6 +2832,87 @@ function renderRelations(selected) {
   }
 }
 
+/* ---------------- 个人资料页 ---------------- */
+
+let profileFriendId = null;
+
+function openProfile(id) {
+  const f = friendById(id);
+  if (!f) return;
+  profileFriendId = id;
+  renderProfile();
+  const sheet = $('#profileSheet');
+  sheet.classList.add('open');
+  sheet.setAttribute('aria-hidden', 'false');
+}
+
+function closeProfileSheet() {
+  const sheet = $('#profileSheet');
+  if (!sheet) return;
+  sheet.classList.remove('open');
+  sheet.setAttribute('aria-hidden', 'true');
+}
+
+function renderProfile() {
+  const f = friendById(profileFriendId);
+  if (!f) return;
+  const box = $('#pfAvatar');
+  box.textContent = '';
+  box.append(avatarEl(f));
+  $('#pfName').textContent = f.note || f.name || '她';
+  $('#pfIdLine').textContent = '轻聊号：' + (f.id || '');
+  $('#pfRegionLine').textContent = f.region ? ('地区：' + f.region) : '';
+  $('#pfSignLine').textContent = f.signature || '还没有个性签名';
+  $('#pfNote').value = f.note || '';
+  $('#pfRegion').value = f.region || '';
+  $('#pfSignature').value = f.signature || '';
+
+  const days = Math.max(1, Math.ceil((Date.now() - (Number(f.createdAt) || Date.now())) / 86400000));
+  const msgs = (f.messages || []).length;
+  const mine = (f.messages || []).filter((m) => m.role === 'user').length;
+  const hers = msgs - mine;
+  const pics = (f.messages || []).filter((m) => m.image || splitSvg(m.text || '')).length;
+  const momentCount = (state.moments || []).filter((m) => m.authorId === f.id).length;
+  $('#pfStats').textContent = `认识 ${days} 天 · 一共 ${msgs} 条消息（她说 ${hers}，你说 ${mine}）\n`
+    + `画过 ${pics} 张图 · 发过 ${momentCount} 条朋友圈`;
+}
+
+function saveProfile() {
+  const f = friendById(profileFriendId);
+  if (!f) return;
+  const patch = {
+    note: $('#pfNote').value.trim().slice(0, 24),
+    region: $('#pfRegion').value.trim().slice(0, 24),
+    signature: $('#pfSignature').value.trim().slice(0, 120),
+  };
+  Object.assign(f, patch);
+  rememberFriendEdit(f, patch);
+  persist();
+  renderProfile();
+  renderConversations();
+  renderContacts();
+  toast('存好了');
+}
+
+async function writeSignatureByAi() {
+  const f = friendById(profileFriendId);
+  if (!f) return;
+  if (!(state.settings.apiKey || '').trim()) return toast('还没填 API Key');
+  toast('让她想想…');
+  try {
+    const text = cleanLine(await quickChat([
+      { role: 'system', content: (f.persona || '') + '\n\n用你自己的口吻写一句个性签名，写在个人主页上的那种。'
+        + '12~24 字，第一人称，像随口说的，可以用一个 emoji，不要引号，不要解释，只输出这一句。' },
+      { role: 'user', content: '你的个性签名会写什么？' },
+    ]), 40);
+    if (!text) return toast('这次没写出来');
+    $('#pfSignature').value = text;
+    toast('写好了，记得保存');
+  } catch (e) {
+    toast('出错了：' + (e && e.message ? e.message : String(e)));
+  }
+}
+
 function renderFriendRhythm(target, isMe) {
   let box = document.getElementById('rhythmBox');
   if (!box) {
@@ -2922,6 +3031,29 @@ function closeFriendSheet() {
 }
 
 $('#btnFClose').addEventListener('click', closeFriendSheet);
+
+/* ---------------- 个人资料页的按钮 ---------------- */
+$('#btnPfClose').addEventListener('click', closeProfileSheet);
+$('#btnPfSave').addEventListener('click', saveProfile);
+$('#btnPfSignAi').addEventListener('click', writeSignatureByAi);
+$('#btnPfChat').addEventListener('click', () => {
+  const id = profileFriendId;
+  closeProfileSheet();
+  if (id) openChat('friend', id);
+});
+$('#btnPfMoments').addEventListener('click', () => {
+  const id = profileFriendId;
+  closeProfileSheet();
+  if (!id) return;
+  momentFilter = id;
+  switchTab('moments');
+  renderMoments();
+});
+$('#btnPfEdit').addEventListener('click', () => {
+  const f = friendById(profileFriendId);
+  closeProfileSheet();
+  if (f) openFriendSheet(f, 'edit');
+});
 
 $('#fFAvatarInput').addEventListener('change', async (e) => {
   const file = e.target.files && e.target.files[0];
@@ -4138,7 +4270,8 @@ function normalizeFriend(raw) {
   const own = raw && raw.settings;
   if (own && typeof own === 'object' && Object.keys(own).length) f.settings = { ...own };
   for (const key of ['memory', 'memoryAt', 'lastGreet', 'lastNudgeAt',
-    'lastFallbackAt', 'nextMomentAt', 'muted']) {
+    'lastFallbackAt', 'nextMomentAt', 'muted', 'proactiveUsedAt',
+    'note', 'region', 'signature']) {
     if (raw && raw[key] !== undefined && raw[key] !== null) f[key] = raw[key];
   }
   f.messages = (f.messages || []).map((m) => ({

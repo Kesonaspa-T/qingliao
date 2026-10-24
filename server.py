@@ -189,7 +189,8 @@ GROUP_FIELDS = ("name", "avatar", "members", "prompt", "muted")
 GROUP_RUNTIME = ("turnCounts", "lastSpurtAt", "lastChatAt")
 
 # 好友身上「用户能改」的字段；其余字段属于服务端/调度，客户端快照不得覆盖。
-FRIEND_FIELDS = ("name", "avatar", "persona", "relations", "dmMoment", "settings")
+FRIEND_FIELDS = ("name", "avatar", "persona", "relations", "dmMoment", "settings",
+                 "note", "region", "signature")
 # 后台任务写入的好友字段：只有后台合并才允许更新。
 FRIEND_SERVER_FIELDS = ("unread", "lastGreet", "lastNudgeAt", "lastFallbackAt",
                         "memory", "memoryAt", "nextMomentAt", "muted", "createdAt",

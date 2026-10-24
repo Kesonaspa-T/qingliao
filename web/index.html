@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f7f8fa">
 <title>轻聊</title>
-<link rel="stylesheet" href="style.css?v=22">
+<link rel="stylesheet" href="style.css?v=23">
 <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
@@ -288,6 +288,47 @@
       </div>
     </section>
 
+    <!-- 个人资料（点聊天里的头像打开） -->
+    <section class="sheet" id="profileSheet" aria-hidden="true">
+      <header class="sheet-nav">
+        <button class="text-btn" id="btnPfClose">关闭</button>
+        <span class="sheet-title">个人资料</span>
+        <button class="text-btn primary" id="btnPfSave">保存</button>
+      </header>
+
+      <div class="sheet-body">
+        <div class="group">
+          <div class="profile-head">
+            <div class="profile-avatar" id="pfAvatar"></div>
+            <div class="profile-meta">
+              <div class="profile-name" id="pfName">—</div>
+              <div class="profile-id" id="pfIdLine"></div>
+              <div class="profile-region" id="pfRegionLine"></div>
+              <div class="profile-sign" id="pfSignLine"></div>
+            </div>
+          </div>
+          <div class="row-btns">
+            <button type="button" class="ghost solid" id="btnPfChat">发消息</button>
+            <button type="button" class="ghost" id="btnPfMoments">她的朋友圈</button>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">资料</div>
+          <label class="field"><span>备注名</span><input id="pfNote" maxlength="24" placeholder="留空就用她的名字"></label>
+          <label class="field"><span>地区</span><input id="pfRegion" maxlength="24" placeholder="比如：杭州"></label>
+          <label class="field col"><span>个性签名</span><textarea id="pfSignature" rows="2" maxlength="120" placeholder="她的一句话"></textarea></label>
+          <button type="button" class="ghost" id="btnPfSignAi">让她自己想一句</button>
+        </div>
+
+        <div class="group">
+          <div class="group-title">和她</div>
+          <div class="kv" id="pfStats"></div>
+          <button type="button" class="ghost" id="btnPfEdit">编辑人设和节奏</button>
+        </div>
+      </div>
+    </section>
+
     <!-- 新建群聊 -->
     <section class="sheet" id="groupSheet" aria-hidden="true">
       <header class="sheet-nav">
@@ -363,6 +404,6 @@
   </div>
 </div>
 
-<script src="app.js?v=35"></script>
+<script src="app.js?v=36"></script>
 </body>
 </html>
