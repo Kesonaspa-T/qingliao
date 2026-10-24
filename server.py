@@ -383,6 +383,9 @@ def merge_state(old, new, *, background=False):
         mm = dict(m)
         base = old_moments.get(m.get("id"))
         if base:
+            # dmAt 是服务端的排期标记，客户端快照里没有，别让它被覆盖后重复排期
+            if base.get("dmAt") and not mm.get("dmAt"):
+                mm["dmAt"] = base["dmAt"]
             mm["likes"] = list(dict.fromkeys((mm.get("likes") or []) + (base.get("likes") or [])))
             comments = list(mm.get("comments") or [])
             have = {c.get("id") for c in comments}
@@ -404,9 +407,15 @@ def merge_state(old, new, *, background=False):
     for pid, p in old_pending.items():
         if pid in have:
             continue
-        # 已经到期的旧任务不再从磁盘捞回来：它要么已执行，要么是僵尸
-        if float(p.get("dueAt") or 0) <= _now:
-            continue
+        due = float(p.get("dueAt") or 0)
+        if due <= _now:
+            # 后台合并：这一轮刚执行过它，别再捞回来。
+            # 客户端快照：刚到期几秒的任务必须留着 —— 调度是 20 秒一轮，
+            # 客户端每几秒就 POST 一次全量状态，以前这里会把「这个周期该执行」
+            # 的任务直接删掉，朋友圈的点赞/评论/私聊就是这么丢的。
+            # 真正该丢的是拖了很久没人执行的僵尸。
+            if background or due <= _now - 900:
+                continue
         pending.append(p)
     cutoff = time.time() - 3600          # 一小时前就该执行却还留着的，说明对象已经没了，直接清掉
     out["pending"] = [p for p in pending if not any(
