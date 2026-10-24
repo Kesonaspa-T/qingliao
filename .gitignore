@@ -45,3 +45,4 @@ node_modules/
 # 打包出来的 .app 副本
 /desktop/*含修复*/
 /desktop/*.app
+/desktop/mac/build/

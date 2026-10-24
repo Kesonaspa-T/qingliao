@@ -66,9 +66,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         navigator.web = webView
         window.contentView = webView
 
-        load(serverURL())
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        // 第一次打开先问服务器地址；没配就直接显示一个说明页，
+        // 免得对着 127.0.0.1 白屏。
+        let saved = UserDefaults.standard.string(forKey: "server") ?? ""
+        if saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            DispatchQueue.main.async {
+                self.changeServer()
+                if (UserDefaults.standard.string(forKey: "server") ?? "").isEmpty {
+                    self.showWelcome()
+                }
+            }
+        } else {
+            load(saved)
+        }
+    }
+
+    func showWelcome() {
+        let html = "<meta name='viewport' content='width=device-width'>"
+            + "<body style='font:15px -apple-system;padding:48px;color:#333;line-height:1.7'>"
+            + "<h3 style='font-weight:600;margin:0 0 10px'>欢迎用轻聊</h3>"
+            + "<p style='color:#666;margin:0 0 18px'>先填一下轻聊服务端的地址（比如 http://你的服务器:8777）。"
+            + "单机使用的话，填 https://api.deepseek.com 也能直接开始聊。</p>"
+            + "<p style='color:#999;font-size:13px'>以后随时可以在菜单「轻聊 → 服务器地址…」里改。</p></body>"
+        webView.loadHTMLString(html, baseURL: nil)
     }
 
     func serverURL() -> String {
@@ -125,6 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "关于 轻聊", action: nil, keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "服务器地址…", action: #selector(changeServer), keyEquivalent: ",")
+        appMenu.addItem(withTitle: "重新加载首页", action: #selector(hardReload), keyEquivalent: "R")
         appMenu.addItem(withTitle: "刷新", action: #selector(reload), keyEquivalent: "r")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "隐藏 轻聊", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
