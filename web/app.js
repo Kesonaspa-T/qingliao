@@ -615,7 +615,7 @@ function renderConversations() {
     top.className = 'conv-top';
     const name = document.createElement('div');
     name.className = 'conv-name';
-    name.textContent = data.name;
+    name.textContent = data.note || data.name;
     const time = document.createElement('div');
     time.className = 'conv-time';
     time.textContent = listTime(lastMessage(data).ts);
@@ -701,7 +701,7 @@ function renderContacts() {
     head.style.padding = '12px 14px 6px';
     head.textContent = '朋友';
     contactList.append(head);
-    for (const f of [...state.friends].sort((a, b) => a.name.localeCompare(b.name, 'zh'))) {
+    for (const f of [...state.friends].sort((a, b) => (a.note || a.name).localeCompare(b.note || b.name, 'zh'))) {
       const row = document.createElement('div');
       row.className = 'conv';
       const cav = avatarEl(f);
@@ -714,7 +714,7 @@ function renderContacts() {
       top.className = 'conv-top';
       const name = document.createElement('div');
       name.className = 'conv-name';
-      name.textContent = f.name;
+      name.textContent = f.note || f.name;
       top.append(name);
       const bottom = document.createElement('div');
       bottom.className = 'conv-bottom';
@@ -1132,7 +1132,7 @@ function openChat(kind, id) {
   conv.unread = 0;
   renderConversations();
 
-  $('#peerName').textContent = conv.name;
+  $('#peerName').textContent = conv.note || conv.name;
   setStatus('在线');
   pageChat.classList.add('open');
   phone.classList.add('chat-open');
@@ -3148,7 +3148,7 @@ $('#btnFSave').addEventListener('click', () => {
     renderChat();
     renderConversations();
     renderContacts();
-    if (isActive('friend', f.id)) $('#peerName').textContent = f.name;
+    if (isActive('friend', f.id)) $('#peerName').textContent = f.note || f.name;
   }
   closeFriendSheet();
 });
@@ -3915,7 +3915,7 @@ async function syncTick(signal, force) {
       if (tab === 'contacts') renderContacts();
       if (merged.friends) refreshOpenFriendSheet();
       if (pageChat.classList.contains('open') && currentConv()) {
-        $('#peerName').textContent = currentConv().name;
+        $('#peerName').textContent = currentConv().note || currentConv().name;
         // 不再看 r.phase：只要数据变了就重绘，避免群聊卡在“正在输入”期间永不刷新
         rememberScroll();
         renderChat();
