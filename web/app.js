@@ -313,7 +313,16 @@ function scrollBottom(force) {
   catch (_) { chatEl.scrollTop = chatEl.scrollHeight; }
 }
 
-function setStatus(t) { statusEl.textContent = t; }
+function setStatus(t) {
+  // 空闲时标题下面显示她的个性签名（有签名就顶掉「在线」）
+  let text = t;
+  if (t === '在线') {
+    const conv = currentConv && currentConv();
+    if (conv && conv.signature) text = conv.signature;
+  }
+  statusEl.textContent = text;
+  statusEl.classList.toggle('is-sign', text !== t);
+}
 
 let toastTimer = null;
 function toast(text, ms = 2000) {
@@ -475,13 +484,25 @@ darkMedia.addEventListener('change', () => {
   if ((state.settings.theme || 'auto') === 'auto') applyTheme();
 });
 
+
+/** 图片地址：新格式是 @blob:<文件>，走服务器；老数据还是 data: 直接内联。 */
+function imgSrc(ref) {
+  if (!ref) return '';
+  if (ref.startsWith('@blob:')) {
+    // 单机模式没有服务器可取图，只能给个空图（老数据里不该有这种引用）
+    if (!isCloud()) return '';
+    return '/api/blob/' + encodeURIComponent(ref.slice(6));
+  }
+  return ref;
+}
+
 function avatarEl(who, cls) {
   const el = document.createElement('div');
   el.className = 'avatar' + (cls ? ' ' + cls : '');
   const url = who && who.avatar;
   if (url) {
     const img = document.createElement('img');
-    img.src = url; img.alt = '';
+    img.src = imgSrc(url); img.alt = '';
     el.append(img);
   } else {
     el.textContent = initialOf(who && who.name);
@@ -493,7 +514,7 @@ function paintAvatar(el, url, name) {
   el.textContent = '';
   if (url) {
     const img = document.createElement('img');
-    img.src = url; img.alt = '';
+    img.src = imgSrc(url); img.alt = '';
     el.append(img);
   } else {
     const s = document.createElement('span');
@@ -816,10 +837,22 @@ function renderMoments() {
     text.textContent = m.text;
     card.append(text);
 
-    if (m.image) {
+    const pics = Array.isArray(m.images) && m.images.length ? m.images : (m.image ? [m.image] : []);
+    if (pics.length > 1) {
+      const grid = document.createElement('div');
+      grid.className = 'moment-grid' + (pics.length === 2 ? ' two' : '') + (pics.length === 3 ? ' three' : '');
+      for (const src of pics.slice(0, 9)) {
+        const im = document.createElement('img');
+        im.src = imgSrc(src);
+        im.alt = '';
+        im.addEventListener('click', () => openLightbox(imgSrc(src)));
+        grid.append(im);
+      }
+      card.append(grid);
+    } else if (m.image) {
       const im = document.createElement('img');
       im.className = 'moment-img';
-      im.src = m.image;
+      im.src = imgSrc(m.image);
       im.alt = '';
       im.loading = 'lazy';
       im.addEventListener('click', () => openLightbox(m.image));
@@ -1040,7 +1073,8 @@ function postMoment(text) {
     id: uid('mo'),
     authorId: 'me',
     visibility: vis ? vis.value : 'public',
-    image: momentImage || '',
+    image: momentImages[0] || '',
+    images: momentImages.slice(),
     text: clean.slice(0, 500),
     ts: Date.now(),
     likes: [],
@@ -1130,6 +1164,8 @@ function openChat(kind, id) {
   if (!conv) return;
   state.conv = { kind, id };
   conv.unread = 0;
+  const lastSeen = lastMessage(conv);
+  if (lastSeen) conv.readAt = Math.max(Number(conv.readAt) || 0, lastSeen.ts || 0);
   renderConversations();
 
   $('#peerName').textContent = conv.note || conv.name;
@@ -1286,10 +1322,15 @@ function renderMessage(msg, opts = {}) {
   if (typing) {
     bubble.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
   } else if (msg.image) {
-    bubble.classList.add('pic');
     const img = document.createElement('img');
-    img.className = 'pic';
-    img.src = msg.image;
+    if (msg.sticker) {
+      img.className = 'sticker-img';
+      bubble.classList.add('sticker');
+    } else {
+      bubble.classList.add('pic');
+      img.className = 'pic';
+    }
+    img.src = imgSrc(msg.image);
     img.alt = '';
     bubble.append(img);
   } else if (msg.text && splitSvg(msg.text)) {
@@ -1593,6 +1634,14 @@ function buildMessages(friend, conv, nudge) {
 
   // 画图：不是「聊够多少轮就画」，而是由具体的事情触发
   const canDraw = fs(friend, 'doodle', s.doodle !== false);
+  const stk = stickers();
+  const stkTags = [...new Set(stk.flatMap((x) => x.tags || []))].slice(0, 40);
+  if (stkTags.length) {
+    sys += '\n\n【表情包】你手机里存着一批表情包，想发表情的时候在消息里单独一行写 [[表情:关键词]]。'
+      + '能用的关键词：' + stkTags.join('、')
+      + '。规矩：十来条消息最多发一次，只在情绪真的对得上时发，发的时候可以不配文字。';
+  }
+
   if (canDraw) {
     const lastUser = [...(conv.messages || [])].reverse().find((m) => m.role === 'user');
     const lastUserText = (lastUser && lastUser.text) || '';
@@ -2142,8 +2191,21 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   }
 
   if (maxParts != null) limit = Math.max(1, Math.min(limit, maxParts));
+
+  // 表情包：把 [[表情:关键词]] 取出来，找到对应的图，剩下的才是文字
+  const pool = stickers();
+  const usedStickers = [];
+  let body = String(text || '');
+  body = body.replace(/\[\[表情[:：]([^\]\n]+)\]\]/g, (_all, kw) => {
+    const key = String(kw || '').trim();
+    let hit = pool.find((x) => (x.tags || []).some((t) => t && (key.includes(t) || t.includes(key))));
+    if (!hit && pool.length) hit = pool[Math.floor(Math.random() * pool.length)];
+    if (hit && usedStickers.length < 2 && !usedStickers.includes(hit)) usedStickers.push(hit);
+    return '';
+  }).trim();
+
   // 画了图就整条发：按行拆会把 <svg> 拆成两半，图就没了
-  const parts = /<svg[\s>]/i.test(String(text || '')) ? [String(text).trim()] : splitReply(text, limit);
+  const parts = /<svg[\s>]/i.test(body) ? [body] : splitReply(body, limit);
   const now = Date.now();
   const active = isActive(kind, conv.id);
   if (active) clearReadMark();
@@ -2158,6 +2220,16 @@ async function deliver(kind, conv, text, authorId, maxParts) {
 
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;
+  }
+
+  // 表情包跟在文字后面发
+  for (const item of usedStickers) {
+    const m = { id: uid('m'), role: 'peer', authorId, text: '', image: item.url || '',
+      sticker: true, ts: Date.now() };
+    conv.messages.push(m);
+    if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
+    else conv.unread = (conv.unread || 0) + 1;
+    await sleep(320);
   }
 
   if (isActive(kind, conv.id)) {
@@ -2832,6 +2904,120 @@ function renderRelations(selected) {
   }
 }
 
+/* ---------------- 表情包 ---------------- */
+
+function stickers() { return (state.stickers = state.stickers || []); }
+
+function openStickerSheet() {
+  renderStickers();
+  const sheet = $('#stickerSheet');
+  sheet.classList.add('open');
+  sheet.setAttribute('aria-hidden', 'false');
+}
+
+function closeStickerSheet() {
+  const sheet = $('#stickerSheet');
+  sheet.classList.remove('open');
+  sheet.setAttribute('aria-hidden', 'true');
+}
+
+function renderStickers() {
+  const grid = $('#stickerGrid');
+  const list = stickers();
+  grid.textContent = '';
+  $('#stickerEmpty').hidden = list.length > 0;
+  for (const it of list) {
+    const cell = document.createElement('div');
+    cell.className = 'sticker-cell';
+    const img = document.createElement('img');
+    img.src = imgSrc(it.url);
+    img.alt = '';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'st-del';
+    del.textContent = '×';
+    del.addEventListener('click', () => {
+      state.stickers = stickers().filter((x) => x.id !== it.id);
+      persist();
+      renderStickers();
+      renderStickerCount();
+    });
+    const tags = document.createElement('input');
+    tags.className = 'st-tags';
+    tags.value = (it.tags || []).join(' ');
+    tags.placeholder = '标签';
+    tags.addEventListener('change', () => {
+      it.tags = tags.value.split(/[\s,，、]+/).filter(Boolean).slice(0, 8);
+      persist();
+    });
+    cell.append(img, del, tags);
+    grid.append(cell);
+  }
+}
+
+function renderStickerCount() {
+  const el = $('#stickerCount');
+  if (el) el.textContent = stickers().length ? `${stickers().length} 张` : '管理';
+}
+
+/** 图片先变成 blob 引用（云端），单机模式就留 data URL。 */
+async function uploadImage(dataUrl) {
+  if (!isCloud()) return dataUrl;
+  try {
+    const res = await apiFetch('/api/blob', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dataUrl }),
+      timeout: 30000,
+    });
+    if (!res.ok) return dataUrl;
+    const j = await res.json();
+    return j && j.ref ? j.ref : dataUrl;
+  } catch (_) {
+    return dataUrl;
+  }
+}
+
+/** 让识图模型给表情包起几个关键词。 */
+async function tagSticker(dataUrl) {
+  const key = (state.settings.apiKey || '').trim();
+  if (!key || state.settings.vision === false) return [];
+  try {
+    const text = await quickChat([
+      { role: 'system', content: '用 3~6 个中文词概括这张表情包表达的情绪、画面或用法，逗号分隔，不要编号，不要解释。例：开心,猫,得意' },
+      { role: 'user', content: [{ type: 'text', text: '这张表情包是什么？' }, { type: 'image_url', image_url: { url: dataUrl } }] },
+    ]);
+    return String(text || '').split(/[\s,，、;；]+/).filter(Boolean).slice(0, 8);
+  } catch (_) {
+    return [];
+  }
+}
+
+async function addStickers(files) {
+  const list = [...files].slice(0, 20);
+  if (!list.length) return;
+  toast(`正在处理 ${list.length} 张…`);
+  for (const file of list) {
+    const dataUrl = await imageToDataUrl(file, 480, 0.9);
+    if (!dataUrl) continue;
+    const id = uid('st');
+    const item = { id, url: dataUrl, tags: [], ts: Date.now() };
+    state.stickers = stickers();
+    state.stickers.push(item);
+    renderStickers();
+    persist();
+    // 先占位再补标签，避免大图卡住 UI
+    tagSticker(dataUrl).then(async (tags) => {
+      if (tags.length) item.tags = tags;
+      item.url = await uploadImage(dataUrl);
+      renderStickers();
+      persist();
+    }).catch(() => {});
+  }
+  renderStickerCount();
+  toast('加好了');
+}
+
 /* ---------------- 个人资料页 ---------------- */
 
 let profileFriendId = null;
@@ -3033,6 +3219,16 @@ function closeFriendSheet() {
 $('#btnFClose').addEventListener('click', closeFriendSheet);
 
 /* ---------------- 个人资料页的按钮 ---------------- */
+$('#btnStClose').addEventListener('click', closeStickerSheet);
+$('#btnStAdd').addEventListener('click', () => $('#stFile').click());
+$('#btnStPick').addEventListener('click', () => $('#stFile').click());
+$('#stFile').addEventListener('change', (e) => {
+  const files = [...(e.target.files || [])];
+  e.target.value = '';
+  if (files.length) addStickers(files).then(() => {});
+});
+$('#btnStickers').addEventListener('click', () => { closeSheet(); openStickerSheet(); });
+
 $('#btnPfClose').addEventListener('click', closeProfileSheet);
 $('#btnPfSave').addEventListener('click', saveProfile);
 $('#btnPfSignAi').addEventListener('click', writeSignatureByAi);
@@ -3220,30 +3416,56 @@ $('#btnGCreate').addEventListener('click', () => {
 
 /* ---------------- 发朋友圈 ---------------- */
 
-let momentImage = '';
+let momentImages = [];
 
 function openMomentSheet() {
   $('#fMomentText').value = '';
-  momentImage = '';
+  momentImages = [];
+  paintMomentPicks();
   if (!$('#fMomentImg')) {
     const wrap = document.createElement('div');
     wrap.className = 'field col';
-    wrap.innerHTML = '<span>配图（可选）</span><input type="file" id="fMomentImg" accept="image/*">'
+    wrap.innerHTML = '<span>配图（可选，最多 9 张）</span>'
+      + '<input type="file" id="fMomentImg" accept="image/*" multiple>'
+      + '<div class="moment-picks" id="momentPicks"></div>'
       + '<span style="margin-top:10px">谁能看到</span>'
       + '<select id="fMomentVis"><option value="public">所有人</option>'
       + '<option value="relations">只有我的好友</option>'
       + '<option value="private">仅自己</option></select>';
     $('#fMomentText').closest('.sheet-body').appendChild(wrap);
     wrap.querySelector('input').addEventListener('change', async (e) => {
-      const file = e.target.files && e.target.files[0];
-      if (!file) { momentImage = ''; return; }
-      momentImage = await imageToDataUrl(file, 1280, 0.82);
-      toast('已选择图片');
+      const files = [...(e.target.files || [])].slice(0, 9 - momentImages.length);
+      for (const file of files) {
+        const url = await imageToDataUrl(file, 1280, 0.82);
+        if (url && momentImages.length < 9) momentImages.push(url);
+      }
+      e.target.value = '';
+      paintMomentPicks();
+      if (files.length) toast(`已选 ${momentImages.length} 张`);
     });
   }
   momentSheet.classList.add('open');
   momentSheet.setAttribute('aria-hidden', 'false');
   setTimeout(() => $('#fMomentText').focus(), 200);
+}
+
+function paintMomentPicks() {
+  const box = document.getElementById('momentPicks');
+  if (!box) return;
+  box.textContent = '';
+  momentImages.forEach((url, i) => {
+    const cell = document.createElement('div');
+    cell.className = 'moment-pick';
+    const img = document.createElement('img');
+    img.src = url;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'moment-pick-x';
+    x.textContent = '×';
+    x.addEventListener('click', () => { momentImages.splice(i, 1); paintMomentPicks(); });
+    cell.append(img, x);
+    box.append(cell);
+  });
 }
 
 /** 关弹层时把焦点还回去，安卓上输入法才会跟着收起。 */
@@ -3481,6 +3703,12 @@ function cleanLine(text, limit) {
   return (text || '').trim().replace(/^["“「]|["”」]$/g, '').split('\n')[0].trim().slice(0, limit);
 }
 
+/** 朋友圈这种要多段的：保留换行，只去掉首尾引号。 */
+function cleanBlock(text, limit) {
+  const t = (text || '').trim().replace(/^["“「]|["”」]$/g, '');
+  return t.split('\n').map((x) => x.trim()).filter(Boolean).join('\n').slice(0, limit);
+}
+
 function threadText(m, limit = 10) {
   const list = (m.comments || []).slice(-limit);
   return list.map((c) => `${nameOf(c.by)}：${c.text}`).join('\n');
@@ -3598,10 +3826,12 @@ async function clientSocialTick(force) {
   if (!isCloud() && hour >= 8 && hour <= 23 && nowSec2 >= nxt && state.friends.length) {
     const author = state.friends[Math.floor(Math.random() * state.friends.length)];
     try {
-      const text = cleanLine(await quickChat([
-        { role: 'system', content: `${author.persona}\n\n现在要发一条朋友圈。要求：1~3 句，口语，像随手发的；不写配图说明，不加引号；不提“朋友圈”三个字；最多一个 emoji；只输出文字本身。` },
+      const text = cleanBlock(await quickChat([
+        { role: 'system', content: `${author.persona}\n\n现在要发一条朋友圈。要求：3~6 句、80~200 字，像真的在记事；`
+          + '要有一个具体到能看见的细节（味道、声音、价钱、天气、别人的一句话）；可以有情绪但别升华、别讲道理；'
+          + '不写配图说明，不加引号，不提“朋友圈”三个字，不提问；最多一个 emoji；直接输出正文，最多两段。' },
         { role: 'user', content: `现在是${timeOf(Date.now())}。` },
-      ]), 120);
+      ]), 600);
       if (text) {
         const m = { id: uid('mo'), authorId: author.id, text, ts: Date.now(), likes: [], comments: [] };
         state.moments.unshift(m);
@@ -3675,15 +3905,36 @@ function mergeRemote(remote) {
     let hit = false;
     const have = new Set(local.messages.map((m) => m.id));
     const byId = new Map(local.messages.map(m => [m.id, m]));
+    // 第一次见到这个会话（重装 / 换设备）：整段历史直接收下，
+    // 不算未读，否则一开 App 就冒出几百条「新消息」。
+    const firstTime = !local.messages.length;
+    if (firstTime) {
+      const incoming = (list || []).filter((m) => !dead.has(m.id));
+      if (incoming.length) {
+        local.messages = incoming.slice();
+        local.readAt = incoming.reduce((mx, m) => Math.max(mx, m.ts || 0), 0);
+        local.unread = 0;
+        changed = true; hit = true;
+      }
+      return hit;
+    }
+    const readAt = Number(local.readAt) || 0;
     for (const m of list || []) {
       if (dead.has(m.id)) continue;
       const existing = byId.get(m.id);
-      if (kind === 'group' && existing && existing.ts !== m.ts) {
+      if (existing && kind === 'group' && existing.ts !== m.ts) {
         existing.ts = m.ts; changed = true; hit = true;
+      }
+      // 图片已经从状态里挪到 blob 了：本地还留着 data URL 的，换成引用，别再上传一遍
+      if (existing && typeof m.image === 'string' && m.image.startsWith('@blob:')
+          && existing.image !== m.image) {
+        existing.image = m.image; changed = true; hit = true;
       }
       if (!have.has(m.id)) {
         local.messages.push(m);
-        if (m.role !== 'user' && !isActive(kind, local.id)) local.unread = (local.unread || 0) + 1;
+        if (m.role !== 'user' && !isActive(kind, local.id) && (m.ts || 0) > readAt) {
+          local.unread = (local.unread || 0) + 1;
+        }
         changed = true; hit = true;
       }
     }

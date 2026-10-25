@@ -12,7 +12,9 @@
 """
 
 import argparse
+import base64
 import datetime
+import gzip
 import hashlib
 import json
 import os
@@ -263,6 +265,85 @@ def merge_friend(base, incoming, patch, *, background=False):
     else:
         out.pop("settings", None)
     return out
+
+
+BLOB_DIR = os.path.join(DATA_DIR, "blobs")
+
+
+def _b64_part(data_url):
+    m = re.match(r"^data:image/([a-zA-Z0-9+.-]+);base64,(.+)$", data_url or "", re.S)
+    if not m:
+        return None, None
+    return m.group(1).lower(), m.group(2)
+
+
+def save_blob(uid, data_url):
+    """把 data:image/... 存成文件，返回 @blob:<sha1>.<ext>；失败返回 None。"""
+    ext, b64 = _b64_part(data_url)
+    if not ext or not b64:
+        return None
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception:
+        return None
+    if not raw or len(raw) > 8 * 1024 * 1024:
+        return None
+    name = hashlib.sha1(raw).hexdigest() + "." + ("jpg" if ext == "jpeg" else ext)
+    d = os.path.join(BLOB_DIR, uid)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, name)
+    if not os.path.exists(path):
+        with open(path, "wb") as fh:
+            fh.write(raw)
+    return "@blob:" + name
+
+
+def blob_path(uid, name):
+    if not name or not name.isascii() or len(name) > 64:
+        return None
+    if not re.match(r"^[0-9a-f]{40}\.[a-z0-9]{2,4}$", name):
+        return None
+    path = os.path.join(BLOB_DIR, uid, name)
+    return path if os.path.exists(path) else None
+
+
+def extract_blobs(uid, st):
+    """状态里的图片全部换成 @blob: 引用。返回改动数。"""
+    n = 0
+
+    def conv(url):
+        nonlocal n
+        if isinstance(url, str) and url.startswith("data:image"):
+            ref = save_blob(uid, url)
+            if ref:
+                n += 1
+                return ref
+        return url
+
+    me = st.get("me") or {}
+    if isinstance(me, dict) and me.get("avatar"):
+        me["avatar"] = conv(me["avatar"])
+    for c in st.get("friends") or []:
+        if isinstance(c, dict) and c.get("avatar"):
+            c["avatar"] = conv(c["avatar"])
+    for coll in ("friends", "groups"):
+        for c in st.get(coll) or []:
+            if not isinstance(c, dict):
+                continue
+            for m in c.get("messages") or []:
+                if isinstance(m, dict) and m.get("image"):
+                    m["image"] = conv(m["image"])
+    for m in st.get("moments") or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("image"):
+            m["image"] = conv(m["image"])
+        if isinstance(m.get("images"), list):
+            m["images"] = [conv(u) for u in m["images"]]
+    for it in st.get("stickers") or []:
+        if isinstance(it, dict) and it.get("url"):
+            it["url"] = conv(it["url"])
+    return n
 
 
 def merge_state(old, new, *, background=False):
@@ -526,8 +607,18 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _json(self, code, obj):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        gz = False
+        if len(data) > 8192 and "gzip" in (self.headers.get("Accept-Encoding") or "").lower():
+            try:
+                data = gzip.compress(data, 6)
+                gz = True
+            except Exception:
+                gz = False
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -597,6 +688,23 @@ class Handler(SimpleHTTPRequestHandler):
                 })
                 return
 
+            if path.startswith("/api/blob/"):
+                name = path[len("/api/blob/"):]
+                fp = blob_path(uid, name)
+                if not fp:
+                    return self._json(404, {"error": "not found"})
+                with open(fp, "rb") as fh:
+                    data = fh.read()
+                ctype = "image/gif" if name.endswith(".gif") else (
+                    "image/png" if name.endswith(".png") else (
+                        "image/webp" if name.endswith(".webp") else "image/jpeg"))
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path == "/api/rev":
                 st = load_state(uid)
                 return self._json(200, {"rev": int(st.get("rev") or 0)})
@@ -630,7 +738,12 @@ class Handler(SimpleHTTPRequestHandler):
                 cur = load_state(uid)
                 merged = merge_state(cur, payload)
                 merged["rev"] = int(cur.get("rev") or 0)
+                # 图片不进状态文件：全部落盘成 blob，状态里只留 @blob: 引用。
+                # 这是「每次打开要同步很久」的根因——以前整份状态 5MB 多，全是 base64。
+                got = extract_blobs(uid, merged)
                 save_state(merged, uid)
+            if got:
+                print("[BLOB] 新图片 %d 张 -> %s" % (got, uid), flush=True)
             build = self.headers.get("X-Qingliao-Build", "legacy")
             print("[SYNC] client=%s deleted_in=%d deleted_saved=%d rev=%d" % (
                 build, len(payload.get("deleted") or []),
@@ -644,6 +757,14 @@ class Handler(SimpleHTTPRequestHandler):
                 # 用户在群里刚说完话：不用等 20 秒的轮询，马上让她们接话。
                 threading.Thread(target=run_social_now, args=(uid,), daemon=True).start()
             return self._json(200, {"ok": True, "rev": merged["rev"], "moments": len(merged.get("moments") or [])})
+        if path == "/api/blob":
+            uid = self._uid()
+            payload = self._read_json() or {}
+            url = payload.get("dataUrl") or ""
+            ref = save_blob(uid, url) if isinstance(url, str) else None
+            if not ref:
+                return self._json(400, {"error": "不是有效的图片"})
+            return self._json(200, {"ref": ref})
         if path == "/api/chat":
             return self._handle_chat()
         if path == "/api/ping":
@@ -881,19 +1002,22 @@ def gen_moment_text(friend, settings, key):
         + (friend.get("persona") or "") + "\n\n"
         "现在要发一条朋友圈。\n"
         "要求：\n"
-        "- 1~3 句，口语，像随手发的\n"
-        "- 不写配图说明，不加引号，不用标题\n"
-        "- 不要提“朋友圈”三个字，不要提问\n"
-        "- 最多一个 emoji\n"
-        "- 只输出这条朋友圈的文字本身"
+        "- 3~6 句，80~200 字，像真的在记事，不是公众号文案\n"
+        "- 要有一个具体到能看见的细节：某个味道、声音、价钱、天气、别人的一句话\n"
+        "- 可以有一点情绪，但不要升华、不要讲道理、不要金句\n"
+        "- 不要写配图说明，不加引号，不用标题，不要提“朋友圈”三个字\n"
+        "- 不要提问，不要总结，最多一个 emoji\n"
+        "- 直接输出正文，用换行分段（最多 2 段）"
     )
     user = "现在是周%s %s。" % (wd, now.strftime("%H:%M"))
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
         [{"role": "system", "content": sys}, {"role": "user", "content": user}],
-        max_tokens=120, temperature=1.0,
+        max_tokens=420, temperature=1.0,
     )
-    return _clean(text, 120)
+    text = (text or "").strip().strip('"“”「」')
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    return "\n".join(lines)[:600]
 
 
 def thread_text(st, m, limit=10):

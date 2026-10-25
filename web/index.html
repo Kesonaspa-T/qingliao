@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f7f8fa">
 <title>轻聊</title>
-<link rel="stylesheet" href="style.css?v=23">
+<link rel="stylesheet" href="style.css?v=24">
 <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
@@ -192,6 +192,7 @@
           <p class="hint" id="ctxHint">deepseek-flash 上下文 1M token，塞得下很多条。</p>
           <label class="field row-inline"><span>让她看图</span><input id="fVision" type="checkbox" class="switch"></label>
           <label class="field row-inline"><span>她会画简笔画</span><input id="fDoodle" type="checkbox" class="switch"></label>
+          <button type="button" class="field row-inline link-row" id="btnStickers"><span>表情包</span><span id="stickerCount" class="link-val">管理</span></button>
           <p class="hint">打开后，她只在具体的事情上才画（你问她在干嘛、她答应画给你、你心情不好时），不是按轮数画。每段关系可以单独关掉。</p>
           <label class="field row-inline"><span>联网搜索</span><input id="fSearch" type="checkbox" class="switch"></label>
           <p class="hint" id="searchHint">打开后她遇到不知道的事会自己上网查（DeepSeek 的 Search 接口，按次计费，很便宜）。</p>
@@ -285,6 +286,22 @@
         </div>
 
         <p class="footnote">每个人的聊天记录是分开存的。</p>
+      </div>
+    </section>
+
+    <!-- 表情包管理 -->
+    <section class="sheet" id="stickerSheet" aria-hidden="true">
+      <header class="sheet-nav">
+        <button class="text-btn" id="btnStClose">关闭</button>
+        <span class="sheet-title">表情包</span>
+        <button class="text-btn primary" id="btnStAdd">添加</button>
+      </header>
+      <div class="sheet-body">
+        <p class="hint">导入 gif 或图片，她会自己认出这是什么情绪，聊天时偶尔发给你。标签可以改。</p>
+        <input type="file" id="stFile" accept="image/*" multiple hidden>
+        <div><button type="button" class="ghost" id="btnStPick">＋ 从相册选</button></div>
+        <div class="sticker-grid" id="stickerGrid"></div>
+        <p class="footnote" id="stickerEmpty">还没有表情包。加一张试试。</p>
       </div>
     </section>
 
@@ -404,6 +421,6 @@
   </div>
 </div>
 
-<script src="app.js?v=37"></script>
+<script src="app.js?v=38"></script>
 </body>
 </html>

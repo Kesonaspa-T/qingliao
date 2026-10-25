@@ -145,6 +145,13 @@ html[data-theme="dark"] body {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .peer-status { font-size: 11px; color: var(--sub); margin-top: 2px; height: 14px; }
+.peer-status.is-sign {
+  color: var(--sub);
+  font-size: 11.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 240px; margin-left: auto; margin-right: auto;
+}
+
 
 /* 聊天区 */
 .chat {
@@ -208,6 +215,25 @@ html[data-theme="dark"] body {
 .profile-sign { font-size: 13px; color: var(--text); opacity: .82; margin-top: 6px; line-height: 1.45; }
 .kv { font-size: 13px; color: var(--sub); line-height: 1.9; padding: 2px 2px 8px; }
 .avatar.tappable { cursor: pointer; }
+
+.moment-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
+  margin: 8px 0 2px; max-width: 100%;
+}
+.moment-grid.two { grid-template-columns: repeat(2, 1fr); max-width: 66%; }
+.moment-grid.three { grid-template-columns: repeat(3, 1fr); }
+.moment-grid img {
+  width: 100%; aspect-ratio: 1 / 1; object-fit: cover;
+  border-radius: 6px; display: block; background: var(--field-bg);
+}
+.moment-picks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.moment-pick { position: relative; width: 62px; height: 62px; border-radius: 10px; overflow: hidden; }
+.moment-pick img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.moment-pick-x {
+  position: absolute; top: 2px; right: 2px; width: 18px; height: 18px;
+  border: 0; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff;
+  font-size: 13px; line-height: 18px; padding: 0; cursor: pointer;
+}
 
 .bubble img.doodle {
   display: block;
@@ -1347,3 +1373,22 @@ html[data-theme="dark"] .login { background: #0b0d10; }
   .phone:has(#pageMsg[hidden]) .desk-empty { display: none; }
   #pageMoments { flex: 1 1 auto; }
 }
+
+.link-row { display: flex; align-items: center; justify-content: space-between; width: 100%; background: none; border: 0; }
+.link-val { color: var(--sub); font-size: 13px; }
+.sticker-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+.sticker-cell { position: relative; border-radius: 12px; overflow: hidden; background: var(--field-bg); }
+.sticker-cell img { width: 100%; aspect-ratio: 1/1; object-fit: contain; display: block; }
+.sticker-cell .st-tags {
+  width: 100%; border: 0; background: rgba(0,0,0,.04); font-size: 11.5px;
+  padding: 4px 6px; color: var(--text); text-align: center;
+}
+.sticker-cell .st-del {
+  position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border: 0;
+  border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; font-size: 14px;
+  line-height: 20px; padding: 0; cursor: pointer;
+}
+.sticker-cell.busy { opacity: .5; }
+
+.bubble.sticker { background: transparent !important; padding: 0 !important; box-shadow: none !important; }
+.bubble .sticker-img { width: 120px; height: 120px; object-fit: contain; display: block; }
