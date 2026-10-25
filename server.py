@@ -1903,7 +1903,9 @@ def social_tick(uid="local"):
                     hist.append("%s：%s%s" % (who, mt[:60], "（附图）" if m.get("image") else ""))
                 elif m.get("image"):
                     hist.append("%s：（发了一张图片）" % who)
-                if m.get("image"):
+                # 只把「主人发的图」给模型看：她们自己发的图/表情包成本高，
+                # 历史里用「（发了一张图片）」带过就够了
+                if m.get("image") and m.get("role") == "user":
                     du = as_data_url(uid, m["image"])
                     if du:
                         pics.append(du)
