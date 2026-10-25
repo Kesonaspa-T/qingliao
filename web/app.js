@@ -1651,7 +1651,7 @@ async function resolveImagesForModel(conv, budget = 2) {
   let left = budget;
   for (let i = list.length - 1; i >= 0 && left > 0; i -= 1) {
     const m = list[i];
-    if (!m.image) continue;
+    if (!m.image || m.role !== 'user') continue;   // 她自己发的图不带（接口不收）
     left -= 1;
     map.set(m.id, await imageForModel(m.image));
   }
@@ -1659,16 +1659,25 @@ async function resolveImagesForModel(conv, budget = 2) {
 }
 
 function toApiMessage(m, allowImage, imgMap) {
-  const role = m.role === 'user' ? 'user' : 'assistant';
+  const isUser = m.role === 'user';
+  const role = isUser ? 'user' : 'assistant';
   if (m.image) {
-    const url = (allowImage && imgMap) ? (imgMap.get(m.id) || '') : '';
+    // 只有用户消息能带图：接口明确不支持 assistant 里的 image_url
+    //（报错：Image in assistant message is not supported）
+    const url = (isUser && allowImage && imgMap) ? (imgMap.get(m.id) || '') : '';
     if (url && state.settings.vision) {
       return { role, content: [
         { type: 'text', text: m.text || '（图片）' },
         { type: 'image_url', image_url: { url } },
       ] };
     }
-    return { role, content: (m.text ? m.text + ' ' : '') + '（发了一张图片）' };
+    // 她自己发的图/表情包：用文字让她记得发过什么
+    let label = '（发了一张图片）';
+    if (m.sticker) {
+      const tags = Array.isArray(m.stickerTags) ? m.stickerTags.filter(Boolean) : [];
+      label = '（发了一个表情包' + (tags.length ? '：' + tags.join('、') : '') + '）';
+    }
+    return { role, content: (m.text ? m.text + ' ' : '') + label };
   }
   return { role, content: m.text };
 }
@@ -2291,7 +2300,7 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   // 表情包跟在文字后面发
   for (const item of usedStickers) {
     const m = { id: uid('m'), role: 'peer', authorId, text: '', image: item.url || '',
-      sticker: true, ts: Date.now() };
+      sticker: true, stickerTags: (item.tags || []).slice(), ts: Date.now() };
     conv.messages.push(m);
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;
@@ -3072,12 +3081,24 @@ async function tagSticker(dataUrl) {
   }
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ''));
+    fr.onerror = () => resolve('');
+    fr.readAsDataURL(file);
+  });
+}
+
 async function addStickers(files) {
   const list = [...files].slice(0, 20);
   if (!list.length) return;
   toast(`正在处理 ${list.length} 张…`);
   for (const file of list) {
-    const dataUrl = await imageToDataUrl(file, 480, 0.9);
+    // gif 必须原样收下：过一遍 canvas 就只剩第一帧，动图就死了
+    const dataUrl = (file.type === 'image/gif' && file.size <= 3 * 1024 * 1024)
+      ? await fileToDataUrl(file)
+      : await imageToDataUrl(file, 480, 0.9);
     if (!dataUrl) continue;
     const id = uid('st');
     const item = { id, url: dataUrl, tags: [], ts: Date.now() };
