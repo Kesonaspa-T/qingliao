@@ -554,7 +554,7 @@ def load_state(uid="local"):
         raise StateReadError("状态文件格式错误，已停止保存：%s" % path)
 
     for key in ("version", "rev", "me", "friends", "groups", "moments", "pending",
-                "deleted", "drafts", "social"):
+                "deleted", "drafts", "social", "stickers"):
         if key in state and state[key] is not None:
             base[key] = state[key]
     if isinstance(state.get("settings"), dict):

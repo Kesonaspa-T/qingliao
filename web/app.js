@@ -179,6 +179,7 @@ function defaultState() {
     friends: [],
     groups: [],
     moments: [],
+    stickers: [],
     pending: [],
     deleted: [],
     social: {},
@@ -1700,9 +1701,10 @@ function buildMessages(friend, conv, nudge, imgMap) {
   const stk = stickers();
   const stkTags = [...new Set(stk.flatMap((x) => x.tags || []))].slice(0, 40);
   if (stkTags.length) {
-    sys += '\n\n【表情包】你手机里存着一批表情包，想发表情的时候在消息里单独一行写 [[表情:关键词]]。'
-      + '能用的关键词：' + stkTags.join('、')
-      + '。规矩：十来条消息最多发一次，只在情绪真的对得上时发，发的时候可以不配文字。';
+    sys += '\n\n【表情包】你手机里存着这些表情包，关键词：' + stkTags.join('、') + '。'
+      + '想发表情时，消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。'
+      + '⚠️ 只在文字里说「我要发个表情」「都给你啦」是不算发出的，必须写出 [[表情:关键词]] 这个标记才会真的发出去。'
+      + '规矩：十来条最多发一次，情绪对得上才发，表情包可以单独发不带文字。';
   }
 
   if (canDraw) {
@@ -2970,7 +2972,13 @@ function renderRelations(selected) {
 
 /* ---------------- 表情包 ---------------- */
 
-function stickers() { return (state.stickers = state.stickers || []); }
+function stickers() {
+  const list = (state.stickers = state.stickers || []);
+  for (const it of list) {
+    if (!Array.isArray(it.tags) || !it.tags.length) it.tags = ['表情'];
+  }
+  return list;
+}
 
 function openStickerSheet() {
   renderStickers();
@@ -2990,6 +2998,9 @@ function renderStickers() {
   const list = stickers();
   grid.textContent = '';
   $('#stickerEmpty').hidden = list.length > 0;
+  $('#stickerEmpty').textContent = list.length
+    ? ''
+    : '还没有表情包。加一张试试（导入后她会自己认标签）。';
   for (const it of list) {
     const cell = document.createElement('div');
     cell.className = 'sticker-cell';
@@ -3051,7 +3062,11 @@ async function tagSticker(dataUrl) {
       { role: 'system', content: '用 3~6 个中文词概括这张表情包表达的情绪、画面或用法，逗号分隔，不要编号，不要解释。例：开心,猫,得意' },
       { role: 'user', content: [{ type: 'text', text: '这张表情包是什么？' }, { type: 'image_url', image_url: { url: dataUrl } }] },
     ]);
-    return String(text || '').split(/[\s,，、;；]+/).filter(Boolean).slice(0, 8);
+    return String(text || '')
+      .split(/[\s,，、;；/|]+/)
+      .map((w) => w.replace(/[。．.!！?？"'“”‘’（）()【】\[\]]/g, '').trim())
+      .filter((w) => w && w.length <= 8)
+      .slice(0, 6);
   } catch (_) {
     return [];
   }
@@ -3072,7 +3087,8 @@ async function addStickers(files) {
     persist();
     // 先占位再补标签，避免大图卡住 UI
     tagSticker(dataUrl).then(async (tags) => {
-      if (tags.length) item.tags = tags;
+      // 识别不出来也要留个标签，否则她根本不知道有这个表情包可用
+      item.tags = tags.length ? tags : ['表情'];
       item.url = await uploadImage(dataUrl);
       renderStickers();
       persist();
@@ -4654,6 +4670,7 @@ function migrate(raw) {
   if (Array.isArray(raw.moments)) s.moments = raw.moments;
   if (Array.isArray(raw.pending)) s.pending = raw.pending;
   if (Array.isArray(raw.deleted)) s.deleted = raw.deleted;
+  if (Array.isArray(raw.stickers)) s.stickers = raw.stickers;
   if (raw.social) s.social = raw.social;
   if (raw.drafts) s.drafts = raw.drafts;
 
