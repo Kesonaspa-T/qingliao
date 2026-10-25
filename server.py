@@ -30,6 +30,7 @@ import time
 import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs
 from urllib.request import Request, urlopen
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -660,6 +661,31 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _do_GET(self):
         path = self.path.split("?")[0]
+        if path.startswith("/api/blob/"):
+            # <img> 带不了 Authorization 头，允许用 ?t=<token> 传
+            owner = self._uid()
+            if not owner:
+                qs = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+                tok = (qs.get("t") or [""])[0].strip()
+                if tok:
+                    owner = (load_users().get("sessions") or {}).get(tok)
+            name = path[len("/api/blob/"):]
+            fp = blob_path(owner, name) if owner else None
+            if not fp:
+                return self._json(404, {"error": "not found"})
+            with open(fp, "rb") as fh:
+                data = fh.read()
+            ctype = "image/gif" if name.endswith(".gif") else (
+                "image/png" if name.endswith(".png") else (
+                    "image/webp" if name.endswith(".webp") else "image/jpeg"))
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if path == "/api/authinfo":
             data = load_users()
             return self._json(200, {"needLogin": bool(data.get("users")), "users": len(data.get("users") or [])})
@@ -688,23 +714,6 @@ class Handler(SimpleHTTPRequestHandler):
                 })
                 return
 
-            if path.startswith("/api/blob/"):
-                name = path[len("/api/blob/"):]
-                fp = blob_path(uid, name)
-                if not fp:
-                    return self._json(404, {"error": "not found"})
-                with open(fp, "rb") as fh:
-                    data = fh.read()
-                ctype = "image/gif" if name.endswith(".gif") else (
-                    "image/png" if name.endswith(".png") else (
-                        "image/webp" if name.endswith(".webp") else "image/jpeg"))
-                self.send_response(200)
-                self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
-                self.end_headers()
-                self.wfile.write(data)
-                return
             if path == "/api/rev":
                 st = load_state(uid)
                 return self._json(200, {"rev": int(st.get("rev") or 0)})

@@ -491,7 +491,10 @@ function imgSrc(ref) {
   if (ref.startsWith('@blob:')) {
     // 单机模式没有服务器可取图，只能给个空图（老数据里不该有这种引用）
     if (!isCloud()) return '';
-    return '/api/blob/' + encodeURIComponent(ref.slice(6));
+    // <img> 带不了 Authorization 头，token 走查询参数
+    const name = encodeURIComponent(ref.slice(6));
+    const q = TOKEN ? ('?t=' + encodeURIComponent(TOKEN)) : '';
+    return SERVER + '/api/blob/' + name + q;
   }
   return ref;
 }
