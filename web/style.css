@@ -1392,3 +1392,8 @@ html[data-theme="dark"] .login { background: #0b0d10; }
 
 .bubble.sticker { background: transparent !important; padding: 0 !important; box-shadow: none !important; }
 .bubble .sticker-img { width: 120px; height: 120px; object-fit: contain; display: block; }
+
+.sticker-cell .st-desc {
+  font-size: 10.5px; color: var(--sub); padding: 0 6px 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}

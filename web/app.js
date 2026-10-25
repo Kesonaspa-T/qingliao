@@ -1675,7 +1675,8 @@ function toApiMessage(m, allowImage, imgMap) {
     let label = '（发了一张图片）';
     if (m.sticker) {
       const tags = Array.isArray(m.stickerTags) ? m.stickerTags.filter(Boolean) : [];
-      label = '（发了一个表情包' + (tags.length ? '：' + tags.join('、') : '') + '）';
+      const what = m.stickerDesc || (tags.length ? tags.join('、') : '');
+      label = '（你刚发了一个表情包' + (what ? '：' + what : '') + '）';
     }
     return { role, content: (m.text ? m.text + ' ' : '') + label };
   }
@@ -1708,9 +1709,14 @@ function buildMessages(friend, conv, nudge, imgMap) {
   // 画图：不是「聊够多少轮就画」，而是由具体的事情触发
   const canDraw = fs(friend, 'doodle', s.doodle !== false);
   const stk = stickers();
+  const stkList = stk.filter((x) => x.tags && x.tags.length).slice(0, 12).map((x) => {
+    const kw = x.tags.join('/');
+    const d = (x.desc || '').slice(0, 14);
+    return d ? kw + '=' + d : kw;
+  });
   const stkTags = [...new Set(stk.flatMap((x) => x.tags || []))].slice(0, 40);
-  if (stkTags.length) {
-    sys += '\n\n【表情包】你手机里存着这些表情包，关键词：' + stkTags.join('、') + '。'
+  if (stkList.length) {
+    sys += '\n\n【表情包】你手机里存着这些表情包（关键词=画面）：' + stkList.join('；') + '。'
       + '想发表情时，消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。'
       + '⚠️ 只在文字里说「我要发个表情」「都给你啦」是不算发出的，必须写出 [[表情:关键词]] 这个标记才会真的发出去。'
       + '规矩：十来条最多发一次，情绪对得上才发，表情包可以单独发不带文字。';
@@ -2300,7 +2306,8 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   // 表情包跟在文字后面发
   for (const item of usedStickers) {
     const m = { id: uid('m'), role: 'peer', authorId, text: '', image: item.url || '',
-      sticker: true, stickerTags: (item.tags || []).slice(), ts: Date.now() };
+      sticker: true, stickerTags: (item.tags || []).slice(),
+      stickerDesc: item.desc || '', ts: Date.now() };
     conv.messages.push(m);
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;
@@ -3026,6 +3033,12 @@ function renderStickers() {
       renderStickers();
       renderStickerCount();
     });
+    if (it.desc) {
+      const d = document.createElement('div');
+      d.className = 'st-desc';
+      d.textContent = it.desc;
+      cell.append(d);
+    }
     const tags = document.createElement('input');
     tags.className = 'st-tags';
     tags.value = (it.tags || []).join(' ');
@@ -3062,22 +3075,30 @@ async function uploadImage(dataUrl) {
   }
 }
 
-/** 让识图模型给表情包起几个关键词。 */
+/** 识图：一次拿到「关键词」和「一句话描述」。
+ *  关键词给她挑（进 prompt），描述让她记得自己发的是什么（不进 prompt，省 token）。 */
 async function tagSticker(dataUrl) {
   const key = (state.settings.apiKey || '').trim();
-  if (!key || state.settings.vision === false) return [];
+  if (!key || state.settings.vision === false) return { tags: [], desc: '' };
   try {
     const text = await quickChat([
-      { role: 'system', content: '用 3~6 个中文词概括这张表情包表达的情绪、画面或用法，逗号分隔，不要编号，不要解释。例：开心,猫,得意' },
+      { role: 'system', content: '看这张表情包，输出两行：\n'
+        + '第一行：3~6 个中文关键词，逗号分隔（情绪/画面/用法）。\n'
+        + '第二行：一句话（不超过 20 字）说明这张图表达什么、画面是什么。\n'
+        + '不要编号，不要解释，不要引号。' },
       { role: 'user', content: [{ type: 'text', text: '这张表情包是什么？' }, { type: 'image_url', image_url: { url: dataUrl } }] },
     ]);
-    return String(text || '')
+    const lines = String(text || '').split('\n').map((x) => x.trim()).filter(Boolean);
+    const clean = (w) => w.replace(/[。．.!！?？"'“”‘’（）()【】\[\]·]/g, '').trim();
+    const tags = (lines[0] || '')
       .split(/[\s,，、;；/|]+/)
-      .map((w) => w.replace(/[。．.!！?？"'“”‘’（）()【】\[\]]/g, '').trim())
+      .map(clean)
       .filter((w) => w && w.length <= 8)
       .slice(0, 6);
+    const desc = clean((lines[1] || '').replace(/^描述[：:]/, '')).slice(0, 40);
+    return { tags, desc };
   } catch (_) {
-    return [];
+    return { tags: [], desc: '' };
   }
 }
 
@@ -3107,9 +3128,11 @@ async function addStickers(files) {
     renderStickers();
     persist();
     // 先占位再补标签，避免大图卡住 UI
-    tagSticker(dataUrl).then(async (tags) => {
+    tagSticker(dataUrl).then(async (res) => {
+      const tags = (res && res.tags) || [];
       // 识别不出来也要留个标签，否则她根本不知道有这个表情包可用
       item.tags = tags.length ? tags : ['表情'];
+      if (res && res.desc) item.desc = res.desc;
       item.url = await uploadImage(dataUrl);
       renderStickers();
       persist();
@@ -3320,6 +3343,23 @@ function closeFriendSheet() {
 $('#btnFClose').addEventListener('click', closeFriendSheet);
 
 /* ---------------- 个人资料页的按钮 ---------------- */
+$('#btnStRetag').addEventListener('click', async () => {
+  const list = stickers().slice();
+  if (!list.length) return toast('先加一张');
+  if (!(state.settings.apiKey || '').trim()) return toast('还没填 API Key');
+  toast(`重新识别 ${list.length} 张…`);
+  for (const it of list) {
+    const url = await imageForModel(it.url);
+    if (!url) continue;
+    const res = await tagSticker(url);
+    if (res.tags && res.tags.length) it.tags = res.tags;
+    if (res.desc) it.desc = res.desc;
+    renderStickers();
+  }
+  persist();
+  toast('识别完了');
+});
+
 $('#btnStClose').addEventListener('click', closeStickerSheet);
 $('#btnStAdd').addEventListener('click', () => $('#stFile').click());
 $('#btnStPick').addEventListener('click', () => $('#stFile').click());
