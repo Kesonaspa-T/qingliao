@@ -1598,13 +1598,73 @@ function buildBody(messages, withTools) {
   return body;
 }
 
-function toApiMessage(m, allowImage) {
+
+/** 取一张图给模型看：@blob: 先下载成 data URL；gif 只取首帧（有些接口不收 gif）。 */
+async function imageForModel(ref) {
+  if (!ref) return '';
+  let url = ref;
+  if (ref.startsWith('@blob:')) {
+    try {
+      const res = await apiFetch('/api/blob/' + encodeURIComponent(ref.slice(6)), { timeout: 15000 });
+      if (!res.ok) return '';
+      const blob = await res.blob();
+      url = await new Promise((resolve) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ''));
+        fr.onerror = () => resolve('');
+        fr.readAsDataURL(blob);
+      });
+    } catch (_) {
+      return '';
+    }
+  }
+  if (!url) return '';
+  if (/^data:image\/gif/i.test(url) || /\.gif$/i.test(ref)) return await firstFrame(url);
+  return url;
+}
+
+/** gif 的首帧转成 jpeg（顺带缩到 512，省 token）。 */
+function firstFrame(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const max = 512;
+        const scale = Math.min(1, max / Math.max(img.width || 1, img.height || 1));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round((img.width || 1) * scale));
+        c.height = Math.max(1, Math.round((img.height || 1) * scale));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL('image/jpeg', 0.85));
+      } catch (_) { resolve(''); }
+    };
+    img.onerror = () => resolve('');
+    img.src = dataUrl;
+  });
+}
+
+/** 一次回复里最多带几张图：把最近几条的图先取下来。 */
+async function resolveImagesForModel(conv, budget = 2) {
+  const map = new Map();
+  const list = (conv && conv.messages) || [];
+  let left = budget;
+  for (let i = list.length - 1; i >= 0 && left > 0; i -= 1) {
+    const m = list[i];
+    if (!m.image) continue;
+    left -= 1;
+    map.set(m.id, await imageForModel(m.image));
+  }
+  return map;
+}
+
+function toApiMessage(m, allowImage, imgMap) {
   const role = m.role === 'user' ? 'user' : 'assistant';
   if (m.image) {
-    if (allowImage && state.settings.vision) {
+    const url = (allowImage && imgMap) ? (imgMap.get(m.id) || '') : '';
+    if (url && state.settings.vision) {
       return { role, content: [
         { type: 'text', text: m.text || '（图片）' },
-        { type: 'image_url', image_url: { url: m.image } },
+        { type: 'image_url', image_url: { url } },
       ] };
     }
     return { role, content: (m.text ? m.text + ' ' : '') + '（发了一张图片）' };
@@ -1612,7 +1672,7 @@ function toApiMessage(m, allowImage) {
   return { role, content: m.text };
 }
 
-function buildMessages(friend, conv, nudge) {
+function buildMessages(friend, conv, nudge, imgMap) {
   const s = state.settings;
   const now = new Date();
   const isGroup = conv.members && Array.isArray(conv.members);
@@ -1693,7 +1753,7 @@ function buildMessages(friend, conv, nudge) {
     const m = history[i];
     let allow = false;
     if (m.image && imageBudget > 0) { allow = true; imageBudget -= 1; }
-    const base = toApiMessage(m, allow);
+    const base = toApiMessage(m, allow, imgMap);
     const qt = m.quote && m.quote.text ? '（引用 ' + m.quote.author + '：' + m.quote.text + '）' : '';
     if (qt && typeof base.content === 'string') base.content = qt + base.content;
     if (isGroup) {
@@ -1856,7 +1916,8 @@ function streamOnce({ url, key, body, onDelta }) {
 }
 
 async function runChat(friend, conv, r, nudge) {
-  const convo = buildMessages(friend, conv, nudge);
+  const imgMap = state.settings.vision ? await resolveImagesForModel(conv, 2) : null;
+  const convo = buildMessages(friend, conv, nudge, imgMap);
   const useTools = searchEnabled();
   const key = (state.settings.apiKey || '').trim();
   let text = '';

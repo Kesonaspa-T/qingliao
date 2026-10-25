@@ -308,6 +308,28 @@ def blob_path(uid, name):
     return path if os.path.exists(path) else None
 
 
+def as_data_url(uid, ref):
+    """给模型看的图：@blob: 读回文件转 data URL；gif 跳过（接口不收，服务端没装图像库）。"""
+    if not isinstance(ref, str) or not ref or not uid:
+        return ""
+    if ref.startswith("data:image"):
+        return "" if ref.startswith("data:image/gif") else ref
+    if not ref.startswith("@blob:"):
+        return ""
+    name = ref[6:]
+    if name.lower().endswith(".gif"):
+        return ""
+    fp = blob_path(uid, name)
+    if not fp:
+        return ""
+    with open(fp, "rb") as fh:
+        raw = fh.read()
+    ext = name.rsplit(".", 1)[-1].lower()
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+            "webp": "image/webp"}.get(ext, "image/jpeg")
+    return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode())
+
+
 def extract_blobs(uid, st):
     """状态里的图片全部换成 @blob: 引用。返回改动数。"""
     n = 0
@@ -1450,7 +1472,7 @@ def comment_allowed(m, by, is_reply=False):
     return True
 
 
-def run_pending(st, p, key):
+def run_pending(st, p, key, uid=""):
     kind = p.get("kind")
     moments = st.get("moments") or []
     m = next((x for x in moments if x.get("id") == p.get("momentId")), None)
@@ -1481,7 +1503,7 @@ def run_pending(st, p, key):
             return False
         author = "我" if m.get("authorId") == "me" else names.get(m.get("authorId"), "某人")
         text = gen_comment_text(f, author, m.get("text", ""), thread_text(st, m), settings, key,
-                               image=m.get("image", ""))
+                               image=as_data_url(uid, m.get("image", "")))
         if not text:
             return False
         if not comment_allowed(m, by):
@@ -1502,7 +1524,7 @@ def run_pending(st, p, key):
         text = gen_reply_text(
             f, names.get("me", "我"), m.get("text", ""),
             p.get("toComment") or "", thread_text(st, m), settings, key,
-            image=m.get("image", ""),
+            image=as_data_url(uid, m.get("image", "")),
         )
         if not text:
             return False
@@ -1523,7 +1545,7 @@ def run_pending(st, p, key):
         if now_ts - float(social.get("lastMomentDmAt") or 0) < 1800:
             return False
         text = gen_dm_text(f, names.get("me", "我"), m.get("text", ""), settings, key,
-                           image=m.get("image", ""))
+                           image=as_data_url(uid, m.get("image", "")))
         if not text:
             return False
         social["lastMomentDmAt"] = now_ts
@@ -1592,7 +1614,7 @@ def social_tick(uid="local"):
                 keep.append(p)
                 continue
             try:
-                if run_pending(st, p, key):
+                if run_pending(st, p, key, uid):
                     changed = True
             except Exception as e:
                 print("[social] 互动失败：", e)
@@ -1882,7 +1904,9 @@ def social_tick(uid="local"):
                 elif m.get("image"):
                     hist.append("%s：（发了一张图片）" % who)
                 if m.get("image"):
-                    pics.append(m["image"])
+                    du = as_data_url(uid, m["image"])
+                    if du:
+                        pics.append(du)
             reply_to = ""
             if lastm.get("role") != "user" and lastm.get("text"):
                 reply_to = name_map.get(lastm.get("authorId")) or ""
