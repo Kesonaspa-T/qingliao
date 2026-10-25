@@ -192,6 +192,7 @@
           <p class="hint" id="ctxHint">deepseek-flash 上下文 1M token，塞得下很多条。</p>
           <label class="field row-inline"><span>让她看图</span><input id="fVision" type="checkbox" class="switch"></label>
           <label class="field row-inline"><span>她会画简笔画</span><input id="fDoodle" type="checkbox" class="switch"></label>
+          <label class="field"><span>发消息带表情包的概率（%）</span><input id="fStickerChance" type="number" min="0" max="100" step="5"></label>
           <button type="button" class="field row-inline link-row" id="btnStickers"><span>表情包</span><span id="stickerCount" class="link-val">管理</span></button>
           <p class="hint">打开后，她只在具体的事情上才画（你问她在干嘛、她答应画给你、你心情不好时），不是按轮数画。每段关系可以单独关掉。</p>
           <label class="field row-inline"><span>联网搜索</span><input id="fSearch" type="checkbox" class="switch"></label>
@@ -424,6 +425,6 @@
   </div>
 </div>
 
-<script src="app.js?v=44"></script>
+<script src="app.js?v=45"></script>
 </body>
 </html>

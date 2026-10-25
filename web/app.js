@@ -151,6 +151,7 @@ const DEFAULT_SETTINGS = {
   contextLimit: 200,
   vision: true,
   doodle: true,
+  stickerChance: 25,
   webSearch: true,
   delayOn: true,
   delayMin: 5,
@@ -1715,11 +1716,16 @@ function buildMessages(friend, conv, nudge, imgMap) {
     return d ? kw + '=' + d : kw;
   });
   const stkTags = [...new Set(stk.flatMap((x) => x.tags || []))].slice(0, 40);
-  if (stkList.length) {
+  const chance = Math.max(0, Math.min(100, Number(s.stickerChance ?? 25)));
+  if (stkList.length && chance > 0) {
+    const every = Math.max(2, Math.round(100 / chance));
     sys += '\n\n【表情包】你手机里存着这些表情包（关键词=画面）：' + stkList.join('；') + '。'
-      + '想发表情时，消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。'
-      + '⚠️ 只在文字里说「我要发个表情」「都给你啦」是不算发出的，必须写出 [[表情:关键词]] 这个标记才会真的发出去。'
-      + '规矩：十来条最多发一次，情绪对得上才发，表情包可以单独发不带文字。';
+      + '想发表情时，在消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。'
+      + `\n规矩：\n`
+      + `- 平均每 ${every} 条消息最多发一次，情绪对得上才发\n`
+      + `- 只发文字说「给你发个表情」不算发出，必须写 [[表情:关键词]] 才会真的发出去\n`
+      + `- 发的时候**文字一定要有**：先说一句话，再贴表情包；不要只发一个光秃秃的表情包\n`
+      + `- 历史里像「（你刚发了一个表情包：…）」这种括号是系统标注，你绝对不要照抄或输出`;
   }
 
   if (canDraw) {
@@ -2273,10 +2279,17 @@ async function deliver(kind, conv, text, authorId, maxParts) {
 
   if (maxParts != null) limit = Math.max(1, Math.min(limit, maxParts));
 
+  // 模型有时会照抄历史里的系统标注，必须在发出去之前清掉
+  const scrub = (t) => String(t || '')
+    .replace(/[（(]\s*(你刚|刚刚?)?发(了)?一个?表情包[：:][^）)]*[）)]/g, '')
+    .replace(/[（(]\s*(你刚|刚刚?)?发了一张图片[）)]/g, '')
+    .trim();
+
   // 表情包：把 [[表情:关键词]] 取出来，找到对应的图，剩下的才是文字
   const pool = stickers();
   const usedStickers = [];
   let body = String(text || '');
+  body = scrub(body);
   body = body.replace(/\[\[表情[:：]([^\]\n]+)\]\]/g, (_all, kw) => {
     const key = String(kw || '').trim();
     let hit = pool.find((x) => (x.tags || []).some((t) => t && (key.includes(t) || t.includes(key))));
@@ -2291,6 +2304,7 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   const active = isActive(kind, conv.id);
   if (active) clearReadMark();
 
+  let sentCount = 0;
   for (let i = 0; i < parts.length; i += 1) {
     if (i > 0 && isActive(kind, conv.id)) {
       setStatus('对方正在输入…');
@@ -2301,7 +2315,12 @@ async function deliver(kind, conv, text, authorId, maxParts) {
 
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;
+    sentCount += 1;
   }
+
+  // 她必须配一句话才发表情包；只剩表情包就不发（避免光秃秃一张图）
+  const hasText = parts.some((x) => String(x || '').trim());
+  if (!hasText) usedStickers.length = 0;
 
   // 表情包跟在文字后面发
   for (const item of usedStickers) {
@@ -2311,7 +2330,14 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     conv.messages.push(m);
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;
+    sentCount += 1;
     await sleep(320);
+  }
+
+  // 清洗完什么都不剩（模型把系统标注照抄了一遍）：安静结束，别崩
+  if (!sentCount) {
+    if (isActive(kind, conv.id)) setStatus('在线');
+    return;
   }
 
   if (isActive(kind, conv.id)) {
@@ -2812,6 +2838,8 @@ function fillForm() {
   $('#fCtx').value = s.contextLimit ?? 60;
   $('#fVision').checked = !!s.vision;
   if ($('#fDoodle')) $('#fDoodle').checked = s.doodle !== false;
+  if ($('#fStickerChance')) $('#fStickerChance').value = Number(s.stickerChance ?? 25);
+  renderStickerCount();
   $('#fSearch').checked = !!s.webSearch;
   $('#fDelayOn').checked = !!s.delayOn;
   $('#fDelayMin').value = s.delayMin ?? 5;
@@ -2858,6 +2886,7 @@ function saveForm() {
   s.contextLimit = Math.max(6, Math.min(2000, Number($('#fCtx').value) || 60));
   s.vision = $('#fVision').checked;
   if ($('#fDoodle')) s.doodle = $('#fDoodle').checked;
+  if ($('#fStickerChance')) s.stickerChance = Math.max(0, Math.min(100, Number($('#fStickerChance').value) || 0));
   s.webSearch = $('#fSearch').checked;
   s.delayOn = $('#fDelayOn').checked;
   s.delayMin = Math.max(0, Math.min(600, Number($('#fDelayMin').value) || 0));
