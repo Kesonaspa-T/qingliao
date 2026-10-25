@@ -3830,8 +3830,9 @@ async function clientSocialTick(force) {
     const author = state.friends[Math.floor(Math.random() * state.friends.length)];
     try {
       const text = cleanBlock(await quickChat([
-        { role: 'system', content: `${author.persona}\n\n现在要发一条朋友圈。要求：3~6 句、80~200 字，像真的在记事；`
-          + '要有一个具体到能看见的细节（味道、声音、价钱、天气、别人的一句话）；可以有情绪但别升华、别讲道理；'
+        { role: 'system', content: `${author.persona}\n\n现在要发一条朋友圈。要求：长度不限，一两句也行、多写几句也行，`
+          + '别为了凑字数写成小作文；至少有一个具体到能看见的东西（味道、声音、价钱、天气、别人的一句话）；'
+          + '可以短、可以没头没尾，像随手发的；别升华、别讲道理、别总结；'
           + '不写配图说明，不加引号，不提“朋友圈”三个字，不提问；最多一个 emoji；直接输出正文，最多两段。' },
         { role: 'user', content: `现在是${timeOf(Date.now())}。` },
       ]), 600);
