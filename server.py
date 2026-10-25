@@ -1219,9 +1219,11 @@ def _clean_multiline(text, limit=600):
     t = (text or "").strip().strip('"“”「」')
     m = re.search(r"(?is)<svg[\s\S]*?</svg>", t)
     if m:
-        before = t[:m.start()].strip().strip('"“”「」').split("\n")[0].strip()
+        before = t[:m.start()].strip().strip('"“”「」')
+        before = "\n".join(x.strip() for x in before.split("\n") if x.strip())
         return (before + "\n" + m.group(0)) if before else m.group(0)
-    return t.split("\n")[0].strip()[:limit]
+    lines = [x.strip() for x in t.split("\n") if x.strip()]
+    return "\n".join(lines)[:limit]
 
 
 def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", allow_draw=False):
@@ -1236,11 +1238,13 @@ def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", al
                 + "\n".join(recent_lines[-4:]) + "\n\n")
     sys += (
         "现在安静了一阵，你想主动发一条消息给他。要求：\n"
-        "- 只说你自己此刻的事：在做什么、看到什么、想到什么无关紧要的小事\n"
-        "- 跟上面那段最多若隐若现地沾一点（比如上次在等，就说一句“还等着呢”），"
-        "不要接着那个话题追问，也不要提他说过的话\n"
-        "- 中性、随口、一到两句，10~30 字\n"
-        "- 不要“在吗”“干嘛呢”“想我了吗”这种套话\n"
+        "- 一到三句，可以拆成两三条短消息（用换行分开），像真人想到就发\n"
+        "- 说你此刻的事：在做什么、看到什么、突然想到什么，要具体（几点、什么味道、手上在干嘛）\n"
+        "- 跟上面那段最多若隐若现地沾一点，不要接着追问，也不要复述他说过的话\n"
+        "- 可以问一个真的问题，像真人会问的那种没头没尾的："
+        "「我以后会死吗」「你说人为什么要上班」「你会不会哪天就不理我了」\n"
+        "- 可以有情绪：突然有点低落、有点黏、有点气；允许说一半停住\n"
+        "- 不要“在吗”“干嘛呢”“想我了吗”这种套话，不要总结、不要讲道理\n"
     )
     if directive:
         sys += ("【他给你留了一条指令，这一条必须照它写】" + directive + "\n")
@@ -1249,12 +1253,12 @@ def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", al
                 "<svg viewBox=\"0 0 240 240\">…</svg>，只用 rect/circle/ellipse/line/polygon/path/text，"
                 "扁平配色、简单，不要外部图片、不要 script\n")
     sys += "只输出你要发的那条消息本身，不要解释，不要加引号。"
-    budget = 700 if allow_draw else 120
+    budget = 700 if allow_draw else 220
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
         [{"role": "system", "content": sys}], max_tokens=budget, temperature=0.95,
     )
-    return _clean_multiline(text, 400)
+    return _clean_multiline(text, 300)
 
 
 def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False,

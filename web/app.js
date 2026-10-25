@@ -1692,7 +1692,17 @@ function buildMessages(friend, conv, nudge, imgMap) {
   let sys = (friend.persona || DEFAULT_PERSONA).trim();
   if (friend.memory) sys += `\n\n【你记得的事】${friend.memory}`;
   const meName = state.me.name || '我';
-  sys += `\n\n【环境】现在是 ${timeOf(now.getTime())}，${weekday(now)}。你在和「${meName}」聊天。`;
+  sys += `\n\n【环境】现在是 ${timeOf(now.getTime())}，${weekday(now)}。你在和「${meName}」聊天，用手机。`;
+
+  // 人味大多来自这几条：短、有具体的东西、允许废话、不要总结
+  sys += '\n\n【怎么说话】'
+    + '\n- 像真人发微信：一句一句发，短。想接一句就用换行再写一条，不要写成一段话'
+    + '\n- 说具体的东西（几点、几块钱、什么味道、手上在干什么），不说空泛的感受'
+    + '\n- 允许废话、停顿、跑题、突然想起别的事；不要每句都有信息量'
+    + '\n- 情绪要有起伏：可以突然不高兴、嘴硬、撒娇、说一半不说了'
+    + '\n- 不要总结、不要讲道理、不要金句、不要"其实…"开头的感悟'
+    + '\n- 偶尔用语气词（啊、欸、诶、嘛、呀、唉），但不要每句都加'
+    + '\n- 不要每句都提问；想问就问具体的、有点傻的问题';
   sys += `\n\n【身份】你只扮演「${friend.name}」。下面每条消息前面都标了说话人。`;
   sys += `\n绝对不要替「${meName}」说话，不要写对方的台词，不要扮演他，也不要自问自答。`;
 
@@ -1717,7 +1727,9 @@ function buildMessages(friend, conv, nudge, imgMap) {
   });
   const stkTags = [...new Set(stk.flatMap((x) => x.tags || []))].slice(0, 40);
   const chance = Math.max(0, Math.min(100, Number(s.stickerChance ?? 25)));
-  if (stkList.length && chance > 0) {
+  // 每回合真掷一次骰子：不进就完全不提表情包，模型没有机会硬发
+  const stickerRoll = Math.random() * 100 < chance;
+  if (stkList.length && chance > 0 && stickerRoll) {
     const every = Math.max(2, Math.round(100 / chance));
     sys += '\n\n【表情包】你手机里存着这些表情包（关键词=画面）：' + stkList.join('；') + '。'
       + '想发表情时，在消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。'
@@ -3850,8 +3862,12 @@ function proactiveTick() {
   r.nudge = [
     '【主动消息】你们安静了一阵，现在你要主动给他发一条消息。',
     '要求：只写你自己说的话；不要替他说话、不要假装是他；不要复述他以前说过的话。',
-    '跟上一轮最多若隐若现地沾一点，不要接着那个话题追问；大部分说你此刻在做什么、看到什么、想到什么无关紧要的小事。',
-    '中性、随口、一到两句。不要“在吗”“干嘛呢”“想我了吗”这种套话。',
+    '一到三句，可以拆成两三条短消息（用换行分开），像真人想到就发。',
+    '说你此刻的事：在做什么、看到什么、突然想到什么，要具体（几点、什么味道、手上在干嘛）。',
+    '跟上一轮最多若隐若现地沾一点，不要接着追问。',
+    '可以问一个真的问题，像真人会问的那种没头没尾的：「我以后会死吗」「你说人为什么要上班」。',
+    '可以有情绪：突然有点低落、有点黏、有点气；允许说一半停住。',
+    '不要“在吗”“干嘛呢”“想我了吗”这种套话，不要总结、不要讲道理。',
     directive ? ('【他给你留了一条指令，这一条必须照它写】' + directive) : '',
     canDraw ? '如果这条里你想给他看点什么，可以顺手画一张（规则同【画图】）。' : '',
     '只输出你要发的消息。',
