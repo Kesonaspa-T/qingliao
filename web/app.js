@@ -221,7 +221,7 @@ let state = defaultState();
 let pendingEdits = { settings: {}, groups: {}, friends: {} };
 const GROUP_FIELDS = ['name', 'avatar', 'members', 'prompt', 'muted'];
 const FRIEND_FIELDS = ['name', 'avatar', 'persona', 'relations', 'dmMoment',
-  'note', 'region', 'signature'];
+  'note', 'region', 'signature', 'personaChangedAt'];
 
 function changedFields(before, after, fields) {
   const patch = {};
@@ -1703,6 +1703,17 @@ function buildMessages(friend, conv, nudge, imgMap) {
     + '\n- 不要总结、不要讲道理、不要金句、不要"其实…"开头的感悟'
     + '\n- 偶尔用语气词（啊、欸、诶、嘛、呀、唉），但不要每句都加'
     + '\n- 不要每句都提问；想问就问具体的、有点傻的问题';
+  // 人设刚改过：历史里还是旧口吻，模型会惯性模仿，这里明确打断
+  const personaChangedAt = Number(friend.personaChangedAt) || 0;
+  if (personaChangedAt) {
+    const since = (conv.messages || []).filter((m) => (m.ts || 0) > personaChangedAt).length;
+    if (since < 30) {
+      sys += '\n\n【设定刚更新过】上面这段人设是刚改的，以它为准。'
+        + '历史里你以前的说话方式、口癖、称呼、性格都作废，只当成发生过的事实，'
+        + '不要模仿你以前怎么说话，也不要提「我变了」这件事。从这一条开始就是新人设。';
+    }
+  }
+
   sys += `\n\n【身份】你只扮演「${friend.name}」。下面每条消息前面都标了说话人。`;
   sys += `\n绝对不要替「${meName}」说话，不要写对方的台词，不要扮演他，也不要自问自答。`;
 
@@ -3500,6 +3511,11 @@ $('#btnFSave').addEventListener('click', () => {
     if (f.name !== name) patch.name = name;
     if ((f.avatar || '') !== avatar) patch.avatar = avatar;
     if ((f.persona || '') !== persona) patch.persona = persona;
+    // 人设改了：记个时间戳，之后的回复要按新设定走，不许沿用旧口吻
+    if ((f.persona || '') !== persona) {
+      f.personaChangedAt = Date.now();
+      rememberFriendEdit(f, { personaChangedAt: f.personaChangedAt });
+    }
     const relations = $$('#relationList input:checked').map((cb) => cb.dataset.id);
     if (JSON.stringify(f.relations || []) !== JSON.stringify(relations)) patch.relations = relations;
     const dmMoment = $('#fDm').checked;
@@ -4709,7 +4725,7 @@ function normalizeFriend(raw) {
   if (own && typeof own === 'object' && Object.keys(own).length) f.settings = { ...own };
   for (const key of ['memory', 'memoryAt', 'lastGreet', 'lastNudgeAt',
     'lastFallbackAt', 'nextMomentAt', 'muted', 'proactiveUsedAt',
-    'note', 'region', 'signature']) {
+    'note', 'region', 'signature', 'personaChangedAt']) {
     if (raw && raw[key] !== undefined && raw[key] !== null) f[key] = raw[key];
   }
   f.messages = (f.messages || []).map((m) => ({
