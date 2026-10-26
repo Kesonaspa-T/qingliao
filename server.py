@@ -731,7 +731,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v26",
+                    "build": "v27",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1026,6 +1026,16 @@ def _clean(text, limit=120):
     return text[:limit]
 
 
+def prompt_extra(settings, key):
+    """用户在「设置 → 提示词」里写的那一段（没写返回空字符串）。
+
+    只替换「怎么说」的部分，身份约束和输出格式由下面的代码固定，
+    所以这里拿到的永远是纯风格文字，不会把协议冲掉。
+    """
+    v = ((settings or {}).get("prompts") or {}).get(key)
+    return v.strip() if isinstance(v, str) else ""
+
+
 def chat_lines_for_moment(st, friend):
     """把最近几条私聊整理成「她视角」的素材。"""
     msgs = (friend.get("messages") or [])[-8:]
@@ -1106,26 +1116,32 @@ def gen_comment_text(friend, author_name, moment_text, thread, settings, key, im
         + (friend.get("persona") or "") + "\n\n"
         + author_name + " 发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
     )
+    custom = prompt_extra(settings, "comment")
     if thread:
         sys += "评论区已经有这些话：\n" + thread + "\n\n"
-        sys += (
-            "你再补一句评论。注意：\n"
-            "- 别人说过的话别重复\n"
-            "- 如果对方是在回你，就顺着往下接，别再问同一个问题\n"
-            "- 10~25 字，口语\n"
-            "- 只输出你自己的一句评论（不超过 30 字），不要加人名前缀，不要写成对话，不要替别人说话"
-        )
+        if custom:
+            sys += "你再补一句评论。要求：\n" + custom + "\n"
+        else:
+            sys += (
+                "你再补一句评论。注意：\n"
+                "- 别人说过的话别重复\n"
+                "- 如果对方是在回你，就顺着往下接，别再问同一个问题\n"
+                "- 10~25 字，口语\n"
+            )
+    elif custom:
+        sys += "用一句评论回应。要求：\n" + custom + "\n"
     else:
-        sys += "用一句评论回应，10~25 字，口语，像熟人随口说的。不客套，不要堆 emoji。只输出评论本身。"
+        sys += "用一句评论回应，10~25 字，口语，像熟人随口说的。不客套，不要堆 emoji。\n"
+    sys += "只输出你自己的一句评论（不超过 30 字），不要加人名前缀，不要写成对话，不要替别人说话。"
     msgs = [{"role": "system", "content": sys}]
     pic = vision_part(image, "（这条朋友圈配了一张图，先看一眼再评论）", settings)
     if pic:
         msgs.append(pic)
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        msgs, max_tokens=70, temperature=1.0,
+        msgs, max_tokens=(200 if custom else 70), temperature=1.0,
     )
-    return _clean(text, 60)
+    return _clean(text, 160 if custom else 60)
 
 
 def gen_reply_text(friend, commenter_name, moment_text, comment_text, thread, settings, key, image=""):
@@ -1136,39 +1152,46 @@ def gen_reply_text(friend, commenter_name, moment_text, comment_text, thread, se
     )
     if thread:
         sys += "评论区：\n" + thread + "\n\n"
-    sys += (
-        commenter_name + " 刚评论了：\n「" + (comment_text or "") + "」\n\n"
-        "回他一句。10~25 字，口语，像真人回评论。别客套，别总结。\n"
-        "只输出你自己的一句话，不要加人名前缀，不要替别人说话。"
-    )
+    sys += commenter_name + " 刚评论了：\n「" + (comment_text or "") + "」\n\n"
+    custom = prompt_extra(settings, "reply")
+    if custom:
+        sys += "回他一句。要求：\n" + custom + "\n"
+    else:
+        sys += "回他一句。10~25 字，口语，像真人回评论。别客套，别总结。\n"
+    sys += "只输出你自己的一句话，不要加人名前缀，不要替别人说话。"
     msgs = [{"role": "system", "content": sys}]
     pic = vision_part(image, "（你这条朋友圈配了一张图，先看一眼再回）", settings)
     if pic:
         msgs.append(pic)
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        msgs, max_tokens=70, temperature=1.0,
+        msgs, max_tokens=(200 if custom else 70), temperature=1.0,
     )
-    return _clean(text, 60)
+    return _clean(text, 160 if custom else 60)
 
 
 def gen_dm_text(friend, owner_name, moment_text, settings, key, image=""):
+    custom = prompt_extra(settings, "dm")
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
         + owner_name + " 刚发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
-        "你想私聊跟他说一句，就为这事儿。10~25 字，口语，像微信上随手发的。"
-        "不要提“朋友圈”三个字。只输出你自己这一句，不要扮演对方。"
     )
+    if custom:
+        sys += "你想私聊跟他说一句，就为这事儿。要求：\n" + custom + "\n"
+    else:
+        sys += ("你想私聊跟他说一句，就为这事儿。10~25 字，口语，像微信上随手发的。"
+                "不要提“朋友圈”三个字。\n")
+    sys += "只输出你自己这一句，不要扮演对方。"
     msgs = [{"role": "system", "content": sys}]
     pic = vision_part(image, "（他这条朋友圈配了一张图，先看一眼再私聊他）", settings)
     if pic:
         msgs.append(pic)
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        msgs, max_tokens=70, temperature=1.0,
+        msgs, max_tokens=(200 if custom else 70), temperature=1.0,
     )
-    return _clean(text, 60)
+    return _clean(text, 160 if custom else 60)
 
 
 def group_prompt_text(group_prompt):
@@ -1184,12 +1207,16 @@ def gen_group_line(friend, author_name, moment_text, prev_lines, settings, key, 
     sys += group_prompt_text(group_prompt)
     if prev_lines:
         sys += "群里已经有人说：\n" + "\n".join(prev_lines) + "\n\n"
-    sys += "你要在群里说一句，聊的就是这条。10~25 字，口语，像群里随口插一句。只输出这一句。"
+    custom = prompt_extra(settings, "groupChat")
+    if custom:
+        sys += "你要在群里说一句，聊的就是这条。要求：\n" + custom + "\n只输出这一句。"
+    else:
+        sys += "你要在群里说一句，聊的就是这条。10~25 字，口语，像群里随口插一句。只输出这一句。"
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        [{"role": "system", "content": sys}], max_tokens=70, temperature=1.0,
+        [{"role": "system", "content": sys}], max_tokens=(200 if custom else 70), temperature=1.0,
     )
-    return _clean(text, 60)
+    return _clean(text, 160 if custom else 60)
 
 
 def gen_proactive_text(friend, last_text, settings, key):
@@ -1215,13 +1242,17 @@ def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_p
     sys += group_prompt_text(group_prompt)
     if recent_lines:
         sys += "最近群里聊的是：\n" + "\n".join(recent_lines) + "\n\n"
-    sys += ("你想起来一句，随口发到群里。10~20 字，口语，别问句式的套话。"
-            "只输出你自己这一句，不要加人名前缀，不要替别人说话。")
+    custom = prompt_extra(settings, "groupChat")
+    if custom:
+        sys += "你想起来一句，随口发到群里。要求：\n" + custom + "\n"
+    else:
+        sys += "你想起来一句，随口发到群里。10~20 字，口语，别问句式的套话。\n"
+    sys += "只输出你自己这一句，不要加人名前缀，不要替别人说话。"
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        [{"role": "system", "content": sys}], max_tokens=60, temperature=1.0,
+        [{"role": "system", "content": sys}], max_tokens=(200 if custom else 60), temperature=1.0,
     )
-    return _clean(text, 50)
+    return _clean(text, 160 if custom else 50)
 
 
 def dm_history(friend, me_name, msgs, n=6):
@@ -1284,12 +1315,13 @@ def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", al
                 "<svg viewBox=\"0 0 240 240\">…</svg>，只用 rect/circle/ellipse/line/polygon/path/text，"
                 "扁平配色、简单，不要外部图片、不要 script\n")
     sys += "只输出你要发的那条消息本身，不要解释，不要加引号。"
-    budget = 700 if allow_draw else 220
+    # 自定义里可能想多说几句，给宽一点；没写就按内置的短句给。
+    budget = 700 if allow_draw else (400 if custom else 220)
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
         [{"role": "system", "content": sys}], max_tokens=budget, temperature=0.95,
     )
-    return _clean_multiline(text, 300)
+    return _clean_multiline(text, 600 if custom else 300)
 
 
 def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False,
@@ -1304,7 +1336,14 @@ def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=Fal
         elif reply_to and reply_to != (friend.get("name") or ""):
             sys += "接着「" + reply_to + "」那句往下说，像真人在群里接话。\n"
     sys += "最近的消息：\n" + "\n".join(history_lines[-10:]) + "\n\n"
-    sys += "接着聊，回 1~2 句，10~30 字，口语。只输出你要说的话。"
+    # 群里用 ②群聊风格，私聊用 ①私聊风格；没写就用内置那套。格式永远由这里收尾。
+    custom = prompt_extra(settings, "groupChat" if in_group else "chat")
+    if custom:
+        sys += custom + "\n" + "只输出你要说的话，不要加名字前缀，不要替别人说话。"
+        budget, limit = 260, 240
+    else:
+        sys += "接着聊，回 1~2 句，10~30 字，口语。只输出你要说的话。"
+        budget, limit = 90, 80
     msgs = [{"role": "system", "content": sys}]
     # 群里发的图以前是直接丢掉的（只取 text），所以她「看不见」。
     # 这里把最近的两张图作为多模态内容带上，让她真的能看图接话。
@@ -1316,9 +1355,9 @@ def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=Fal
         msgs.append({"role": "user", "content": parts})
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
-        msgs, max_tokens=90, temperature=0.95,
+        msgs, max_tokens=budget, temperature=0.95,
     )
-    return _clean(text, 80)
+    return _clean(text, limit)
 
 
 def pick_reactors(state, moment):

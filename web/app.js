@@ -1696,7 +1696,10 @@ function buildMessages(friend, conv, nudge, imgMap) {
   sys += `\n\n【环境】现在是 ${timeOf(now.getTime())}，${weekday(now)}。你在和「${meName}」聊天，用手机。`;
 
   // 人味大多来自这几条：短、有具体的东西、允许废话、不要总结
-  const customChat = promptExtra('chat');
+  // 群聊有单独一块（②），没写才退回私聊那套，避免群里还在用私聊口吻。
+  const customChat = isGroup
+    ? (promptExtra('groupChat') || promptExtra('chat'))
+    : promptExtra('chat');
   if (customChat) {
     sys += '\n\n【怎么说话】\n' + customChat;
   } else {
@@ -3053,8 +3056,12 @@ function renderRelations(selected) {
 
 const PROMPT_FIELDS = [
   ['chat', 'prChat'],
+  ['groupChat', 'prGroupChat'],
   ['proactive', 'prProactive'],
   ['moment', 'prMoment'],
+  ['comment', 'prComment'],
+  ['reply', 'prReply'],
+  ['dm', 'prDm'],
   ['draw', 'prDraw'],
   ['sticker', 'prSticker'],
 ];
@@ -3939,18 +3946,22 @@ function proactiveTick() {
 
   // 主动消息单独一套要求：以前复用「接着聊」，导致她接着上文说话、
   // 甚至把自己当成对方（「我回家了」）。
+  // 设置里 ③ 写了就用它整段替换「要求」，身份约束和输出格式永远由代码保证。
   const directive = (conv.settings && conv.settings.nextProactive) || '';
   const canDraw = fs(conv, 'doodle', state.settings.doodle !== false);
+  const customProactive = promptExtra('proactive');
   r.proactive = true;
   r.nudge = [
     '【主动消息】你们安静了一阵，现在你要主动给他发一条消息。',
     '要求：只写你自己说的话；不要替他说话、不要假装是他；不要复述他以前说过的话。',
-    '一到三句，可以拆成两三条短消息（用换行分开），像真人想到就发。',
-    '说你此刻的事：在做什么、看到什么、突然想到什么，要具体（几点、什么味道、手上在干嘛）。',
-    '跟上一轮最多若隐若现地沾一点，不要接着追问。',
-    '可以问一个真的问题，像真人会问的那种没头没尾的：「我以后会死吗」「你说人为什么要上班」。',
-    '可以有情绪：突然有点低落、有点黏、有点气；允许说一半停住。',
-    '不要“在吗”“干嘛呢”“想我了吗”这种套话，不要总结、不要讲道理。',
+    ...(customProactive ? [customProactive] : [
+      '一到三句，可以拆成两三条短消息（用换行分开），像真人想到就发。',
+      '说你此刻的事：在做什么、看到什么、突然想到什么，要具体（几点、什么味道、手上在干嘛）。',
+      '跟上一轮最多若隐若现地沾一点，不要接着追问。',
+      '可以问一个真的问题，像真人会问的那种没头没尾的：「我以后会死吗」「你说人为什么要上班」。',
+      '可以有情绪：突然有点低落、有点黏、有点气；允许说一半停住。',
+      '不要“在吗”“干嘛呢”“想我了吗”这种套话，不要总结、不要讲道理。',
+    ]),
     directive ? ('【他给你留了一条指令，这一条必须照它写】' + directive) : '',
     canDraw ? '如果这条里你想给他看点什么，可以顺手画一张（规则同【画图】）。' : '',
     '只输出你要发的消息。',
@@ -3987,33 +3998,51 @@ function threadText(m, limit = 10) {
 
 async function genComment(f, authorName, momentText, thread) {
   let sys = `${f.persona}\n\n${authorName} 发了条朋友圈：\n「${momentText}」\n\n`;
+  // 设置里 ⑤ 写了就整段替换「注意」那几条；输出协议（只发一句、不加名字）始终由代码保证。
+  const custom = promptExtra('comment');
   if (thread) {
-    sys += `评论区已经有这些话：\n${thread}\n\n你再补一句评论。注意：\n- 别人说过的别重复\n- 对方在回你就顺着接，别再问同一个问题\n- 10~25 字，口语\n- 只输出评论本身`;
+    sys += `评论区已经有这些话：\n${thread}\n\n`;
+    sys += custom
+      ? `你再补一句评论。要求：\n${custom}\n`
+      : '你再补一句评论。注意：\n- 别人说过的别重复\n- 对方在回你就顺着接，别再问同一个问题\n- 10~25 字，口语\n';
   } else {
-    sys += '用一句评论回应，10~25 字，口语，像熟人随口说的。只输出评论本身。';
+    sys += custom
+      ? `用一句评论回应。要求：\n${custom}\n`
+      : '用一句评论回应，10~25 字，口语，像熟人随口说的。\n';
   }
-  sys += '\n只输出你自己的一句评论（不超过 30 字），不要加人名前缀，不要写成两个人对话，不要替别人说话，也不要安慰自己。';
+  sys += '只输出你自己的一句评论（不超过 30 字），不要加人名前缀，不要写成两个人对话，不要替别人说话，也不要安慰自己。';
   return cleanLine(await quickChat([{ role: 'system', content: sys }]), 60);
 }
 
 async function genReply(f, commenterName, momentText, commentText, thread) {
   let sys = `${f.persona}\n\n你发了条朋友圈：\n「${momentText}」\n\n`;
   if (thread) sys += `评论区：\n${thread}\n\n`;
-  sys += `${commenterName} 刚评论了：\n「${commentText}」\n\n回他一句。10~25 字，口语，像真人回评论。`;
-  sys += '\n只输出你自己的一句话，不要加人名前缀，不要替别人说话。';
+  const custom = promptExtra('reply');
+  sys += `${commenterName} 刚评论了：\n「${commentText}」\n\n`;
+  sys += custom
+    ? `回他一句。要求：\n${custom}\n`
+    : '回他一句。10~25 字，口语，像真人回评论。\n';
+  sys += '只输出你自己的一句话，不要加人名前缀，不要替别人说话。';
   return cleanLine(await quickChat([{ role: 'system', content: sys }]), 60);
 }
 
 async function genDm(f, ownerName, momentText) {
+  const custom = promptExtra('dm');
   const sys = `${f.persona}\n\n${ownerName} 刚发了条朋友圈：\n「${momentText}」\n\n`
-    + '你想私聊跟他说一句，就为这事儿。10~25 字，口语，像微信上随手发的。不要提“朋友圈”三个字。只输出这一句。';
+    + (custom
+      ? `你想私聊跟他说一句，就为这事儿。要求：\n${custom}\n`
+      : '你想私聊跟他说一句，就为这事儿。10~25 字，口语，像微信上随手发的。不要提“朋友圈”三个字。\n')
+    + '只输出你自己这一句。';
   return cleanLine(await quickChat([{ role: 'system', content: sys }]), 60);
 }
 
 async function genGroupLine(f, authorName, momentText, prev) {
   let sys = `${f.persona}\n\n你们在一个群里聊天。${authorName} 刚发了条朋友圈：\n「${momentText}」\n\n`;
   if (prev && prev.length) sys += `群里已经有人说：\n${prev.join('\n')}\n\n`;
-  sys += '你要在群里说一句，聊的就是这条。10~25 字，口语。只输出这一句。';
+  const custom = promptExtra('groupChat');
+  sys += custom
+    ? `你要在群里说一句，聊的就是这条。要求：\n${custom}\n只输出这一句。`
+    : '你要在群里说一句，聊的就是这条。10~25 字，口语。只输出这一句。';
   return cleanLine(await quickChat([{ role: 'system', content: sys }]), 60);
 }
 
@@ -4098,15 +4127,20 @@ async function clientSocialTick(force) {
       const chatLines = (author.messages || []).slice(-8)
         .filter((m) => (m.text || '').trim())
         .map((m) => `${m.role === 'user' ? (state.me.name || '他') : '我'}：${String(m.text).slice(0, 50)}`);
+      // 设置里 ④ 写了就整段替换内置要求（APK 单机版的朋友圈就是这里长出来的）。
+      const customMoment = promptExtra('moment');
+      const momentReq = customMoment
+        ? `现在要发一条朋友圈。要求：\n${customMoment}\n`
+        : '现在要发一条朋友圈。要求：长度不限，一两句也行、多写几句也行，'
+          + '别为了凑字数写成小作文；至少有一个具体到能看见的东西（味道、声音、价钱、天气、别人的一句话）；'
+          + '可以短、可以没头没尾，像随手发的；别升华、别讲道理、别总结；'
+          + '不写配图说明，不加引号，不提“朋友圈”三个字，不提问；最多一个 emoji；直接输出正文，最多两段。';
       const text = cleanBlock(await quickChat([
         { role: 'system', content: `${author.persona}\n\n`
           + (chatLines.length
             ? `你和他的私聊最近是这样（可以当素材，但不要写成流水账，也别提“他跟我说”“刚才聊到”）：\n${chatLines.join('\n')}\n\n`
             : '')
-          + `现在要发一条朋友圈。要求：长度不限，一两句也行、多写几句也行，`
-          + '别为了凑字数写成小作文；至少有一个具体到能看见的东西（味道、声音、价钱、天气、别人的一句话）；'
-          + '可以短、可以没头没尾，像随手发的；别升华、别讲道理、别总结；'
-          + '不写配图说明，不加引号，不提“朋友圈”三个字，不提问；最多一个 emoji；直接输出正文，最多两段。' },
+          + momentReq },
         { role: 'user', content: `现在是${timeOf(Date.now())}。` },
       ]), 600);
       if (text) {
