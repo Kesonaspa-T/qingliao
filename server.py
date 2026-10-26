@@ -101,6 +101,7 @@ def default_state():
             "contextLimit": 60,
             "vision": True,
             "doodle": True,
+            "prompts": {},
             "webSearch": True,
             "delayOn": True,
             "delayMin": 5,
@@ -1025,22 +1026,48 @@ def _clean(text, limit=120):
     return text[:limit]
 
 
-def gen_moment_text(friend, settings, key):
+def chat_lines_for_moment(st, friend):
+    """把最近几条私聊整理成「她视角」的素材。"""
+    msgs = (friend.get("messages") or [])[-8:]
+    me_name = (st.get("me") or {}).get("name") or "他"
+    if me_name in ("我", ""):
+        me_name = "他"
+    out = []
+    for m in msgs:
+        t = (m.get("text") or "").strip()
+        if not t or "<svg" in t.lower():
+            continue
+        who = "我" if m.get("role") != "user" else me_name
+        out.append("%s：%s" % (who, t[:60]))
+    return out
+
+
+def gen_moment_text(friend, settings, key, chat_lines=None):
     now = datetime.datetime.now()
     wd = "一二三四五六日"[now.weekday()]
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
-        "现在要发一条朋友圈。\n"
-        "要求：\n"
-        "- 长度不限：一两句也行，想多写几句也行，别为了凑字数写成小作文\n"
-        "- 至少有一个具体到能看见的东西：味道、声音、价钱、天气、别人的一句话\n"
-        "- 可以短、可以有废话、可以没头没尾，像随手发的，不像在写作文\n"
-        "- 不要升华、不要讲道理、不要金句、不要总结\n"
-        "- 不要写配图说明，不加引号，不用标题，不要提“朋友圈”三个字\n"
-        "- 不要提问，最多一个 emoji\n"
-        "- 直接输出正文，最多两段"
     )
+    if chat_lines:
+        sys += ("你和他的私聊最近是这样（可以拿它当素材，但不要写成流水账，"
+                "也别提“他跟我说”“刚才聊到”这类话）：\n"
+                + "\n".join(chat_lines[-6:]) + "\n\n")
+    custom_moment = ((settings.get("prompts") or {}).get("moment") or "").strip()
+    if custom_moment:
+        sys += "现在要发一条朋友圈。要求：\n" + custom_moment + "\n"
+    else:
+        sys += (
+            "现在要发一条朋友圈。\n"
+            "要求：\n"
+            "- 长度不限：一两句也行，想多写几句也行，别为了凑字数写成小作文\n"
+            "- 至少有一个具体到能看见的东西：味道、声音、价钱、天气、别人的一句话\n"
+            "- 可以短、可以有废话、可以没头没尾，像随手发的，不像在写作文\n"
+            "- 不要升华、不要讲道理、不要金句、不要总结\n"
+            "- 不要写配图说明，不加引号，不用标题，不要提“朋友圈”三个字\n"
+            "- 不要提问，最多一个 emoji\n"
+            "- 直接输出正文，最多两段\n"
+        )
     user = "现在是周%s %s。" % (wd, now.strftime("%H:%M"))
     text = call_llm(
         settings.get("baseUrl"), key, settings.get("model"),
@@ -1236,16 +1263,20 @@ def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", al
     if recent_lines:
         sys += ("你们最近说过的话（只当背景，不要复述、不要接着追问）：\n"
                 + "\n".join(recent_lines[-4:]) + "\n\n")
-    sys += (
-        "现在安静了一阵，你想主动发一条消息给他。要求：\n"
-        "- 一到三句，可以拆成两三条短消息（用换行分开），像真人想到就发\n"
-        "- 说你此刻的事：在做什么、看到什么、突然想到什么，要具体（几点、什么味道、手上在干嘛）\n"
-        "- 跟上面那段最多若隐若现地沾一点，不要接着追问，也不要复述他说过的话\n"
-        "- 可以问一个真的问题，像真人会问的那种没头没尾的："
-        "「我以后会死吗」「你说人为什么要上班」「你会不会哪天就不理我了」\n"
-        "- 可以有情绪：突然有点低落、有点黏、有点气；允许说一半停住\n"
-        "- 不要“在吗”“干嘛呢”“想我了吗”这种套话，不要总结、不要讲道理\n"
-    )
+    custom = ((settings.get("prompts") or {}).get("proactive") or "").strip()
+    if custom:
+        sys += "现在安静了一阵，你想主动发一条消息给他。要求：\n" + custom + "\n"
+    else:
+        sys += (
+            "现在安静了一阵，你想主动发一条消息给他。要求：\n"
+            "- 一到三句，可以拆成两三条短消息（用换行分开），像真人想到就发\n"
+            "- 说你此刻的事：在做什么、看到什么、突然想到什么，要具体（几点、什么味道、手上在干嘛）\n"
+            "- 跟上面那段最多若隐若现地沾一点，不要接着追问，也不要复述他说过的话\n"
+            "- 可以问一个真的问题，像真人会问的那种没头没尾的："
+            "「我以后会死吗」「你说人为什么要上班」「你会不会哪天就不理我了」\n"
+            "- 可以有情绪：突然有点低落、有点黏、有点气；允许说一半停住\n"
+            "- 不要“在吗”“干嘛呢”“想我了吗”这种套话，不要总结、不要讲道理\n"
+        )
     if directive:
         sys += ("【他给你留了一条指令，这一条必须照它写】" + directive + "\n")
     if allow_draw:
@@ -1367,7 +1398,8 @@ def append_group_reply(group, settings, author, text, source):
 
 
 def create_moment_for(st, key, author):
-    text = gen_moment_text(author, st.get("settings") or {}, key)
+    text = gen_moment_text(author, st.get("settings") or {}, key,
+                           chat_lines_for_moment(st, author))
     if not text:
         return False
     now_ms = int(time.time() * 1000)
@@ -1404,7 +1436,8 @@ def create_moment(st, key):
     pool = [f for f in friends if f.get("id") != last_author] or friends
     author = random.choice(pool)
     social["lastMomentAuthor"] = author.get("id")
-    text = gen_moment_text(author, st.get("settings") or {}, key)
+    text = gen_moment_text(author, st.get("settings") or {}, key,
+                           chat_lines_for_moment(st, author))
     if not text:
         return False
 

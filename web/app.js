@@ -152,6 +152,7 @@ const DEFAULT_SETTINGS = {
   vision: true,
   doodle: true,
   stickerChance: 25,
+  prompts: {},
   webSearch: true,
   delayOn: true,
   delayMin: 5,
@@ -1695,6 +1696,10 @@ function buildMessages(friend, conv, nudge, imgMap) {
   sys += `\n\n【环境】现在是 ${timeOf(now.getTime())}，${weekday(now)}。你在和「${meName}」聊天，用手机。`;
 
   // 人味大多来自这几条：短、有具体的东西、允许废话、不要总结
+  const customChat = promptExtra('chat');
+  if (customChat) {
+    sys += '\n\n【怎么说话】\n' + customChat;
+  } else {
   sys += '\n\n【怎么说话】'
     + '\n- 像真人发微信：一句一句发，短。想接一句就用换行再写一条，不要写成一段话'
     + '\n- 说具体的东西（几点、几块钱、什么味道、手上在干什么），不说空泛的感受'
@@ -1703,6 +1708,7 @@ function buildMessages(friend, conv, nudge, imgMap) {
     + '\n- 不要总结、不要讲道理、不要金句、不要"其实…"开头的感悟'
     + '\n- 偶尔用语气词（啊、欸、诶、嘛、呀、唉），但不要每句都加'
     + '\n- 不要每句都提问；想问就问具体的、有点傻的问题';
+  }
   // 人设刚改过：历史里还是旧口吻，模型会惯性模仿，这里明确打断
   const personaChangedAt = Number(friend.personaChangedAt) || 0;
   if (personaChangedAt) {
@@ -1740,7 +1746,9 @@ function buildMessages(friend, conv, nudge, imgMap) {
   const chance = Math.max(0, Math.min(100, Number(s.stickerChance ?? 25)));
   // 每回合真掷一次骰子：不进就完全不提表情包，模型没有机会硬发
   const stickerRoll = Math.random() * 100 < chance;
-  if (stkList.length && chance > 0 && stickerRoll) {
+  const stickerOk = !!(stkList.length && chance > 0 && stickerRoll);
+  if (conv && typeof conv === 'object') conv.__stickerThisTurn = stickerOk;
+  if (stickerOk) {
     const every = Math.max(2, Math.round(100 / chance));
     sys += '\n\n【表情包】你手机里存着这些表情包（关键词=画面）：' + stkList.join('；') + '。'
       + '想发表情时，在消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。'
@@ -1748,7 +1756,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
       + `- 平均每 ${every} 条消息最多发一次，情绪对得上才发\n`
       + `- 只发文字说「给你发个表情」不算发出，必须写 [[表情:关键词]] 才会真的发出去\n`
       + `- 发的时候**文字一定要有**：先说一句话，再贴表情包；不要只发一个光秃秃的表情包\n`
-      + `- 历史里像「（你刚发了一个表情包：…）」这种括号是系统标注，你绝对不要照抄或输出`;
+      + (promptExtra('sticker') ? (`\n- 【主人补充】${promptExtra('sticker')}`) : '')
+      + `\n- 历史里像「（你刚发了一个表情包：…）」这种括号是系统标注，你绝对不要照抄或输出`;
   }
 
   if (canDraw) {
@@ -1758,7 +1767,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
     const drewRecently = (conv.messages || []).slice(-6)
       .some((m) => m.role !== 'user' && splitSvg(m.text || ''));
     if (askedToDraw) {
-      sys += '\n\n【画图】他这一条明确让你画了。所以这一条必须真的把图画出来——'
+      sys += (promptExtra('draw') ? ('\n\n【主人补充的画风要求】' + promptExtra('draw')) : '')
+        + '\n\n【画图】他这一条明确让你画了。所以这一条必须真的把图画出来——'
         + '不要只答应、不要只回「画什么好呢」「我慢慢来」「那我画一个」这种话，那种回复等于没画。'
         + '先写一句很短的话（也可以不写），然后另起一行直接输出 <svg viewBox="0 0 240 240">…</svg>，不要用代码块包起来。'
         + '\n画法：只用 rect / circle / ellipse / line / polygon / path / text；扁平配色、简单、像随手涂的；'
@@ -2309,7 +2319,7 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     .trim();
 
   // 表情包：把 [[表情:关键词]] 取出来，找到对应的图，剩下的才是文字
-  const pool = stickers();
+  const pool = (conv && conv.__stickerThisTurn === false) ? [] : stickers();
   const usedStickers = [];
   let body = String(text || '');
   body = scrub(body);
@@ -2344,6 +2354,7 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   // 她必须配一句话才发表情包；只剩表情包就不发（避免光秃秃一张图）
   const hasText = parts.some((x) => String(x || '').trim());
   if (!hasText) usedStickers.length = 0;
+  if (conv && typeof conv === 'object') conv.__stickerThisTurn = undefined;
 
   // 表情包跟在文字后面发
   for (const item of usedStickers) {
@@ -3038,6 +3049,54 @@ function renderRelations(selected) {
   }
 }
 
+/* ---------------- 提示词自定义 ---------------- */
+
+const PROMPT_FIELDS = [
+  ['chat', 'prChat'],
+  ['proactive', 'prProactive'],
+  ['moment', 'prMoment'],
+  ['draw', 'prDraw'],
+  ['sticker', 'prSticker'],
+];
+
+function promptExtra(key) {
+  const p = (state.settings && state.settings.prompts) || {};
+  const v = p[key];
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+function openPromptSheet() {
+  const p = (state.settings && state.settings.prompts) || {};
+  for (const [key, id] of PROMPT_FIELDS) {
+    const el = document.getElementById(id);
+    if (el) el.value = typeof p[key] === 'string' ? p[key] : '';
+  }
+  const sheet = $('#promptSheet');
+  sheet.classList.add('open');
+  sheet.setAttribute('aria-hidden', 'false');
+}
+
+function closePromptSheet() {
+  const sheet = $('#promptSheet');
+  if (!sheet) return;
+  sheet.classList.remove('open');
+  sheet.setAttribute('aria-hidden', 'true');
+}
+
+function savePromptSheet() {
+  const p = {};
+  for (const [key, id] of PROMPT_FIELDS) {
+    const el = document.getElementById(id);
+    const v = el ? el.value.trim() : '';
+    if (v) p[key] = v;
+  }
+  state.settings.prompts = p;
+  Object.assign(pendingEdits.settings, { prompts: p });
+  persist();
+  closePromptSheet();
+  toast('存好了，下一条就生效');
+}
+
 /* ---------------- 表情包 ---------------- */
 
 function stickers() {
@@ -3411,6 +3470,14 @@ $('#btnStRetag').addEventListener('click', async () => {
   persist();
   toast('识别完了');
 });
+
+$('#btnPrClose').addEventListener('click', closePromptSheet);
+$('#btnPrSave').addEventListener('click', savePromptSheet);
+$('#btnPrReset').addEventListener('click', () => {
+  for (const [, id] of PROMPT_FIELDS) { const el = document.getElementById(id); if (el) el.value = ''; }
+  toast('已清空，点保存生效');
+});
+$('#btnPrompts').addEventListener('click', () => { closeSheet(); openPromptSheet(); });
 
 $('#btnStClose').addEventListener('click', closeStickerSheet);
 $('#btnStAdd').addEventListener('click', () => $('#stFile').click());
@@ -4028,8 +4095,15 @@ async function clientSocialTick(force) {
   if (!isCloud() && hour >= 8 && hour <= 23 && nowSec2 >= nxt && state.friends.length) {
     const author = state.friends[Math.floor(Math.random() * state.friends.length)];
     try {
+      const chatLines = (author.messages || []).slice(-8)
+        .filter((m) => (m.text || '').trim())
+        .map((m) => `${m.role === 'user' ? (state.me.name || '他') : '我'}：${String(m.text).slice(0, 50)}`);
       const text = cleanBlock(await quickChat([
-        { role: 'system', content: `${author.persona}\n\n现在要发一条朋友圈。要求：长度不限，一两句也行、多写几句也行，`
+        { role: 'system', content: `${author.persona}\n\n`
+          + (chatLines.length
+            ? `你和他的私聊最近是这样（可以当素材，但不要写成流水账，也别提“他跟我说”“刚才聊到”）：\n${chatLines.join('\n')}\n\n`
+            : '')
+          + `现在要发一条朋友圈。要求：长度不限，一两句也行、多写几句也行，`
           + '别为了凑字数写成小作文；至少有一个具体到能看见的东西（味道、声音、价钱、天气、别人的一句话）；'
           + '可以短、可以没头没尾，像随手发的；别升华、别讲道理、别总结；'
           + '不写配图说明，不加引号，不提“朋友圈”三个字，不提问；最多一个 emoji；直接输出正文，最多两段。' },

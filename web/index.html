@@ -194,6 +194,7 @@
           <label class="field row-inline"><span>她会画简笔画</span><input id="fDoodle" type="checkbox" class="switch"></label>
           <label class="field"><span>发消息带表情包的概率（%）</span><input id="fStickerChance" type="number" min="0" max="100" step="5"></label>
           <button type="button" class="field row-inline link-row" id="btnStickers"><span>表情包</span><span id="stickerCount" class="link-val">管理</span></button>
+          <button type="button" class="field row-inline link-row" id="btnPrompts"><span>提示词（高级）</span><span class="link-val">自定义</span></button>
           <p class="hint">打开后，她只在具体的事情上才画（你问她在干嘛、她答应画给你、你心情不好时），不是按轮数画。每段关系可以单独关掉。</p>
           <label class="field row-inline"><span>联网搜索</span><input id="fSearch" type="checkbox" class="switch"></label>
           <p class="hint" id="searchHint">打开后她遇到不知道的事会自己上网查（DeepSeek 的 Search 接口，按次计费，很便宜）。</p>
@@ -287,6 +288,48 @@
         </div>
 
         <p class="footnote">每个人的聊天记录是分开存的。</p>
+      </div>
+    </section>
+
+    <!-- 提示词自定义 -->
+    <section class="sheet" id="promptSheet" aria-hidden="true">
+      <header class="sheet-nav">
+        <button class="text-btn" id="btnPrClose">关闭</button>
+        <span class="sheet-title">提示词</span>
+        <button class="text-btn primary" id="btnPrSave">保存</button>
+      </header>
+      <div class="sheet-body">
+        <p class="hint">留空 = 用内置的。写了就替换掉内置那一段，改完下一条消息就生效。</p>
+
+        <div class="group">
+          <div class="group-title">① 说话风格（私聊，替换【怎么说话】）</div>
+          <label class="field col"><textarea id="prChat" rows="7" placeholder="例：- 一条只说一句，不超过 15 字&#10;- 少用语气词&#10;- 不要每句都问她"></textarea></label>
+        </div>
+
+        <div class="group">
+          <div class="group-title">② 主动找你时说什么（替换内置要求）</div>
+          <label class="field col"><textarea id="prProactive" rows="6" placeholder="例：- 一两句，说你在做什么&#10;- 可以问一个没头没尾的问题"></textarea></label>
+        </div>
+
+        <div class="group">
+          <div class="group-title">③ 发朋友圈（替换内置要求）</div>
+          <label class="field col"><textarea id="prMoment" rows="6" placeholder="例：- 一句话，别超过 30 字&#10;- 写具体的东西，别抒情"></textarea></label>
+        </div>
+
+        <div class="group">
+          <div class="group-title">④ 画图补充（追加，不影响格式）</div>
+          <label class="field col"><textarea id="prDraw" rows="3" placeholder="例：只画黑白线条，不要上色"></textarea></label>
+        </div>
+
+        <div class="group">
+          <div class="group-title">⑤ 表情包补充（追加，不影响格式）</div>
+          <label class="field col"><textarea id="prSticker" rows="3" placeholder="例：只在我说「生气」的时候才发表情"></textarea></label>
+        </div>
+
+        <div class="row-btns">
+          <button type="button" class="ghost" id="btnPrReset">全部恢复内置</button>
+        </div>
+        <p class="footnote">格式类的东西（[[表情:关键词]]、&lt;svg&gt;、换行拆消息）不要写在里面，写在这里也没用。</p>
       </div>
     </section>
 
@@ -425,6 +468,6 @@
   </div>
 </div>
 
-<script src="app.js?v=47"></script>
+<script src="app.js?v=48"></script>
 </body>
 </html>
