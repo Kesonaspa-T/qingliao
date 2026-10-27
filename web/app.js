@@ -2058,14 +2058,23 @@ function buildMessages(friend, conv, nudge, imgMap) {
     }
   }
 
-  // 他要文档/代码文件：允许她直接吐一个文件块，客户端会渲染成可保存的文件卡片
-  const wantsFile = /(文档|文件|表格|代码|脚本|程序|写一份|写个|帮我写|整理成|导出|生成|保存成|word|excel|pdf|python|\.py|\.js|\.md|\.html|\.csv|\.docx|\.json)/i
-    .test(convLastUserText(conv));
+  // 他要文档/代码文件：允许她直接吐一个文件块，客户端会渲染成可保存的文件卡片。
+  // 看最近几条用户消息（不只最后一条）：他说「写个作文」→ 她说「我写就写」→
+  // 他催「那你倒是写」，最后一条本身没有关键词，但这一轮仍然必须把文件写出来。
+  const recentUserText = (conv.messages || []).slice(-3)
+    .filter((m) => m.role === 'user' && !m.recalled)
+    .map((m) => String(m.text || ''))
+    .join('\n');
+  const wantsFile = /(文档|文件|表格|代码|脚本|程序|写一份|写个|写一篇|写一下|写点|帮我写|作文|文章|整理成|导出|生成|保存成|word|excel|pdf|python|\.py|\.js|\.md|\.html|\.csv|\.docx|\.json)/i
+    .test(recentUserText);
   if (wantsFile) {
-    sys += '\n\n【文件】他要文档 / 代码这类「文件」时，你可以直接把文件交给他：'
+    sys += '\n\n【文件】他要文档 / 作文 / 代码这类「文件」时，你可以直接把文件交给他：'
       + '先正常说一句，然后另起一行写 [[文件:文件名.扩展名]]，把完整内容写在下面，最后一行写 [[/文件]]。'
       + '\n- 扩展名用 .md .txt .docx .py .js .html .css .json .csv 之一（.docx 里用纯文本写，「# 」开头的行会变成标题）'
+      + '\n- 作文 / 文章 / 报告用 .docx 或 .md；代码用对应扩展名'
       + '\n- 文件名简短、不带路径；内容必须完整，不许写「省略」「同上」，代码要能直接跑'
+      + '\n- **要写就这一条直接写出来**：不要只说「我写就写」「那我写短一点」「马上写」然后不写，'
+      + '他已经催了就更不能再答应一遍'
       + '\n- 只是聊天、不是要文件的时候，不要用这个格式';
   }
 
