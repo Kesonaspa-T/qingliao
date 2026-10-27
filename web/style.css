@@ -656,6 +656,11 @@ html[data-theme="dark"] .bubble.error { background: #3a2224; color: #ff9b93; bor
 .field input[type="range"] { flex: 1; accent-color: var(--me); }
 .field b { flex: 0 0 auto; width: 26px; text-align: right; font-weight: 500; color: var(--sub); }
 .field.row-inline { justify-content: space-between; }
+/* 「提示词（高级）」这种长标签以前被 .field > span 的 96px 卡住，在设置里折成两三行，
+   Mac（宽窗口）上尤其难看。行内布局让标签自己撑开，值/开关仍然靠右；
+   .link-row 是 <button>，默认 text-align:center，这里要显式靠左。 */
+.field.row-inline > span:first-child { width: auto; flex: 1 1 auto; text-align: left; }
+.link-row > .link-val { width: auto; text-align: right; }
 
 .switch {
   appearance: none;
