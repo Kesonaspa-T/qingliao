@@ -152,6 +152,7 @@ const DEFAULT_SETTINGS = {
   vision: true,
   doodle: true,
   stickerChance: 25,
+  stickerTriggers: '',
   prompts: {},
   webSearch: true,
   delayOn: true,
@@ -1758,14 +1759,29 @@ function buildMessages(friend, conv, nudge, imgMap) {
   });
   const stkTags = [...new Set(stk.flatMap((x) => x.tags || []))].slice(0, 40);
   const chance = Math.max(0, Math.min(100, Number(s.stickerChance ?? 25)));
+  // 关键词必发（逗号分隔）：说到就发，不看概率。和概率是两套并行的规则：
+  //   概率 30 + 关键词「生气」→ 平时 30% 随机发，你说「生气」时必发；
+  //   概率 0 + 关键词 → 只在关键词上发。
+  const stickerTriggers = String(s.stickerTriggers || '')
+    .split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20);
+  const lastUserMsg = [...(conv.messages || [])].reverse()
+    .find((m) => m.role === 'user' && !m.recalled);
+  const lastUserText = (lastUserMsg && lastUserMsg.text) || '';
+  const hitTrigger = stickerTriggers.find((w) => w && lastUserText.includes(w)) || '';
   // 每回合真掷一次骰子：不进就完全不提表情包，模型没有机会硬发；
   // 进了就由代码兜底（deliver 会补一张），不能只靠模型自己想起来写标记。
   const stickerRoll = Math.random() * 100 < chance;
-  const stickerOk = !!(stkList.length && chance > 0 && stickerRoll);
-  if (conv && typeof conv === 'object') conv.__stickerThisTurn = stickerOk;
+  const stickerOk = !!(stkList.length && (hitTrigger || (chance > 0 && stickerRoll)));
+  if (conv && typeof conv === 'object') {
+    conv.__stickerThisTurn = stickerOk;
+    conv.__stickerTrigger = hitTrigger;
+  }
   if (stickerOk) {
+    const want = hitTrigger
+      ? `他这一句提到了「${hitTrigger}」，这一条你应该发一个表情包（优先挑和「${hitTrigger}」对得上的；关键词必须从下面这些里挑）。`
+      : '这一条你可以顺手带一个表情包；想发就在消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。';
     sys += '\n\n【表情包】你手机里存着这些表情包（关键词=画面）：' + stkList.join('；') + '。'
-      + '这一条你可以顺手带一个表情包；想发就在消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。'
+      + want
       + `\n规矩：\n`
       + `- 最多一个，情绪对得上才发；对不上就别发，她会照常只发文字\n`
       + `- 只发文字说「给你发个表情」不算发出，必须写 [[表情:关键词]] 才会真的发出去\n`
@@ -2302,17 +2318,20 @@ function notifyPeer(name, text) {
   try { new Notification(name, { body: text.slice(0, 60) }); } catch (_) {}
 }
 
-/* 这一回合骰子进了、但模型没写 [[表情:…]] 时，替它挑一张：
-   优先挑标签在回复文字里出现过的，挑不到就随便一张。没有就返回 null。 */
-function pickStickerForText(text) {
+/* 在表情包库里找一张「标签出现在这段文字里」的；找不到返回 null。 */
+function findStickerByText(text) {
   const t = String(text || '');
+  if (!t) return null;
+  return stickers().find((x) => (x.tags || []).some((tag) => tag && t.includes(tag))) || null;
+}
+
+/* 这一回合骰子进了、但模型没写 [[表情:…]] 时，替它挑一张。
+   优先关键词（触发词）→ 回复文字 → 随便一张。没有就返回 null。 */
+function pickStickerForText(text, trigger) {
   const pool = stickers();
   if (!pool.length) return null;
-  if (t) {
-    const hit = pool.find((x) => (x.tags || []).some((tag) => tag && t.includes(tag)));
-    if (hit) return hit;
-  }
-  return pool[Math.floor(Math.random() * pool.length)] || null;
+  return findStickerByText(trigger) || findStickerByText(text)
+    || pool[Math.floor(Math.random() * pool.length)] || null;
 }
 
 async function deliver(kind, conv, text, authorId, maxParts) {
@@ -2347,6 +2366,7 @@ async function deliver(kind, conv, text, authorId, maxParts) {
 
   // 表情包：把 [[表情:关键词]] 取出来，找到对应的图，剩下的才是文字
   const stickerGate = (conv && typeof conv === 'object') ? conv.__stickerThisTurn : undefined;
+  const stickerTrigger = (conv && typeof conv === 'object') ? (conv.__stickerTrigger || '') : '';
   const pool = stickerGate === false ? [] : stickers();
   const usedStickers = [];
   let body = String(text || '');
@@ -2385,10 +2405,14 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   // 骰子进了但模型自己没写标记：替她补一张（只补一张）。
   // 不补的话「发消息带表情包的概率」就只是「允许她发」，模型不发就等于没这个设置。
   if (stickerGate === true && hasText && usedStickers.length === 0 && pool.length) {
-    const pick = pickStickerForText(body);
+    // 关键词触发的，优先找标签和关键词对得上的；找不到再按回复文字、最后随便一张
+    const pick = pickStickerForText(body, stickerTrigger);
     if (pick) usedStickers.push(pick);
   }
-  if (conv && typeof conv === 'object') conv.__stickerThisTurn = undefined;
+  if (conv && typeof conv === 'object') {
+    conv.__stickerThisTurn = undefined;
+    conv.__stickerTrigger = '';
+  }
 
   // 表情包跟在文字后面发
   for (const item of usedStickers) {
@@ -2907,6 +2931,7 @@ function fillForm() {
   $('#fVision').checked = !!s.vision;
   if ($('#fDoodle')) $('#fDoodle').checked = s.doodle !== false;
   if ($('#fStickerChance')) $('#fStickerChance').value = Number(s.stickerChance ?? 25);
+  if ($('#fStickerTriggers')) $('#fStickerTriggers').value = s.stickerTriggers || '';
   renderStickerCount();
   $('#fSearch').checked = !!s.webSearch;
   $('#fDelayOn').checked = !!s.delayOn;
@@ -2955,6 +2980,10 @@ function saveForm() {
   s.vision = $('#fVision').checked;
   if ($('#fDoodle')) s.doodle = $('#fDoodle').checked;
   if ($('#fStickerChance')) s.stickerChance = Math.max(0, Math.min(100, Number($('#fStickerChance').value) || 0));
+  if ($('#fStickerTriggers')) {
+    s.stickerTriggers = String($('#fStickerTriggers').value || '')
+      .split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20).join(', ');
+  }
   s.webSearch = $('#fSearch').checked;
   s.delayOn = $('#fDelayOn').checked;
   s.delayMin = Math.max(0, Math.min(600, Number($('#fDelayMin').value) || 0));
