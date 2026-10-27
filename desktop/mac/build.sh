@@ -80,6 +80,26 @@ PLIST
 
 codesign --force --deep --sign - "$OUT/$NAME.app" >/dev/null 2>&1 || echo "（自签名失败，不影响本机打开）"
 
+# ---- 打包：App + 「打不开怎么办」说明。没有 Apple 开发者签名，第一次一定被 Gatekeeper 拦 ----
+DISTNAME="qingliao-mac-$VERSION"
+DIST="$OUT/$DISTNAME"
+rm -rf "$DIST"
+mkdir -p "$DIST"
+cp -R "$OUT/$NAME.app" "$DIST/"
+for f in "如何打开（重要）.txt" "修复打不开.command"; do
+  [ -f "$f" ] && cp "$f" "$DIST/"
+done
+chmod +x "$DIST/修复打不开.command" 2>/dev/null || true
+
+OUT_ABS="$(cd "$OUT" && pwd)"
+ZIP="$OUT_ABS/$DISTNAME.zip"
+rm -f "$ZIP"
+# 先清扩展属性再 ditto：ditto 能正确写 UTF-8 文件名（Info-ZIP 的 zip 会丢 UTF-8 标记，
+# 中文名在别的 Mac 上解压容易乱码），清掉 xattr 后也不会多出 ._ 垃圾文件
+xattr -cr "$DIST" 2>/dev/null || true
+( cd "$OUT" && ditto -c -k --keepParent "$DISTNAME" "$ZIP" )
+
 echo "构建完成：$OUT/$NAME.app  版本 $VERSION"
 lipo -info "$EXE" 2>/dev/null || true
-echo "打包：ditto -c -k --keepParent \"$OUT/$NAME.app\" qingliao-mac-$VERSION.zip"
+echo "打包：$ZIP"
+echo "  里面是：轻聊.app + 如何打开（重要）.txt + 修复打不开.command"
