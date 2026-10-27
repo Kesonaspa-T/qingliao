@@ -1712,11 +1712,17 @@ function buildMessages(friend, conv, nudge, imgMap) {
     + '\n- 偶尔用语气词（啊、欸、诶、嘛、呀、唉），但不要每句都加'
     + '\n- 不要每句都提问；想问就问具体的、有点傻的问题';
   }
-  // 人设刚改过：历史里还是旧口吻，模型会惯性模仿，这里明确打断
+  // 人设刚改过：历史里若还有旧口吻，模型会惯性模仿，这里明确打断。
+  // 判断依据是「这次真的发给模型的上下文里还有没有改之前的消息」，
+  // 不是「改完之后聊了几条」——以前按 30 条算，聊得快的时候早就打回原形了。
   const personaChangedAt = Number(friend.personaChangedAt) || 0;
   if (personaChangedAt) {
-    const since = (conv.messages || []).filter((m) => (m.ts || 0) > personaChangedAt).length;
-    if (since < 30) {
+    const ctxN = Math.max(6, Number(s.contextLimit) || 60);
+    const tail = (conv.messages || [])
+      .filter((m) => (m.text || m.image) && !m.recalled && m.role !== 'system')
+      .slice(-ctxN);
+    const stale = !tail.length || tail.some((m) => (Number(m.ts) || 0) < personaChangedAt);
+    if (stale) {
       sys += '\n\n【设定刚更新过】上面这段人设是刚改的，以它为准。'
         + '历史里你以前的说话方式、口癖、称呼、性格都作废，只当成发生过的事实，'
         + '不要模仿你以前怎么说话，也不要提「我变了」这件事。从这一条开始就是新人设。';

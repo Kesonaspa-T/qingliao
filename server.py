@@ -731,7 +731,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v27",
+                    "build": "v28",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1026,6 +1026,30 @@ def _clean(text, limit=120):
     return text[:limit]
 
 
+PERSONA_FRESH_NOTE = (
+    "\n\n【设定刚更新过】上面这段人设是刚改的，以它为准。"
+    "历史里你以前的说话方式、口癖、称呼、性格都作废，只当成发生过的事实，"
+    "不要模仿你以前怎么说话，也不要提「我变了」这件事。从这一条开始就是新人设。"
+)
+
+
+def persona_fresh_note(friend, msgs=None, limit=30):
+    """人设刚改过、而上下文里还有改之前的消息 → 给模型一句明确的「换人设」指令。
+
+    以前只有客户端私聊提示词有这句，云端群聊 / 云端主动消息 / 朋友圈没有，
+    所以在群里或她主动发消息时，旧口吻会继续，看起来就是「改人设没用」。
+    """
+    ts = int((friend or {}).get("personaChangedAt") or 0)
+    if not ts:
+        return ""
+    tail = list(msgs or [])[-limit:]
+    if not tail:
+        return PERSONA_FRESH_NOTE
+    if any(int(m.get("ts") or 0) < ts for m in tail):
+        return PERSONA_FRESH_NOTE
+    return ""
+
+
 def prompt_extra(settings, key):
     """用户在「设置 → 提示词」里写的那一段（没写返回空字符串）。
 
@@ -1052,12 +1076,13 @@ def chat_lines_for_moment(st, friend):
     return out
 
 
-def gen_moment_text(friend, settings, key, chat_lines=None):
+def gen_moment_text(friend, settings, key, chat_lines=None, recent_msgs=None):
     now = datetime.datetime.now()
     wd = "一二三四五六日"[now.weekday()]
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
+        + persona_fresh_note(friend, recent_msgs)
     )
     if chat_lines:
         sys += ("你和他的私聊最近是这样（可以拿它当素材，但不要写成流水账，"
@@ -1198,11 +1223,12 @@ def group_prompt_text(group_prompt):
     return "\n\n【群设定：群内所有成员共同遵守】\n" + group_prompt + "\n\n" if group_prompt else ""
 
 
-def gen_group_line(friend, author_name, moment_text, prev_lines, settings, key, group_prompt=""):
+def gen_group_line(friend, author_name, moment_text, prev_lines, settings, key, group_prompt="", recent_msgs=None):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
         + "你们在一个群里聊天。" + author_name + " 刚发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
+        + persona_fresh_note(friend, recent_msgs)
     )
     sys += group_prompt_text(group_prompt)
     if prev_lines:
@@ -1233,11 +1259,12 @@ def gen_proactive_text(friend, last_text, settings, key):
     return _clean(text, 50)
 
 
-def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_prompt=""):
+def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_prompt="", recent_msgs=None):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
         "你们在一个叫「" + (group_name or "群") + "」的群里。\n"
+        + persona_fresh_note(friend, recent_msgs)
     )
     sys += group_prompt_text(group_prompt)
     if recent_lines:
@@ -1284,12 +1311,13 @@ def _clean_multiline(text, limit=600):
     return "\n".join(lines)[:limit]
 
 
-def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", allow_draw=False):
+def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", allow_draw=False, recent_msgs=None):
     """她主动找他说话：跟前文只沾一点点，多为中性，绝不替他说话。"""
     name = friend.get("name") or ""
     sys = (
         "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
-        "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n\n"
+        + persona_fresh_note(friend, recent_msgs)
+        + "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n\n"
     )
     if recent_lines:
         sys += ("你们最近说过的话（只当背景，不要复述、不要接着追问）：\n"
@@ -1325,8 +1353,10 @@ def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", al
 
 
 def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False,
-                   reply_to="", group_prompt="", being_called=False, images=None):
-    sys = "你就是" + (friend.get("name") or "") + "。\n" + (friend.get("persona") or "") + "\n\n"
+                   reply_to="", group_prompt="", being_called=False, images=None,
+                   recent_msgs=None):
+    sys = ("你就是" + (friend.get("name") or "") + "。\n" + (friend.get("persona") or "") + "\n\n"
+           + persona_fresh_note(friend, recent_msgs))
     if in_group:
         sys += group_prompt_text(group_prompt)
         sys += ("你们在群「" + (conv_name or "群") + "」里聊天。只以你自己的身份说话，"
@@ -1438,7 +1468,8 @@ def append_group_reply(group, settings, author, text, source):
 
 def create_moment_for(st, key, author):
     text = gen_moment_text(author, st.get("settings") or {}, key,
-                           chat_lines_for_moment(st, author))
+                           chat_lines_for_moment(st, author),
+                           recent_msgs=author.get("messages"))
     if not text:
         return False
     now_ms = int(time.time() * 1000)
@@ -1476,7 +1507,8 @@ def create_moment(st, key):
     author = random.choice(pool)
     social["lastMomentAuthor"] = author.get("id")
     text = gen_moment_text(author, st.get("settings") or {}, key,
-                           chat_lines_for_moment(st, author))
+                           chat_lines_for_moment(st, author),
+                           recent_msgs=author.get("messages"))
     if not text:
         return False
 
@@ -1648,7 +1680,8 @@ def run_pending(st, p, key, uid=""):
             if not group_can_speak(g, settings, speaker.get("id")):
                 continue
             line = gen_group_line(speaker, author, m.get("text", ""), prev, settings, key,
-                                  group_prompt=g.get("prompt") or "")
+                                  group_prompt=g.get("prompt") or "",
+                                  recent_msgs=g.get("messages"))
             if not append_group_reply(g, settings, speaker.get("id"), line, "moment"):
                 continue
             prev.append("%s：%s" % (speaker.get("name"), line))
@@ -1864,7 +1897,7 @@ def social_tick(uid="local"):
                 me_name = "对方"
             hist = dm_history(f, me_name, msgs, 8)
             try:
-                line = gen_chat_reply(f, f.get("name"), hist, s, key)
+                line = gen_chat_reply(f, f.get("name"), hist, s, key, recent_msgs=msgs)
             except Exception as e:
                 print("[social] 兜底回复失败：", e)
                 line = ""
@@ -1902,7 +1935,8 @@ def social_tick(uid="local"):
                 draw_ok = (own.get("doodle") is not False) and (s.get("doodle", True) is not False)
                 try:
                     txt = gen_proactive(f, me_name, hist, s, key,
-                                        directive=directive, allow_draw=draw_ok)
+                                        directive=directive, allow_draw=draw_ok,
+                                        recent_msgs=msgs)
                 except Exception as e:
                     print("[social] 主动消息失败：", e)
                     txt = ""
@@ -1991,7 +2025,8 @@ def social_tick(uid="local"):
             try:
                 line = gen_chat_reply(speaker, g.get("name"), hist, s, key,
                                       in_group=True, reply_to=reply_to, group_prompt=g.get("prompt") or "",
-                                      being_called=speaker_id in mentioned, images=pics)
+                                      being_called=speaker_id in mentioned, images=pics,
+                                      recent_msgs=g.get("messages"))
             except Exception as e:
                 print("[social] 群聊失败：", e)
                 line = ""
@@ -2026,7 +2061,8 @@ def social_tick(uid="local"):
                 break
             try:
                 line = gen_group_smalltalk(speaker, g.get("name"), recent, s, key,
-                                          group_prompt=g.get("prompt") or "")
+                                          group_prompt=g.get("prompt") or "",
+                                          recent_msgs=g.get("messages"))
             except Exception as e:
                 print("[social] 群聊失败：", e)
                 line = ""
