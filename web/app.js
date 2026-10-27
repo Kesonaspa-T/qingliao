@@ -5015,7 +5015,10 @@ function showLogin(msg) {
 }
 
 async function doAuth(kind) {
-  const server = ($('#lgServer').value || '').trim().replace(/\/+$/, '');
+  let server = ($('#lgServer').value || '').trim().replace(/\/+$/, '');
+  // 有人只填 62.x.x.x:8777（没写 http://），相对地址 fetch 会变成 file:///...，
+  // 安卓就会报 Failed to fetch。这里补全成 http://。
+  if (server && !/^https?:\/\//i.test(server)) server = 'http://' + server;
   const name = ($('#lgName').value || '').trim();
   const pass = $('#lgPass').value || '';
   const say = (t) => { $('#lgMsg').textContent = t; };
@@ -5028,12 +5031,21 @@ async function doAuth(kind) {
   SERVER = server;
   localStorage.setItem(SERVER_KEY, SERVER);
 
+  // 页面跑在 127.0.0.1（Mac 本机模式 / 本地开服务）时，直接 fetch 别的端口会被 CORS 拦；
+  // 统一走 /__proxy 转发（App 内置的本地服务 / server.py 都实现了它）。
+  const postJson = (url, body, token) => {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = 'Bearer ' + token;
+    if (IS_LOCAL_SERVER) {
+      headers['X-Target-Url'] = url;
+      headers['X-Method'] = 'POST';
+      return fetch('/__proxy', { method: 'POST', headers, body: JSON.stringify(body) });
+    }
+    return fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  };
+
   try {
-    const res = await fetch(SERVER + '/api/' + kind, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, password: pass }),
-    });
+    const res = await postJson(SERVER + '/api/' + kind, { name, password: pass });
     const j = await res.json().catch(() => ({}));
     if (!res.ok) return say(j.error || ('HTTP ' + res.status));
 
@@ -5041,11 +5053,7 @@ async function doAuth(kind) {
     if (local) {
       try {
         const imported = migrate(JSON.parse(local));
-        await fetch(SERVER + '/api/state', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + j.token },
-          body: JSON.stringify({ ...imported, _edits: importEdits(imported) }),
-        });
+        await postJson(SERVER + '/api/state', { ...imported, _edits: importEdits(imported) }, j.token);
       } catch (_) {}
     }
 
@@ -5053,7 +5061,10 @@ async function doAuth(kind) {
     localStorage.removeItem('ql.local');   // 登录后切回云端模式
     location.reload();
   } catch (e) {
-    say('连不上：' + (e.message || e));
+    const msg = String((e && e.message) || e);
+    say('连不上：' + (/failed to fetch|networkerror|load failed/i.test(msg)
+      ? '检查地址是不是写全了（要带 http://）、手机能不能打开这个地址'
+      : msg));
   }
 }
 

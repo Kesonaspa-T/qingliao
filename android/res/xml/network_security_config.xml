@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- 只允许明文访问你自己的服务器；其余一律要求 HTTPS -->
+    <!-- 登录和聊天要连「用户自己的服务器」，很多是 http://；
+         以前这里只放行了 your-server.example.com/127.0.0.1，
+         结果连 62.234.102.161 这种 IP 会被 Android 直接拦掉，报 Failed to fetch。
+         这里放开明文（HTTPS 仍然可用）。 -->
+    <base-config cleartextTrafficPermitted="true" />
     <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">your-server.example.com</domain>
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">localhost</domain>
     </domain-config>
-    <base-config cleartextTrafficPermitted="false" />
 </network-security-config>
