@@ -16,24 +16,38 @@ rm -rf "$OUT"
 mkdir -p "$OUT/$NAME.app/Contents/MacOS" "$OUT/$NAME.app/Contents/Resources"
 
 # ---- 编译：默认 arm64 + x86_64，lipo 成一个包 ----
+# 注意：两个架构都显式指定 target。在 Intel Mac 上「本机编译 + x86 target」会是同一
+# 架构的两份，lipo 会报错，所以不能用「本机 + x86」这种写法。
 if [ "${ARCH:-universal}" = "native" ]; then
   swiftc -O -o "$EXE" main.swift uidlg.swift -framework Cocoa -framework WebKit
 else
-  swiftc -O -o "$OUT/$NAME-arm64" main.swift uidlg.swift -framework Cocoa -framework WebKit
-  # 没装 Intel SDK 的老机器会失败：那就退回单架构，不要因此构建不出来。
-  if swiftc -O -target x86_64-apple-macos11 -o "$OUT/$NAME-x86" main.swift uidlg.swift \
-       -framework Cocoa -framework WebKit 2>/dev/null; then
-    lipo -create "$OUT/$NAME-arm64" "$OUT/$NAME-x86" -output "$EXE"
-    rm -f "$OUT/$NAME-arm64" "$OUT/$NAME-x86"
-  else
-    echo "（这台机器编不了 x86_64，退回 arm64 单架构）"
-    mv "$OUT/$NAME-arm64" "$EXE"
-  fi
+  BUILT=""
+  for arch in arm64 x86_64; do
+    if swiftc -O -target "${arch}-apple-macos11" -o "$OUT/$NAME-$arch" main.swift uidlg.swift \
+         -framework Cocoa -framework WebKit 2>/dev/null; then
+      BUILT="$BUILT $arch"
+    fi
+  done
+  case "$(echo $BUILT | wc -w | tr -d ' ')" in
+    2)
+      lipo -create "$OUT/$NAME-arm64" "$OUT/$NAME-x86_64" -output "$EXE"
+      rm -f "$OUT/$NAME-arm64" "$OUT/$NAME-x86_64"
+      ;;
+    1)
+      echo "（只能编出 $BUILT，退回单架构）"
+      mv "$OUT/$NAME-$(echo $BUILT | tr -d ' ')" "$EXE"
+      rm -f "$OUT/$NAME-arm64" "$OUT/$NAME-x86_64"
+      ;;
+    *)
+      echo "编不出任何架构，检查 Xcode Command Line Tools：xcode-select --install"
+      exit 1
+      ;;
+  esac
 fi
 
 # ---- 图标：优先用现成的 .icns，没有就把 desktop/icon.png 转一个 ----
 ICON=""
-for c in "./$NAME.icns" "../$NAME.icns" "../icon.png"; do
+for c in "./$NAME.icns" "./icon.png" "../$NAME.icns" "../icon.png"; do
   [ -f "$c" ] && ICON="$c" && break
 done
 if [ -n "$ICON" ]; then
