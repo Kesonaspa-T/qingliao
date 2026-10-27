@@ -1,23 +1,56 @@
 #!/bin/bash
 # 构建 macOS 版：swiftc 编译 WebView 外壳 → 组装 .app → 自签名
 # 用法：./build.sh [版本号]
+#
+# 默认产出「通用二进制」（Apple 芯片 + Intel 都能跑）。
+# 只想要本机架构（快一点）：ARCH=native ./build.sh 1.4.46
 set -e
 cd "$(dirname "$0")"
 
-VERSION="${1:-1.4.44}"
+VERSION="${1:-1.4.46}"
 NAME="轻聊"
 OUT="build"
-ICON="../../../qingliao1_副本2/desktop/轻聊.icns"
+EXE="$OUT/$NAME.app/Contents/MacOS/$NAME"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/$NAME.app/Contents/MacOS" "$OUT/$NAME.app/Contents/Resources"
 
-swiftc -O -o "$OUT/$NAME.app/Contents/MacOS/$NAME" \
-  main.swift uidlg.swift \
-  -framework Cocoa -framework WebKit
+# ---- 编译：默认 arm64 + x86_64，lipo 成一个包 ----
+if [ "${ARCH:-universal}" = "native" ]; then
+  swiftc -O -o "$EXE" main.swift uidlg.swift -framework Cocoa -framework WebKit
+else
+  swiftc -O -o "$OUT/$NAME-arm64" main.swift uidlg.swift -framework Cocoa -framework WebKit
+  # 没装 Intel SDK 的老机器会失败：那就退回单架构，不要因此构建不出来。
+  if swiftc -O -target x86_64-apple-macos11 -o "$OUT/$NAME-x86" main.swift uidlg.swift \
+       -framework Cocoa -framework WebKit 2>/dev/null; then
+    lipo -create "$OUT/$NAME-arm64" "$OUT/$NAME-x86" -output "$EXE"
+    rm -f "$OUT/$NAME-arm64" "$OUT/$NAME-x86"
+  else
+    echo "（这台机器编不了 x86_64，退回 arm64 单架构）"
+    mv "$OUT/$NAME-arm64" "$EXE"
+  fi
+fi
 
-if [ -f "$ICON" ]; then
-  cp "$ICON" "$OUT/$NAME.app/Contents/Resources/$NAME.icns"
+# ---- 图标：优先用现成的 .icns，没有就把 desktop/icon.png 转一个 ----
+ICON=""
+for c in "./$NAME.icns" "../$NAME.icns" "../icon.png"; do
+  [ -f "$c" ] && ICON="$c" && break
+done
+if [ -n "$ICON" ]; then
+  case "$ICON" in
+    *.icns) cp "$ICON" "$OUT/$NAME.app/Contents/Resources/$NAME.icns" ;;
+    *.png)
+      ICONSET="$OUT/$NAME.iconset"
+      mkdir -p "$ICONSET"
+      for s in 16 32 64 128 256 512; do
+        sips -z $s $s "$ICON" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true
+        d=$((s * 2))
+        sips -z $d $d "$ICON" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null 2>&1 || true
+      done
+      iconutil -c icns "$ICONSET" -o "$OUT/$NAME.app/Contents/Resources/$NAME.icns" >/dev/null 2>&1 \
+        && rm -rf "$ICONSET" || echo "（图标转换失败，用系统默认图标）"
+      ;;
+  esac
 fi
 
 cat > "$OUT/$NAME.app/Contents/Info.plist" <<PLIST
@@ -46,4 +79,7 @@ cat > "$OUT/$NAME.app/Contents/Info.plist" <<PLIST
 PLIST
 
 codesign --force --deep --sign - "$OUT/$NAME.app" >/dev/null 2>&1 || echo "（自签名失败，不影响本机打开）"
+
 echo "构建完成：$OUT/$NAME.app  版本 $VERSION"
+lipo -info "$EXE" 2>/dev/null || true
+echo "打包：ditto -c -k --keepParent \"$OUT/$NAME.app\" qingliao-mac-$VERSION.zip"
