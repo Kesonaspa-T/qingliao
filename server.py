@@ -806,7 +806,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v32",
+                    "build": "v33",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -872,6 +872,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not ref:
                 return self._json(400, {"error": "不是有效的图片"})
             return self._json(200, {"ref": ref})
+        if path == "/__proxy":
+            return self._handle_local_proxy()
         if path == "/api/chat":
             return self._handle_chat()
         if path == "/api/ping":
@@ -956,6 +958,50 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, {"ok": False, "error": str(e)[:120]})
 
     # ---------- 通用 JSON 代理（搜索 / 抓取） ----------
+    def _handle_local_proxy(self):
+        """页面跑在 127.0.0.1 时，客户端把所有接口/模型请求都交给它转发（避免跨域）。
+        只允许本机访问，别变成公网开放代理。"""
+        ip = (self.client_address or ("",))[0]
+        if ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            return self._json(403, {"error": "forbidden"})
+        target = (self.headers.get("X-Target-Url") or "").strip()
+        method_name = (self.headers.get("X-Method") or "POST").upper()
+        key = (self.headers.get("X-Target-Key") or "").strip()
+        payload = self._read_json() or {}
+        if not target:
+            return self._json(400, {"error": "缺少 X-Target-Url"})
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        req = Request(
+            target,
+            data=None if method_name == "GET" else json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method=method_name,
+        )
+        try:
+            with urlopen(req, timeout=120, context=SSL_CTX) as r:
+                raw = r.read()
+                ctype = r.headers.get("Content-Type") or "application/json"
+        except HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "ignore")[:400]
+            except Exception:
+                pass
+            return self._json(e.code if e.code >= 400 else 502, {"error": detail or ("HTTP %s" % e.code)})
+        except Exception as e:
+            return self._json(502, {"error": str(e)[:200]})
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(raw)
+        except Exception:
+            pass
+
     def _handle_proxy_json(self):
         payload = self._read_json() or {}
         url = (payload.get("url") or "").strip()

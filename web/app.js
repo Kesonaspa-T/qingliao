@@ -2143,7 +2143,9 @@ function startStream({ url, key, body, onDelta, onDone, onError }) {
       const content = (j && j.choices && j.choices[0] && j.choices[0].message
         && j.choices[0].message.content) || '';
       if (!content) throw new Error('接口返回异常：' + raw.slice(0, 120));
-      if (onDelta) onDelta(content);
+      // onDelta 收的是「SSE 增量对象」，这里要包成 { content }；
+      // 以前直接传字符串，结果内容永远累积不到，本地跑（127.0.0.1）时她永远不回话。
+      if (onDelta) onDelta({ content });
       onDone();
       return;
     }
