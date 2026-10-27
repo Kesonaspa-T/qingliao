@@ -207,7 +207,7 @@ def _dict(x):
     return x if isinstance(x, dict) else {}
 
 
-def merge_friend(base, incoming, patch, *, background=False):
+def merge_friend(base, incoming, patch, *, background=False, strict=False):
     """好友不能整块用客户端快照覆盖。
 
     客户端 normalizeFriend 只会带上已知字段，旧设备/重装后的设备提交的快照里
@@ -241,13 +241,16 @@ def merge_friend(base, incoming, patch, *, background=False):
         for field in FRIEND_FIELDS:
             if field != "settings" and field in patch:
                 out[field] = patch[field]
-    else:
+    elif not strict:
         for field in ("name", "avatar", "persona"):
             if inc.get(field) not in (None, ""):
                 out[field] = inc[field]
         for field in ("relations", "dmMoment"):
             if field in inc:
                 out[field] = inc[field]
+    # strict（客户端带了 _edits，哪怕这一条好友没改动）时，没有显式 edits 就一律保留磁盘值。
+    # 否则另一台还没同步到的设备只要提交一次快照，就能把刚改的人设/名字改回去——
+    # 表现就是「改完人设过一会儿又变回来了」。
 
     # settings 永远按字段合并：磁盘有、客户端没带的键一律保留。
     merged = dict(_dict(base.get("settings")))
@@ -406,7 +409,8 @@ def merge_state(old, new, *, background=False):
         for m in base.get("messages") or []:
             if m.get("id") not in have:
                 msgs.append(m)
-        merged = merge_friend(base, f, friend_edits.get(f.get("id")), background=background)
+        merged = merge_friend(base, f, friend_edits.get(f.get("id")), background=background,
+                              strict=("_edits" in new))
         merged["messages"] = sorted(
             [m for m in msgs if m.get("id") not in deleted],
             key=lambda m: m.get("ts", 0),
@@ -731,7 +735,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v28",
+                    "build": "v29",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })

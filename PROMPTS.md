@@ -81,7 +81,9 @@
 
 3. 两边都要加：客户端 `buildMessages`（私聊 / 单机群聊），服务端 `gen_chat_reply`、
    `gen_proactive`、`gen_moment_text`、`gen_group_line`、`gen_group_smalltalk`
-   （`persona_fresh_note()`，按最近 30 条里有没有旧消息判断）。
+   （`persona_fresh_note()`，按最近 30 条里有没有旧消息判断）；
+4. `merge_friend(strict=True)`：客户端带了 `_edits` 时，没有点名的字段一律保留磁盘值。
+   否则另一台还没同步到的设备提交一次旧快照，就能把人设改回去（「改完过一会儿又变回来」）。
 
 判断依据是「上下文里还有没有旧消息」，不是「改完聊了几条」——按条数算的话，
 聊得快的人 30 条之后旧口吻还没滑出上下文，提醒就先消失了。
