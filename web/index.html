@@ -193,10 +193,10 @@
           <p class="hint" id="ctxHint">deepseek-flash 上下文 1M token，塞得下很多条。</p>
           <label class="field row-inline"><span>让她看图</span><input id="fVision" type="checkbox" class="switch"></label>
           <label class="field row-inline"><span>她会画简笔画</span><input id="fDoodle" type="checkbox" class="switch"></label>
-          <label class="field"><span>发消息带表情包的概率（%）</span><input id="fStickerChance" type="number" min="0" max="100" step="5"></label>
-          <p class="hint">0 = 完全不发；25 = 平均每 4 条里有 1 条带表情包。文字优先——不会只甩一张图，也不会发在群里。</p>
-          <label class="field"><span>说到这些词一定发</span><input id="fStickerTriggers" placeholder="生气, 难过, 抱抱"></label>
-          <p class="hint">逗号分隔。说到这些词时**一定**发一个（不看上面的概率），比如概率 30 + 关键词「生气」＝平时 30% 随机发、你说「生气」时必发。只想按关键词发，把概率填 0。</p>
+          <label class="field"><span>表情包概率</span><input id="fStickerChance" type="number" min="0" max="100" step="5" placeholder="0-100"></label>
+          <p class="hint">百分比：0 = 完全不发；25 = 平均每 4 条里有 1 条带表情包。文字优先——不会只甩一张图，也不会发在群里。</p>
+          <label class="field"><span>关键词必发</span><input id="fStickerTriggers" placeholder="生气, 难过, 抱抱"></label>
+          <p class="hint">逗号分隔。说到这些词时<b>一定</b>发一个（不看上面的概率）：概率 30 + 关键词「生气」＝平时 30% 随机发、你说「生气」时必发；只想按关键词发，把概率填 0。</p>
           <button type="button" class="field row-inline link-row" id="btnStickers"><span>表情包</span><span id="stickerCount" class="link-val">管理</span></button>
           <button type="button" class="field row-inline link-row" id="btnPrompts"><span>提示词（高级）</span><span class="link-val">自定义</span></button>
           <p class="hint">打开后，她只在具体的事情上才画（你问她在干嘛、她答应画给你、你心情不好时），不是按轮数画。每段关系可以单独关掉。</p>
