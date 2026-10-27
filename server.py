@@ -735,7 +735,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v29",
+                    "build": "v30",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1030,6 +1030,21 @@ def _clean(text, limit=120):
     return text[:limit]
 
 
+def env_now_text():
+    """所有生成路径都要知道「现在几点」——主动消息/群聊以前没有，模型就会把中午说成晚上。"""
+    now = datetime.datetime.now()
+    wd = "一二三四五六日"[now.weekday()]
+    return "【环境】现在是周%s %s。" % (wd, now.strftime("%H:%M"))
+
+
+CONSISTENCY_RULE = (
+    "【说话要讲道理】\n"
+    "- 时间、地点、正在做的事，要和【环境】以及前面说过的话对得上；拿不准就别提具体时间\n"
+    "- 一次只说一件事，别一句话里塞好几件不相关的事\n"
+    "- 上一条说错了（比如把中午说成晚上），就像真人一样顺口认一下（「啊我看错时间了」），别硬编\n"
+)
+
+
 PERSONA_FRESH_NOTE = (
     "\n\n【设定刚更新过】上面这段人设是刚改的，以它为准。"
     "历史里你以前的说话方式、口癖、称呼、性格都作废，只当成发生过的事实，"
@@ -1233,6 +1248,7 @@ def gen_group_line(friend, author_name, moment_text, prev_lines, settings, key, 
         + (friend.get("persona") or "") + "\n\n"
         + "你们在一个群里聊天。" + author_name + " 刚发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
         + persona_fresh_note(friend, recent_msgs)
+        + env_now_text() + "\n" + CONSISTENCY_RULE
     )
     sys += group_prompt_text(group_prompt)
     if prev_lines:
@@ -1269,6 +1285,7 @@ def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_p
         + (friend.get("persona") or "") + "\n\n"
         "你们在一个叫「" + (group_name or "群") + "」的群里。\n"
         + persona_fresh_note(friend, recent_msgs)
+        + env_now_text() + "\n" + CONSISTENCY_RULE
     )
     sys += group_prompt_text(group_prompt)
     if recent_lines:
@@ -1321,7 +1338,8 @@ def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", al
     sys = (
         "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
         + persona_fresh_note(friend, recent_msgs)
-        + "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n\n"
+        + "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n"
+        + env_now_text() + "\n" + CONSISTENCY_RULE + "\n"
     )
     if recent_lines:
         sys += ("你们最近说过的话（只当背景，不要复述、不要接着追问）：\n"
@@ -1360,7 +1378,8 @@ def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=Fal
                    reply_to="", group_prompt="", being_called=False, images=None,
                    recent_msgs=None):
     sys = ("你就是" + (friend.get("name") or "") + "。\n" + (friend.get("persona") or "") + "\n\n"
-           + persona_fresh_note(friend, recent_msgs))
+           + persona_fresh_note(friend, recent_msgs)
+           + env_now_text() + "\n" + CONSISTENCY_RULE)
     if in_group:
         sys += group_prompt_text(group_prompt)
         sys += ("你们在群「" + (conv_name or "群") + "」里聊天。只以你自己的身份说话，"
