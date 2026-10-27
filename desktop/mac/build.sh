@@ -7,7 +7,7 @@
 set -e
 cd "$(dirname "$0")"
 
-VERSION="${1:-1.4.47}"
+VERSION="${1:-1.4.48}"
 NAME="轻聊"
 OUT="build"
 EXE="$OUT/$NAME.app/Contents/MacOS/$NAME"
@@ -19,11 +19,11 @@ mkdir -p "$OUT/$NAME.app/Contents/MacOS" "$OUT/$NAME.app/Contents/Resources"
 # 注意：两个架构都显式指定 target。在 Intel Mac 上「本机编译 + x86 target」会是同一
 # 架构的两份，lipo 会报错，所以不能用「本机 + x86」这种写法。
 if [ "${ARCH:-universal}" = "native" ]; then
-  swiftc -O -o "$EXE" main.swift uidlg.swift -framework Cocoa -framework WebKit
+  swiftc -O -o "$EXE" main.swift uidlg.swift LocalServer.swift -framework Cocoa -framework WebKit
 else
   BUILT=""
   for arch in arm64 x86_64; do
-    if swiftc -O -target "${arch}-apple-macos11" -o "$OUT/$NAME-$arch" main.swift uidlg.swift \
+    if swiftc -O -target "${arch}-apple-macos11" -o "$OUT/$NAME-$arch" main.swift uidlg.swift LocalServer.swift \
          -framework Cocoa -framework WebKit 2>/dev/null; then
       BUILT="$BUILT $arch"
     fi
@@ -91,6 +91,19 @@ cat > "$OUT/$NAME.app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# ---- 把网页打进 App：本机模式靠它，不连服务器也能用 ----
+WEB=""
+for c in "../../web" "../web" "./web"; do
+  if [ -f "$c/index.html" ]; then WEB="$c"; break; fi
+done
+if [ -n "$WEB" ]; then
+  rm -rf "$OUT/$NAME.app/Contents/Resources/www"
+  cp -R "$WEB" "$OUT/$NAME.app/Contents/Resources/www"
+  echo "已打包网页：$WEB"
+else
+  echo "（没找到 web/ 目录，本机模式会不可用）"
+fi
 
 codesign --force --deep --sign - "$OUT/$NAME.app" >/dev/null 2>&1 || echo "（自签名失败，不影响本机打开）"
 
