@@ -2067,16 +2067,20 @@ function buildMessages(friend, conv, nudge, imgMap) {
     .join('\n');
   const wantsFile = /(文档|文件|表格|代码|脚本|程序|写一份|写个|写一篇|写一下|写点|帮我写|作文|文章|整理成|导出|生成|保存成|word|excel|pdf|python|\.py|\.js|\.md|\.html|\.csv|\.docx|\.json)/i
     .test(recentUserText);
-  if (wantsFile) {
-    sys += '\n\n【文件】他要文档 / 作文 / 代码这类「文件」时，你可以直接把文件交给他：'
-      + '先正常说一句，然后另起一行写 [[文件:文件名.扩展名]]，把完整内容写在下面，最后一行写 [[/文件]]。'
-      + '\n- 扩展名用 .md .txt .docx .py .js .html .css .json .csv 之一（.docx 里用纯文本写，「# 」开头的行会变成标题）'
-      + '\n- 作文 / 文章 / 报告用 .docx 或 .md；代码用对应扩展名'
-      + '\n- 文件名简短、不带路径；内容必须完整，不许写「省略」「同上」，代码要能直接跑'
-      + '\n- **要写就这一条直接写出来**：不要只说「我写就写」「那我写短一点」「马上写」然后不写，'
-      + '他已经催了就更不能再答应一遍'
-      + '\n- 只是聊天、不是要文件的时候，不要用这个格式';
-  }
+  // 文件能力：不再只在「他说要文件」时才给规则。
+  // 任何长内容（作文、报告、清单、教程、代码…）都走文件，聊天里只留一句；
+  // 「我要个文件」「发我文件」也算。
+  sys += '\n\n【文件】你给他写东西的时候（作文、文章、报告、说明、清单、教程、代码、长回答）：'
+    + '\n- 超过 150 字，或者超过 5 行，就必须用文件发，不要把这些长内容直接贴在聊天里；'
+    + '聊天里只说一句「给你写好了」，文件另起一行发'
+    + '\n- 写法：另起一行 [[文件:文件名.扩展名]]，把完整内容写在下面，最后一行 [[/文件]]'
+    + '\n- 扩展名用 .md .txt .docx .py .js .html .css .json .csv：作文 / 文章 / 报告优先 .docx（用「# 」开头写标题），'
+    + '纯文本用 .txt 或 .md，代码用对应扩展名'
+    + '\n- 他说「我要个文件」「发我文件」「给我个文件」时，也按这个来'
+    + '\n- 内容必须完整，不许写「省略」「同上」，代码要能直接跑'
+    + (wantsFile
+      ? '\n- 他这次已经在要文件了：这一条回复里就要把文件给出来，不要只说「我写就写」「马上写」「写短一点」。'
+      : '');
 
   const bursts = isGroup
     ? Math.max(1, Math.min(10, Number(s.groupBursts) || 10))
@@ -2681,6 +2685,18 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     if (txt) files.push({ name: nm, text: txt.slice(0, 80000) });
     return '';
   }).trim();
+
+  // 兜底：他要文件、她却把长内容直接贴在聊天里（没写文件块）→ 自动收成文件
+  const fileAsk = /(文件|文档|作文|文章|报告|清单|教程|整理成|发我|要一份|写一份|写个|写一篇|写一下)/;
+  const longReply = body.length >= 320 || body.split('\n').length >= 8;
+  if (!files.length && longReply && !/<svg[\s>]/i.test(body) && fileAsk.test(convLastUserText(conv))) {
+    const stamp = new Date();
+    const nm = '轻聊文档-' + stamp.getFullYear() + String(stamp.getMonth() + 1).padStart(2, '0')
+      + String(stamp.getDate()).padStart(2, '0') + '-' + String(stamp.getHours()).padStart(2, '0')
+      + String(stamp.getMinutes()).padStart(2, '0') + '.txt';
+    files.push({ name: nm, text: body });
+    body = '给你写好了，文件在下面。';
+  }
 
   // 画了图就整条发：按行拆会把 <svg> 拆成两半，图就没了
   const parts = /<svg[\s>]/i.test(body) ? [body] : splitReply(body, limit);
