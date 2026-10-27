@@ -193,6 +193,7 @@
           <label class="field row-inline"><span>让她看图</span><input id="fVision" type="checkbox" class="switch"></label>
           <label class="field row-inline"><span>她会画简笔画</span><input id="fDoodle" type="checkbox" class="switch"></label>
           <label class="field"><span>发消息带表情包的概率（%）</span><input id="fStickerChance" type="number" min="0" max="100" step="5"></label>
+          <p class="hint">0 = 完全不发；25 = 平均每 4 条里有 1 条带表情包。文字优先——不会只甩一张图，也不会发在群里。</p>
           <button type="button" class="field row-inline link-row" id="btnStickers"><span>表情包</span><span id="stickerCount" class="link-val">管理</span></button>
           <button type="button" class="field row-inline link-row" id="btnPrompts"><span>提示词（高级）</span><span class="link-val">自定义</span></button>
           <p class="hint">打开后，她只在具体的事情上才画（你问她在干嘛、她答应画给你、你心情不好时），不是按轮数画。每段关系可以单独关掉。</p>
@@ -284,6 +285,7 @@
         </div>
 
         <div class="row-btns" id="friendDanger">
+          <button type="button" class="ghost" id="btnFClearChat">清空聊天记录</button>
           <button type="button" class="ghost danger-text" id="btnFDelete">删除这个人</button>
         </div>
 
@@ -303,46 +305,55 @@
 
         <div class="group">
           <div class="group-title">① 私聊说话风格（替换【怎么说话】）</div>
+          <p class="hint">她私聊你时怎么说话。要写能看见的要求（「一句就完了」「不超过 15 字」），别写「温柔一点」这种形容词。留空＝内置那套。</p>
           <label class="field col"><textarea id="prChat" rows="7" placeholder="例：- 一条只说一句，不超过 15 字&#10;- 少用语气词&#10;- 不要每句都问她"></textarea></label>
         </div>
 
         <div class="group">
           <div class="group-title">② 群聊说话风格（替换群里那套口吻；留空沿用 ①）</div>
+          <p class="hint">她在群里怎么接话。留空就跟 ① 一样；想让她在群里更短、更少抢话，写在这里。</p>
           <label class="field col"><textarea id="prGroupChat" rows="5" placeholder="例：- 群里只插一句，10 字以内&#10;- 别抢话，别人说了就别重复"></textarea></label>
         </div>
 
         <div class="group">
           <div class="group-title">③ 主动找你时说什么（替换内置要求）</div>
+          <p class="hint">你半天没回，她主动发消息时写什么。留空＝内置（说此刻在做的事、问一个没头没尾的问题）。</p>
           <label class="field col"><textarea id="prProactive" rows="6" placeholder="例：- 一两句，说你在做什么&#10;- 可以问一个没头没尾的问题"></textarea></label>
         </div>
 
         <div class="group">
           <div class="group-title">④ 发朋友圈（替换内置要求）</div>
+          <p class="hint">她自己发朋友圈时怎么写正文。留空＝内置（长度不限、要有一个具体细节、别升华）。</p>
           <label class="field col"><textarea id="prMoment" rows="6" placeholder="例：- 一句话，别超过 30 字&#10;- 写具体的东西，别抒情"></textarea></label>
         </div>
 
         <div class="group">
           <div class="group-title">⑤ 朋友圈评论（替换内置要求）</div>
+          <p class="hint">她评论你（或别人）朋友圈时怎么写。留空＝内置（10~25 字、别重复别人的话）。</p>
           <label class="field col"><textarea id="prComment" rows="4" placeholder="例：- 就一句，10 字以内&#10;- 别每次都夸，可以损一句"></textarea></label>
         </div>
 
         <div class="group">
           <div class="group-title">⑥ 回复给她的评论（替换内置要求）</div>
+          <p class="hint">你评论了她的朋友圈，她回你一句时怎么写。留空＝内置（10~25 字、别客套）。</p>
           <label class="field col"><textarea id="prReply" rows="4" placeholder="例：- 回一句就够，别解释&#10;- 可以只回两个字"></textarea></label>
         </div>
 
         <div class="group">
           <div class="group-title">⑦ 因为朋友圈私聊你（替换内置要求）</div>
+          <p class="hint">她刷到你发的朋友圈、想私聊你一句时怎么写。留空＝内置（10~25 字、不提「朋友圈」）。</p>
           <label class="field col"><textarea id="prDm" rows="4" placeholder="例：- 就当随口一问，别太热络&#10;- 不提朋友圈三个字"></textarea></label>
         </div>
 
         <div class="group">
           <div class="group-title">⑧ 画图补充（追加，不影响格式）</div>
+          <p class="hint">只加画风要求（颜色、线条、像什么）。<svg> 的格式由代码固定，不用写。</p>
           <label class="field col"><textarea id="prDraw" rows="3" placeholder="例：只画黑白线条，不要上色"></textarea></label>
         </div>
 
         <div class="group">
           <div class="group-title">⑨ 表情包补充（追加，不影响格式）</div>
+          <p class="hint">只加发不发、什么时候发的偏好。[[表情:关键词]] 的写法由代码固定，不用写。</p>
           <label class="field col"><textarea id="prSticker" rows="3" placeholder="例：只在我说「生气」的时候才发表情"></textarea></label>
         </div>
 
@@ -409,6 +420,9 @@
           <div class="group-title">和她</div>
           <div class="kv" id="pfStats"></div>
           <button type="button" class="ghost" id="btnPfEdit">编辑人设和节奏</button>
+          <div class="row-btns">
+            <button type="button" class="ghost danger-text" id="btnPfClear">清空和她的聊天记录</button>
+          </div>
         </div>
       </div>
     </section>
@@ -488,6 +502,6 @@
   </div>
 </div>
 
-<script src="app.js?v=49"></script>
+<script src="app.js?v=50"></script>
 </body>
 </html>

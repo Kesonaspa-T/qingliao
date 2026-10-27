@@ -1747,16 +1747,16 @@ function buildMessages(friend, conv, nudge, imgMap) {
   });
   const stkTags = [...new Set(stk.flatMap((x) => x.tags || []))].slice(0, 40);
   const chance = Math.max(0, Math.min(100, Number(s.stickerChance ?? 25)));
-  // 每回合真掷一次骰子：不进就完全不提表情包，模型没有机会硬发
+  // 每回合真掷一次骰子：不进就完全不提表情包，模型没有机会硬发；
+  // 进了就由代码兜底（deliver 会补一张），不能只靠模型自己想起来写标记。
   const stickerRoll = Math.random() * 100 < chance;
   const stickerOk = !!(stkList.length && chance > 0 && stickerRoll);
   if (conv && typeof conv === 'object') conv.__stickerThisTurn = stickerOk;
   if (stickerOk) {
-    const every = Math.max(2, Math.round(100 / chance));
     sys += '\n\n【表情包】你手机里存着这些表情包（关键词=画面）：' + stkList.join('；') + '。'
-      + '想发表情时，在消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。'
+      + '这一条你可以顺手带一个表情包；想发就在消息里单独一行写 [[表情:关键词]]（关键词必须从上面这些里挑）。'
       + `\n规矩：\n`
-      + `- 平均每 ${every} 条消息最多发一次，情绪对得上才发\n`
+      + `- 最多一个，情绪对得上才发；对不上就别发，她会照常只发文字\n`
       + `- 只发文字说「给你发个表情」不算发出，必须写 [[表情:关键词]] 才会真的发出去\n`
       + `- 发的时候**文字一定要有**：先说一句话，再贴表情包；不要只发一个光秃秃的表情包\n`
       + (promptExtra('sticker') ? (`\n- 【主人补充】${promptExtra('sticker')}`) : '')
@@ -2291,6 +2291,19 @@ function notifyPeer(name, text) {
   try { new Notification(name, { body: text.slice(0, 60) }); } catch (_) {}
 }
 
+/* 这一回合骰子进了、但模型没写 [[表情:…]] 时，替它挑一张：
+   优先挑标签在回复文字里出现过的，挑不到就随便一张。没有就返回 null。 */
+function pickStickerForText(text) {
+  const t = String(text || '');
+  const pool = stickers();
+  if (!pool.length) return null;
+  if (t) {
+    const hit = pool.find((x) => (x.tags || []).some((tag) => tag && t.includes(tag)));
+    if (hit) return hit;
+  }
+  return pool[Math.floor(Math.random() * pool.length)] || null;
+}
+
 async function deliver(kind, conv, text, authorId, maxParts) {
   if (kind === 'group' && isCloud()) return;
   const owner = kind === 'friend' ? conv : null;
@@ -2322,7 +2335,8 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     .trim();
 
   // 表情包：把 [[表情:关键词]] 取出来，找到对应的图，剩下的才是文字
-  const pool = (conv && conv.__stickerThisTurn === false) ? [] : stickers();
+  const stickerGate = (conv && typeof conv === 'object') ? conv.__stickerThisTurn : undefined;
+  const pool = stickerGate === false ? [] : stickers();
   const usedStickers = [];
   let body = String(text || '');
   body = scrub(body);
@@ -2357,6 +2371,12 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   // 她必须配一句话才发表情包；只剩表情包就不发（避免光秃秃一张图）
   const hasText = parts.some((x) => String(x || '').trim());
   if (!hasText) usedStickers.length = 0;
+  // 骰子进了但模型自己没写标记：替她补一张（只补一张）。
+  // 不补的话「发消息带表情包的概率」就只是「允许她发」，模型不发就等于没这个设置。
+  if (stickerGate === true && hasText && usedStickers.length === 0 && pool.length) {
+    const pick = pickStickerForText(body);
+    if (pick) usedStickers.push(pick);
+  }
   if (conv && typeof conv === 'object') conv.__stickerThisTurn = undefined;
 
   // 表情包跟在文字后面发
@@ -2938,17 +2958,20 @@ function saveForm() {
   s.proactive = $('#fProactive').checked;
   s.idleMin = Math.max(3, Number($('#fIdle').value) || 20);
   const patch = changedFields(before, s, Object.keys(s));
+  const dirty = Object.keys(patch).length > 0;
   Object.assign(state.settings, patch);
   Object.assign(pendingEdits.settings, patch);
   applyTheme();
-  persist();
+  if (dirty) persist();          // 什么都没改就不必同步一次整份状态
   closeSheet();
   renderConversations();
-  toast('已保存');
+  if (dirty) toast('已保存');
 }
 
 $('#btnSettings').addEventListener('click', openSheet);
-$('#btnSheetClose').addEventListener('click', closeSheet);
+// 「关闭」也保存：以前只有右上角「完成」才写盘，改完顺手点关闭就白改了
+//（「表情包概率改了不生效」有一半是这个原因）。
+$('#btnSheetClose').addEventListener('click', saveForm);
 $('#btnSheetSave').addEventListener('click', saveForm);
 $('#fTemp').addEventListener('input', (e) => { $('#fTempOut').textContent = Number(e.target.value).toFixed(1); });
 $('#fModel').addEventListener('input', syncChips);
@@ -3090,18 +3113,31 @@ function closePromptSheet() {
   sheet.setAttribute('aria-hidden', 'true');
 }
 
-function savePromptSheet() {
+function promptFormValues() {
   const p = {};
   for (const [key, id] of PROMPT_FIELDS) {
     const el = document.getElementById(id);
     const v = el ? el.value.trim() : '';
     if (v) p[key] = v;
   }
+  return p;
+}
+
+function savePromptSheet() {
+  const p = promptFormValues();
   state.settings.prompts = p;
   Object.assign(pendingEdits.settings, { prompts: p });
   persist();
   closePromptSheet();
   toast('存好了，下一条就生效');
+}
+
+/** 「关闭」也保存（有改动才存），免得写完点关闭白写。 */
+function closePromptSheetAutoSave() {
+  const cur = (state.settings && state.settings.prompts) || {};
+  const now = promptFormValues();
+  if (JSON.stringify(cur) !== JSON.stringify(now)) savePromptSheet();
+  else closePromptSheet();
 }
 
 /* ---------------- 表情包 ---------------- */
@@ -3432,6 +3468,11 @@ function openFriendSheet(friend, mode) {
   $('#friendSheetTitle').textContent = isMe ? '我的资料' : (isNew ? '新建朋友' : '朋友资料');
   $('#btnFDelete').style.display = friendEditMode === 'edit' ? '' : 'none';
   $('#friendDanger').style.display = friendEditMode === 'edit' ? '' : 'none';
+  const fcBtn = $('#btnFClearChat');
+  if (fcBtn) {
+    const n = (friend && friend.messages) ? friend.messages.length : 0;
+    fcBtn.textContent = n ? `清空聊天记录（${n} 条）` : '清空聊天记录';
+  }
   personaField.style.display = isMe ? 'none' : '';
   presetGroup.style.display = isMe ? 'none' : '';
   $('#relationGroup').style.display = (isMe || isNew) ? 'none' : '';
@@ -3478,7 +3519,7 @@ $('#btnStRetag').addEventListener('click', async () => {
   toast('识别完了');
 });
 
-$('#btnPrClose').addEventListener('click', closePromptSheet);
+$('#btnPrClose').addEventListener('click', closePromptSheetAutoSave);
 $('#btnPrSave').addEventListener('click', savePromptSheet);
 $('#btnPrReset').addEventListener('click', () => {
   for (const [, id] of PROMPT_FIELDS) { const el = document.getElementById(id); if (el) el.value = ''; }
@@ -3619,6 +3660,40 @@ $('#btnFSave').addEventListener('click', () => {
     if (isActive('friend', f.id)) $('#peerName').textContent = f.note || f.name;
   }
   closeFriendSheet();
+});
+
+/* 清空和某个人的聊天记录：消息 id 进墓碑（其它设备/服务器跟着删），人设/记忆/朋友圈保留 */
+function clearFriendChat(f) {
+  if (!f) return false;
+  const msgs = f.messages || [];
+  if (!msgs.length) { toast('她和你还没有聊天记录'); return false; }
+  const who = f.note || f.name || '她';
+  const ok = confirm(`清空和「${who}」的 ${msgs.length} 条聊天记录？\n\n`
+    + '只清聊天记录：人设、你记得的事、朋友圈都会保留。\n'
+    + '清完不能恢复，其它设备登录这个账号也会跟着清空。');
+  if (!ok) return false;
+  rememberDeleted(msgs.map((m) => m.id));
+  f.messages = [];
+  f.unread = 0;
+  f.readAt = Date.now();
+  rt.delete(convKey('friend', f.id));
+  if (isActive('friend', f.id)) closeChat();
+  renderConversations();
+  persist();
+  toast('聊天记录已清空');
+  return true;
+}
+
+$('#btnFClearChat').addEventListener('click', () => {
+  const f = friendById(editingFriendId);
+  if (!f) return;
+  if (clearFriendChat(f)) closeFriendSheet();
+});
+
+$('#btnPfClear').addEventListener('click', () => {
+  const f = friendById(profileFriendId);
+  if (!f) return;
+  if (clearFriendChat(f)) renderProfile();
 });
 
 $('#btnFDelete').addEventListener('click', () => {
