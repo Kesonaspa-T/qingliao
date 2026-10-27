@@ -200,6 +200,7 @@ FRIEND_FIELDS = ("name", "avatar", "persona", "relations", "dmMoment", "settings
                  "note", "region", "signature", "personaChangedAt")
 # 后台任务写入的好友字段：只有后台合并才允许更新。
 FRIEND_SERVER_FIELDS = ("unread", "lastGreet", "lastNudgeAt", "lastFallbackAt",
+                        "lastEssayAt", "nextEssayAt",
                         "memory", "memoryAt", "nextMomentAt", "muted", "createdAt",
                         # 服务端用掉「下一条主动消息」的指令后要能写回磁盘：
                         # settings 里清掉 nextProactive，并打 proactiveUsedAt 告诉客户端
@@ -321,7 +322,7 @@ def read_link(url):
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     })
-    with urlopen(req, timeout=12, context=SSL_CTX) as r:
+    with urlopen(req, timeout=30, context=SSL_CTX) as r:
         final = r.geturl()
         ctype = (r.headers.get("Content-Type") or "").lower()
         raw = r.read(1_800_000)
@@ -805,7 +806,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v31",
+                    "build": "v32",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1411,6 +1412,33 @@ def _clean_multiline(text, limit=600):
         return (before + "\n" + m.group(0)) if before else m.group(0)
     lines = [x.strip() for x in t.split("\n") if x.strip()]
     return "\n".join(lines)[:limit]
+
+
+def gen_essay(friend, me_name, recent_lines, settings, key, recent_msgs=None):
+    """很偶尔的一篇「小作文」：主动发一段 300~600 字的长消息。"""
+    name = friend.get("name") or ""
+    sys = (
+        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        + persona_fresh_note(friend, recent_msgs)
+        + "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n"
+        + env_now_text() + "\n" + CONSISTENCY_RULE + "\n"
+    )
+    if recent_lines:
+        sys += ("你们最近聊过这些（只当背景，别复述、别逐条回应）：\n"
+                + "\n".join(recent_lines[-6:]) + "\n\n")
+    sys += (
+        "现在你想给他写一段长一点的话（不是聊天，是那种想了很多、忍不住写下来的）。要求：\n"
+        "- 300~600 字，分 2~4 段，用换行分段\n"
+        "- 说你最近的心情、你在想的事、你们之间的一件小事；要具体（一个画面、一句话、一个时间）\n"
+        "- 第一人称，像在微信上认真打字发给他，不像作文；不要标题，不要「小作文」三个字\n"
+        "- 不要提问，不要总结大道理，不要每条都煽情；可以有抱怨、有日常、有停顿\n"
+        "- 只输出你要发给他的话本身"
+    )
+    text = call_llm(
+        settings.get("baseUrl"), key, settings.get("model"),
+        [{"role": "system", "content": sys}], max_tokens=900, temperature=0.9,
+    )
+    return _clean_multiline(text, 900)
 
 
 def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", allow_draw=False, recent_msgs=None):
@@ -2060,6 +2088,50 @@ def social_tick(uid="local"):
                           "（用了指令）" if directive else ""), flush=True)
                     changed = True
                 break
+
+        # 偶尔一篇小作文：每人单独开关，服务端排期（默认 5~9 天一次，8:00-23:00）
+        for f in st.get("friends") or []:
+            own = f.get("settings") or {}
+            if not own.get("essay"):
+                continue
+            ne = float(f.get("nextEssayAt") or 0)
+            if ne <= 0:
+                f["nextEssayAt"] = now + random.uniform(2, 4) * 86400
+                changed = True
+                continue
+            if now < ne:
+                continue
+            if now - float(f.get("lastEssayAt") or 0) < 3 * 86400:
+                f["nextEssayAt"] = now + 86400
+                changed = True
+                continue
+            hour_now = datetime.datetime.now().hour
+            if hour_now < 8 or hour_now > 23:
+                continue
+            me_name = (st.get("me") or {}).get("name") or "对方"
+            if me_name in ("我", "对方"):
+                me_name = "对方"
+            msgs = f.get("messages") or []
+            hist = dm_history(f, me_name, msgs, 6)
+            try:
+                essay = gen_essay(f, me_name, hist, s, key, recent_msgs=msgs)
+            except Exception as e:
+                print("[social] 小作文失败：", e)
+                essay = ""
+            if essay:
+                f.setdefault("messages", []).append({
+                    "id": _nid("m"), "role": "peer", "authorId": f.get("id"),
+                    "text": essay, "ts": int(time.time() * 1000), "essay": True,
+                })
+                f["unread"] = int(f.get("unread") or 0) + 1
+                f["lastEssayAt"] = now
+                f["nextEssayAt"] = now + random.uniform(5, 9) * 86400
+                print("[social] 小作文 -> %s (%d 字)" % (f.get("name"), len(essay)), flush=True)
+                changed = True
+            else:
+                f["nextEssayAt"] = now + 86400
+                changed = True
+            break
 
         # 群里她们互相接话：轮流传，每人每轮不超过设置里的「群聊最多几条」
         me_name = (st.get("me") or {}).get("name") or "我"

@@ -2271,6 +2271,7 @@ async function prepareLinkDoc(conv) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url }),
+      timeout: 45000,          // 服务端最多 30 秒，客户端别先超时
     });
     let j = {};
     try { j = await res.json(); } catch (_) {}
@@ -3733,6 +3734,8 @@ function renderFriendRhythm(target, isMe) {
       + '<label class="field row-inline"><span>会主动找我</span><input id="rProactive" type="checkbox" class="switch"></label>'
       + '<label class="field row-inline"><span>每天早晚问候</span><input id="rGreet" type="checkbox" class="switch"></label>'
       + '<label class="field row-inline"><span>她会画图</span><input id="rDoodle" type="checkbox" class="switch"></label>'
+      + '<label class="field row-inline"><span>偶尔发篇小作文</span><input id="rEssay" type="checkbox" class="switch"></label>'
+      + '<p class="hint">很偶尔（大约一周一次，8:00-23:00）：她主动发一段 300~600 字的长消息，不用你先说话。</p>'
       + '<label class="field col"><span>下一条主动消息发什么（只生效一次）</span>'
       + '<input id="rNextProactive" type="text" maxlength="300" placeholder="例：发一篇特别抒情的长文章给我"></label>'
       + '<p class="hint">填了之后，她下次主动找你时一定按这个写；用掉自动清空。留空＝她自己决定。</p>';
@@ -3751,6 +3754,7 @@ function renderFriendRhythm(target, isMe) {
   chk('rProactive', own.proactive, true);
   chk('rGreet', own.greet, true);
   chk('rDoodle', own.doodle, true);
+  chk('rEssay', own.essay, false);
   set('rNextProactive', own.nextProactive);
 }
 
@@ -3770,6 +3774,7 @@ function readFriendRhythm() {
     proactive: document.getElementById('rProactive').checked,
     greet: document.getElementById('rGreet').checked,
     doodle: document.getElementById('rDoodle').checked,
+    essay: document.getElementById('rEssay').checked,
     nextProactive: (document.getElementById('rNextProactive').value || '').trim() || undefined,
   };
   Object.keys(out).forEach((k) => { if (out[k] === undefined) delete out[k]; });
@@ -3777,8 +3782,8 @@ function readFriendRhythm() {
 }
 
 const FRIEND_RHYTHM_KEYS = ['bursts', 'delayMin', 'delayMax', 'nudgeAfter',
-  'momentInterval', 'proactive', 'greet', 'doodle', 'nextProactive'];
-const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true };
+  'momentInterval', 'proactive', 'greet', 'doodle', 'essay', 'nextProactive'];
+const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true, essay: false };
 
 /** 面板上的值 vs 这个好友当前的 settings → 只给出真正变了的那几项。 */
 function friendSettingsPatch(friend, want) {
@@ -4462,6 +4467,29 @@ async function genGroupLine(f, authorName, momentText, prev) {
   return cleanLine(await quickChat([{ role: 'system', content: sys }]), 60);
 }
 
+/** 单机版「偶尔一篇小作文」：她主动发一段 300~600 字。 */
+async function genEssayLocal(f) {
+  const meName = state.me.name || '他';
+  const chatLines = (f.messages || []).slice(-6)
+    .filter((m) => (m.text || '').trim())
+    .map((m) => `${m.role === 'user' ? meName : '我'}：${String(m.text).slice(0, 50)}`);
+  const sys = `${f.persona || ''}\n\n`
+    + `【身份】「我」是你自己，「${meName}」是他。你不是他，不要替他说，也不要假装是他。\n`
+    + `【环境】现在是 ${timeOf(Date.now())}，${weekday(new Date())}。\n`
+    + '【说话要讲道理】\n- 时间、地点、正在做的事，要和【环境】以及前面说过的话对得上；拿不准就别提具体时间\n'
+    + '- 一次只说一件事，别一句话里塞好几件不相关的事\n'
+    + '- 上一条说错了就像真人一样顺口认一下，别硬编\n\n'
+    + (chatLines.length ? `你们最近聊过这些（只当背景，别复述、别逐条回应）：\n${chatLines.join('\n')}\n\n` : '')
+    + '现在你想给他写一段长一点的话（不是聊天，是那种想了很多、忍不住写下来的）。要求：\n'
+    + '- 300~600 字，分 2~4 段，用换行分段\n'
+    + '- 说你最近的心情、你在想的事、你们之间的一件小事；要具体（一个画面、一句话、一个时间）\n'
+    + '- 第一人称，像在微信上认真打字发给他，不像作文；不要标题，不要「小作文」三个字\n'
+    + '- 不要提问，不要总结大道理；可以有抱怨、有日常、有停顿\n'
+    + '- 只输出你要发给他的那段话';
+  const text = await quickChat([{ role: 'system', content: sys }]);
+  return cleanBlock(text, 900);
+}
+
 async function clientSocialTick(force) {
   if (isCloud() && !force) return;   // 云端模式这些活由服务器干
   if (!(state.settings.apiKey || '').trim()) return;
@@ -4569,6 +4597,43 @@ async function clientSocialTick(force) {
     social.lastMomentAt = nowSec2;
     social.nextMomentAt = nowSec2 + interval * (0.8 + Math.random() * 0.7);
     changed = true;
+  }
+
+  // 偶尔一篇小作文（单机模式；云端由服务端排期）
+  if (!isCloud()) {
+    const nowMs = Date.now();
+    const hourNow = new Date().getHours();
+    for (const f of state.friends) {
+      const own = f.settings || {};
+      if (!own.essay) continue;
+      const ne = Number(f.nextEssayAt) || 0;
+      if (!ne) {
+        f.nextEssayAt = nowMs + (2 + Math.random() * 2) * 86400000;
+        changed = true;
+        continue;
+      }
+      if (nowMs < ne) continue;
+      if (f.lastEssayAt && nowMs - f.lastEssayAt < 3 * 86400000) {
+        f.nextEssayAt = nowMs + 86400000;
+        changed = true;
+        continue;
+      }
+      if (hourNow < 8 || hourNow > 23) continue;
+      try {
+        const txt = await genEssayLocal(f);
+        if (txt) {
+          f.messages = f.messages || [];
+          f.messages.push({
+            id: uid('m'), role: 'peer', authorId: f.id, text: txt, ts: Date.now(), essay: true,
+          });
+          f.unread = (f.unread || 0) + 1;
+          f.lastEssayAt = Date.now();
+          f.nextEssayAt = Date.now() + (5 + Math.random() * 4) * 86400000;
+          changed = true;
+        }
+      } catch (_) {}
+      break;
+    }
   }
 
   if (changed) {
@@ -5249,6 +5314,7 @@ function normalizeFriend(raw) {
   if (own && typeof own === 'object' && Object.keys(own).length) f.settings = { ...own };
   for (const key of ['memory', 'memoryAt', 'lastGreet', 'lastNudgeAt',
     'lastFallbackAt', 'nextMomentAt', 'muted', 'proactiveUsedAt',
+    'nextEssayAt', 'lastEssayAt',
     'note', 'region', 'signature', 'personaChangedAt']) {
     if (raw && raw[key] !== undefined && raw[key] !== null) f[key] = raw[key];
   }

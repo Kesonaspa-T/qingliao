@@ -3,7 +3,7 @@
 > 给下一个接手的人（或 agent）。
 > 这份文档讲清楚：**提示词分成哪几段、写在哪、哪些能让用户改、哪些绝对不能动**。
 
-版本：服务端 build `v31`，前端 `app.js?v=54` / `style.css?v=27`。
+版本：服务端 build `v32`，前端 `app.js?v=55` / `style.css?v=27`。
 
 ---
 
@@ -76,6 +76,15 @@
 
 模型本身太弱（`deepseek-flash` + 温度 0.9）时还是会胡说，设置里加了一行提示：
 换 `deepseek-v4-pro`、思考「高」、温度 0.7、记忆条数 ≤ 80。
+
+### 小作文（`gen_essay` / `genEssayLocal`）
+
+每人一个开关（朋友资料 →「偶尔发篇小作文」，`friend.settings.essay`）：
+- 服务端 `social_tick` 排期：`nextEssayAt` 首次 = now + 2~4 天，之后 5~9 天；
+  触发条件还要 `lastEssayAt` 至少 3 天前、且 8:00–23:00；
+- 单机版 `clientSocialTick` 里同样的规则（`genEssayLocal`）；
+- 要求：300~600 字、2~4 段、第一人称、不要提问/大道理/标题；
+- 消息带 `essay: true`，只是长消息，不占正常主动消息的节流。
 
 ### 改完人设为什么能立刻生效
 
