@@ -4,7 +4,7 @@
 # 用法：./make-src.sh [版本号]
 set -e
 cd "$(dirname "$0")"
-VERSION="${1:-1.4.46}"
+VERSION="${1:-1.4.47}"
 NAME="qingliao-mac-src-$VERSION"
 OUT="build/$NAME"
 

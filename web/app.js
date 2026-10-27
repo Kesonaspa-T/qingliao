@@ -603,6 +603,7 @@ function convPreview(c, kind) {
   if (!last) return '';
   const prefix = last.role === 'user' ? '我：' : '';
   if (last.image) return prefix + '[图片]';
+  if (last.file && last.file.name) return prefix + '[文件] ' + last.file.name;
   if (kind === 'group') {
     return (last.role === 'user' ? '我：' : nameOf(last.authorId) + '：') + plainText(last.text || '');
   }
@@ -1270,6 +1271,225 @@ function sanitizeSvg(raw) {
 }
 
 /** 只取文字部分（会话列表预览、通知用）。 */
+/* ---------------- 文件卡片 / 保存 ---------------- */
+
+function humanSize(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function fileExt(name) {
+  const m = /\.([a-z0-9]{1,8})$/i.exec(String(name || ''));
+  return m ? m[1].toLowerCase() : '';
+}
+
+function fileCardEl(file) {
+  const box = document.createElement('div');
+  box.className = 'file-card';
+
+  const ico = document.createElement('div');
+  ico.className = 'file-ico';
+  const ext = fileExt(file.name);
+  ico.textContent = (ext || 'file').slice(0, 4).toUpperCase();
+  ico.dataset.ext = ext;
+
+  const main = document.createElement('div');
+  main.className = 'file-main';
+  const nm = document.createElement('div');
+  nm.className = 'file-name';
+  nm.textContent = file.name || '文件';
+  const meta = document.createElement('div');
+  meta.className = 'file-meta';
+  let size = 0;
+  try { size = new Blob([file.text || '']).size; } catch (_) { size = (file.text || '').length; }
+  meta.textContent = humanSize(size) + (ext === 'docx' ? ' · Word 文档' : ' · ' + (ext || '文本'));
+  main.append(nm, meta);
+
+  const btns = document.createElement('div');
+  btns.className = 'file-btns';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'file-btn primary';
+  save.textContent = '保存';
+  save.addEventListener('click', (e) => { e.stopPropagation(); saveGeneratedFile(file); });
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'file-btn';
+  copy.textContent = '复制';
+  copy.addEventListener('click', (e) => {
+    e.stopPropagation();
+    copyText(file.text || '');
+    toast('内容已复制');
+  });
+  btns.append(save, copy);
+  box.append(ico, main, btns);
+  return box;
+}
+
+function xmlEsc(t) {
+  return String(t == null ? '' : t)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** 极简 .docx：把纯文本按行变成段落，「# 」开头当标题。Word / WPS 都能打开。 */
+function makeDocx(text) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  const paras = lines.map((line) => {
+    const heading = /^#{1,3}\s+/.test(line);
+    const body = line.replace(/^#{1,3}\s+/, '');
+    const rPr = heading ? '<w:rPr><w:b/><w:sz w:val="30"/></w:rPr>' : '';
+    return '<w:p><w:r>' + rPr + '<w:t xml:space="preserve">' + xmlEsc(body) + '</w:t></w:r></w:p>';
+  }).join('');
+  const doc = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+    + paras
+    + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+    + '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>'
+    + '</w:body></w:document>';
+  const types = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    + '<Default Extension="xml" ContentType="application/xml"/>'
+    + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    + '</Types>';
+  const rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+    + '</Relationships>';
+  return zipStore([
+    { name: '[Content_Types].xml', data: types },
+    { name: '_rels/.rels', data: rels },
+    { name: 'word/document.xml', data: doc },
+  ]);
+}
+
+function crc32(u8) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < u8.length; i += 1) {
+    let c = (crc ^ u8[i]) & 0xFF;
+    for (let k = 0; k < 8; k += 1) c = (c & 1) ? ((c >>> 1) ^ 0xEDB88320) : (c >>> 1);
+    crc = (crc >>> 8) ^ c;
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+/** 只存储不压缩的 zip（docx 够用，体积不重要）。 */
+function zipStore(items) {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
+  const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  for (const it of items) {
+    const name = enc.encode(it.name);
+    const data = typeof it.data === 'string' ? enc.encode(it.data) : it.data;
+    const crc = crc32(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true);
+    lh.setUint16(4, 20, true);
+    lh.setUint16(6, 0x0800, true);
+    lh.setUint16(8, 0, true);
+    lh.setUint16(10, dosTime, true);
+    lh.setUint16(12, dosDate, true);
+    lh.setUint32(14, crc, true);
+    lh.setUint32(18, data.length, true);
+    lh.setUint32(22, data.length, true);
+    lh.setUint16(26, name.length, true);
+    lh.setUint16(28, 0, true);
+    chunks.push(new Uint8Array(lh.buffer), name, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true);
+    ch.setUint16(4, 20, true);
+    ch.setUint16(6, 20, true);
+    ch.setUint16(8, 0x0800, true);
+    ch.setUint16(10, 0, true);
+    ch.setUint16(12, dosTime, true);
+    ch.setUint16(14, dosDate, true);
+    ch.setUint32(16, crc, true);
+    ch.setUint32(20, data.length, true);
+    ch.setUint32(24, data.length, true);
+    ch.setUint16(28, name.length, true);
+    ch.setUint16(30, 0, true);
+    ch.setUint16(32, 0, true);
+    ch.setUint16(34, 0, true);
+    ch.setUint16(36, 0, true);
+    ch.setUint32(38, 0, true);
+    ch.setUint32(42, offset, true);
+    central.push(new Uint8Array(ch.buffer), name);
+    offset += 30 + name.length + data.length;
+  }
+  const centralSize = central.reduce((n, c) => n + c.length, 0);
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(4, 0, true);
+  eocd.setUint16(6, 0, true);
+  eocd.setUint16(8, items.length, true);
+  eocd.setUint16(10, items.length, true);
+  eocd.setUint32(12, centralSize, true);
+  eocd.setUint32(16, offset, true);
+  eocd.setUint16(20, 0, true);
+  const all = [...chunks, ...central, new Uint8Array(eocd.buffer)];
+  const total = all.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(total);
+  let p = 0;
+  for (const c of all) { out.set(c, p); p += c.length; }
+  return out;
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const s = String(fr.result || '');
+      resolve(s.indexOf(',') >= 0 ? s.slice(s.indexOf(',') + 1) : s);
+    };
+    fr.onerror = reject;
+    fr.readAsDataURL(blob);
+  });
+}
+
+async function saveGeneratedFile(file) {
+  const name = (file && file.name) || '文件.txt';
+  let blob;
+  if (/\.docx$/i.test(name)) {
+    blob = new Blob([makeDocx(file.text || '')], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+  } else {
+    blob = new Blob([file.text || ''], { type: 'text/plain;charset=utf-8' });
+  }
+
+  // Mac 壳：原生保存到「下载」文件夹（比 WebView 的下载可靠）
+  const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveFile;
+  if (bridge) {
+    try {
+      const base64 = await blobToBase64(blob);
+      bridge.postMessage({ name, base64 });
+      toast('已保存到「下载」文件夹');
+      return;
+    } catch (_) { /* 掉到浏览器下载 */ }
+  }
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    toast('已开始下载；没反应就点「复制」');
+  } catch (_) {
+    copyText(file.text || '');
+    toast('已复制，自己粘到文件里');
+  }
+}
+
 function plainText(text) {
   const parts = splitSvg(text);
   if (!parts) return String(text || '');
@@ -1340,6 +1560,9 @@ function renderMessage(msg, opts = {}) {
     img.src = imgSrc(msg.image);
     img.alt = '';
     bubble.append(img);
+  } else if (msg.file && msg.file.name) {
+    bubble.classList.add('file-bubble');
+    bubble.append(fileCardEl(msg.file));
   } else if (msg.text && splitSvg(msg.text)) {
     paintMessageText(bubble, msg.text);
   } else {
@@ -1683,6 +1906,9 @@ function toApiMessage(m, allowImage, imgMap) {
     }
     return { role, content: (m.text ? m.text + ' ' : '') + label };
   }
+  if (m.file && m.file.name) {
+    return { role, content: (m.text ? m.text + ' ' : '') + '（你发给他一个文件：' + m.file.name + '）' };
+  }
   return { role, content: m.text };
 }
 
@@ -1700,6 +1926,18 @@ function buildMessages(friend, conv, nudge, imgMap) {
     + '\n- 时间、地点、正在做的事，要和【环境】以及前面说过的话对得上；拿不准就别提具体时间'
     + '\n- 一次只说一件事，别一句话里塞好几件不相关的事'
     + '\n- 上一条说错了（比如把中午说成晚上），就像真人一样顺口认一下（「啊我看错时间了」），别硬编';
+
+  // 他把链接发过来了：正文已经抓下来，直接当材料给她，别让她说「我打不开」
+  const ld = conv && conv.__linkDoc;
+  if (ld && ld.url && (ld.text || ld.error)) {
+    if (ld.text) {
+      sys += `\n\n【他发来的链接】${ld.title ? '标题：' + ld.title + '\n' : ''}${ld.url}\n`
+        + `网页正文（抽出来的，可能不完整）：\n${String(ld.text).slice(0, 6000)}\n`
+        + '- 这是他刚发来的内容，你可以直接聊、总结、回答里面的问题；不要再说「我打不开链接」「看不到」。';
+    } else {
+      sys += `\n\n【他发来的链接】${ld.url}\n（这个页面没抓到内容：${ld.error || '打不开'}。可以直说没打开，别编里面的内容。）`;
+    }
+  }
 
   // 人味大多来自这几条：短、有具体的东西、允许废话、不要总结
   // 群聊有单独一块（②），没写才退回私聊那套，避免群里还在用私聊口吻。
@@ -1725,7 +1963,7 @@ function buildMessages(friend, conv, nudge, imgMap) {
   if (personaChangedAt) {
     const ctxN = Math.max(6, Number(s.contextLimit) || 60);
     const tail = (conv.messages || [])
-      .filter((m) => (m.text || m.image) && !m.recalled && m.role !== 'system')
+      .filter((m) => (m.text || m.image || m.file) && !m.recalled && m.role !== 'system')
       .slice(-ctxN);
     const stale = !tail.length || tail.some((m) => (Number(m.ts) || 0) < personaChangedAt);
     if (stale) {
@@ -1818,6 +2056,17 @@ function buildMessages(friend, conv, nudge, imgMap) {
         + '可以写一两个字的标题；不要外部图片、不要 script、不要 foreignObject。'
         + '\n画完不要解释画的是什么。';
     }
+  }
+
+  // 他要文档/代码文件：允许她直接吐一个文件块，客户端会渲染成可保存的文件卡片
+  const wantsFile = /(文档|文件|表格|代码|脚本|程序|写一份|写个|帮我写|整理成|导出|生成|保存成|word|excel|pdf|python|\.py|\.js|\.md|\.html|\.csv|\.docx|\.json)/i
+    .test(convLastUserText(conv));
+  if (wantsFile) {
+    sys += '\n\n【文件】他要文档 / 代码这类「文件」时，你可以直接把文件交给他：'
+      + '先正常说一句，然后另起一行写 [[文件:文件名.扩展名]]，把完整内容写在下面，最后一行写 [[/文件]]。'
+      + '\n- 扩展名用 .md .txt .docx .py .js .html .css .json .csv 之一（.docx 里用纯文本写，「# 」开头的行会变成标题）'
+      + '\n- 文件名简短、不带路径；内容必须完整，不许写「省略」「同上」，代码要能直接跑'
+      + '\n- 只是聊天、不是要文件的时候，不要用这个格式';
   }
 
   const bursts = isGroup
@@ -2001,7 +2250,40 @@ function streamOnce({ url, key, body, onDelta }) {
   return { promise, cancel: () => { try { if (cancel) cancel(); } catch (_) {} } };
 }
 
+function convLastUserText(conv) {
+  const m = [...((conv && conv.messages) || [])].reverse().find((x) => x.role === 'user' && !x.recalled);
+  return (m && m.text) || '';
+}
+
+/** 他说的话里有链接就抓一下正文；抓不到也记下来，提示词里告诉她「没打开」。 */
+async function prepareLinkDoc(conv) {
+  const text = convLastUserText(conv);
+  const url = (String(text).match(/https?:\/\/[^\s<>"'）)】]+/) || [])[0];
+  if (!url) { if (conv) conv.__linkDoc = null; return; }
+  if (conv.__linkDoc && conv.__linkDoc.url === url && !conv.__linkDoc.pending) return;
+  conv.__linkDoc = { url, pending: true };
+  if (!isCloud()) {
+    conv.__linkDoc = { url, error: '单机模式（不连服务器）读不了链接' };
+    return;
+  }
+  try {
+    const res = await apiFetch('/api/read-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    let j = {};
+    try { j = await res.json(); } catch (_) {}
+    if (!res.ok || !j.text) throw new Error(j.error || '这个页面没抽出正文');
+    conv.__linkDoc = { url, title: j.title || '', text: j.text || '', chars: j.chars || 0 };
+    if (isActive('friend', conv.id)) setStatus('看完了，正在想…');
+  } catch (e) {
+    conv.__linkDoc = { url, error: String((e && e.message) || e).slice(0, 80) };
+  }
+}
+
 async function runChat(friend, conv, r, nudge) {
+  if (!nudge) await prepareLinkDoc(conv);
   const imgMap = state.settings.vision ? await resolveImagesForModel(conv, 2) : null;
   const convo = buildMessages(friend, conv, nudge, imgMap);
   const useTools = searchEnabled();
@@ -2379,6 +2661,15 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     return '';
   }).trim();
 
+  // 文件块：[[文件:名字.ext]] … [[/文件]] → 文件卡片消息
+  const files = [];
+  body = body.replace(/\[\[文件[:：]([^\]\n]{1,80})\]\]\s*\n?([\s\S]*?)\n?\[\[\/文件\]\]/g, (_all, name, content) => {
+    const nm = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '_').slice(0, 60) || '文件.txt';
+    const txt = String(content || '').replace(/^\s*\n/, '').replace(/\s+$/, '');
+    if (txt) files.push({ name: nm, text: txt.slice(0, 80000) });
+    return '';
+  }).trim();
+
   // 画了图就整条发：按行拆会把 <svg> 拆成两半，图就没了
   const parts = /<svg[\s>]/i.test(body) ? [body] : splitReply(body, limit);
   const now = Date.now();
@@ -2397,6 +2688,16 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;
     sentCount += 1;
+  }
+
+  // 文件跟在文字后面发
+  for (const f of files) {
+    const m = { id: uid('m'), role: 'peer', authorId, text: '', file: f, ts: Date.now() };
+    conv.messages.push(m);
+    if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
+    else conv.unread = (conv.unread || 0) + 1;
+    sentCount += 1;
+    await sleep(180);
   }
 
   // 她必须配一句话才发表情包；只剩表情包就不发（避免光秃秃一张图）

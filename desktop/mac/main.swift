@@ -40,10 +40,43 @@ final class Navigator: NSObject, WKNavigationDelegate {
     }
 }
 
+/// 网页里点「保存」→ 写到「下载」文件夹（WKWebView 自己不做下载，必须接这个）
+final class SaveFileHandler: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let name = body["name"] as? String,
+              let base64 = body["base64"] as? String,
+              let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else { return }
+        var safe = name.replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if safe.isEmpty { safe = "文件.txt" }
+        let dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+        var url = dir.appendingPathComponent(safe)
+        let base = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+        var n = 1
+        while FileManager.default.fileExists(atPath: url.path) {
+            let nm = ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)"
+            url = dir.appendingPathComponent(nm)
+            n += 1
+        }
+        do {
+            try data.write(to: url)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            NSSound.beep()
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     let navigator = Navigator()
+    let saveFileHandler = SaveFileHandler()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let rect = NSRect(x: 0, y: 0, width: 1180, height: 760)
@@ -59,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
+        config.userContentController.add(saveFileHandler, name: "saveFile")
         webView = WKWebView(frame: rect, configuration: config)
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = navigator

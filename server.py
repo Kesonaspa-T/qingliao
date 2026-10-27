@@ -16,11 +16,14 @@ import base64
 import datetime
 import gzip
 import hashlib
+import html as html_lib
+import ipaddress
 import json
 import os
 import random
 import re
 import secrets
+import socket
 import ssl
 import sys
 import shutil
@@ -30,7 +33,7 @@ import time
 import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -270,6 +273,73 @@ def merge_friend(base, incoming, patch, *, background=False, strict=False):
     else:
         out.pop("settings", None)
     return out
+
+
+def _link_host_ok(url):
+    """只允许公网 http(s)：挡掉 127.0.0.1 / 内网 / 元数据地址（SSRF）。"""
+    try:
+        p = urlsplit(url)
+    except Exception:
+        return False
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(p.hostname, None)
+    except Exception:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(str(info[4][0]).split("%")[0])
+        except Exception:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
+def _html_to_text(raw_html):
+    s = re.sub(r"(?is)<(script|style|noscript|template|svg|iframe)[\s\S]*?</\1>", " ", raw_html)
+    m = re.search(r"(?is)<title[^>]*>(.*?)</title>", s)
+    title = re.sub(r"\s+", " ", html_lib.unescape(m.group(1))).strip() if m else ""
+    s = re.sub(r"(?is)<br\s*/?>", "\n", s)
+    s = re.sub(r"(?is)</(p|div|li|h[1-6]|tr|section|article|blockquote)>", "\n", s)
+    s = re.sub(r"(?is)<[^>]+>", " ", s)
+    s = html_lib.unescape(s)
+    s = re.sub(r"[ \t\u3000]+", " ", s)
+    s = re.sub(r"\n\s*\n+", "\n\n", s)
+    return title[:200], s.strip()
+
+
+def read_link(url):
+    """抓网页并抽成纯文本。失败抛异常。给「她把链接看了再聊」用。"""
+    if not _link_host_ok(url):
+        raise ValueError("这个地址不允许抓取")
+    req = Request(url, headers={
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    })
+    with urlopen(req, timeout=12, context=SSL_CTX) as r:
+        final = r.geturl()
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        raw = r.read(1_800_000)
+    if not _link_host_ok(final):
+        raise ValueError("这个地址不允许抓取")
+    charset = "utf-8"
+    m = re.search(r"charset=([\w-]+)", ctype)
+    if m:
+        charset = m.group(1)
+    try:
+        text = raw.decode(charset, "ignore")
+    except Exception:
+        text = raw.decode("utf-8", "ignore")
+    if "html" in ctype or "<html" in text[:2000].lower():
+        title, body = _html_to_text(text)
+    else:
+        title, body = "", re.sub(r"\n{3,}", "\n\n", text).strip()
+    return {"url": final, "title": title, "text": body[:9000], "chars": len(body)}
 
 
 BLOB_DIR = os.path.join(DATA_DIR, "blobs")
@@ -735,7 +805,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v30",
+                    "build": "v31",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -807,6 +877,17 @@ class Handler(SimpleHTTPRequestHandler):
             return self._handle_ping()
         if path == "/api/search":
             return self._handle_proxy_json()
+        if path == "/api/read-link":
+            payload = self._read_json() or {}
+            link = (payload.get("url") or "").strip()
+            if not link:
+                return self._json(400, {"error": "缺少 url"})
+            try:
+                info = read_link(link)
+            except Exception as e:
+                return self._json(502, {"error": str(e)[:160]})
+            print("[LINK] %s -> %d chars" % (info["url"][:100], len(info["text"])), flush=True)
+            return self._json(200, info)
         return self._json(404, {"error": "not found"})
 
     # ---------- 账号 ----------
