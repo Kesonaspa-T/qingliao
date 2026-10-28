@@ -33,7 +33,7 @@ const results=[]; const ok=(n,c,x)=>results.push((c?'PASS ':'FAIL ')+n+(c?'':' :
 
 await send('Network.enable'); await send('Network.setCacheDisabled',{cacheDisabled:true});
 await send('Page.navigate',{url:SITE+'/'}); await sleep(1500);
-await ev(`localStorage.setItem('ql.token', ${JSON.stringify(TOKEN)}); location.reload();`); await sleep(2600);
+await ev(`localStorage.removeItem('ql.local'); localStorage.setItem('ql.token', ${JSON.stringify(TOKEN)}); location.reload();`); await sleep(2600);
 ok('打开首页 + 登录态', (await ev(`!!state.me && document.getElementById('login').hidden`))===true);
 
 const created = await ev(`(() => {

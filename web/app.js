@@ -168,8 +168,10 @@ const DEFAULT_SETTINGS = {
   idleMin: 20,
   momentInterval: 43200,
   groupReplyMax: 2,
-  // 「她会活过来」：撤回 / 改口 / 偶尔看了不回
-  alive: true,
+  // 「她会活过来」：三个独立开关 + 概率
+  recallOn: true, recallChance: 20,
+  rewordOn: true, rewordChance: 10,
+  lateOn: true, lateChance: 5, lateMaxMin: 5,
   // 免打扰时段（只挡她自己冒出来的消息）
   quietOn: true,
   quietStart: 23,
@@ -377,13 +379,179 @@ function nameOf(id) {
   return f ? f.name : '某人';
 }
 
+
+/* ---------------- 本地存储：App 文件 / IndexedDB / localStorage ----------------
+ *
+ * 单机模式以前把整份状态（含图片、表情包）塞进 localStorage，5MB 就满。
+ * 现在按优先级：
+ *   1) Android 壳的 QingliaoStore（原生文件，没有 5MB 限制）
+ *   2) IndexedDB（mac 本机模式 http://127.0.0.1，浏览器）
+ *   3) localStorage（最后的兜底：老设备 / file:// 下 IndexedDB 不可用）
+ * 老数据会自动迁移到新位置，成功后再删 localStorage 的副本。
+ */
+const NativeStore = {
+  bridge() {
+    try {
+      const b = window.QingliaoStore;
+      return b && typeof b.readState === 'function' ? b : null;
+    } catch (_) { return null; }
+  },
+  read() {
+    const b = this.bridge();
+    if (!b) return '';
+    try { return String(b.readState() || ''); } catch (_) { return ''; }
+  },
+  write(raw) {
+    const b = this.bridge();
+    if (!b) return false;
+    try { return !!b.writeState(raw); } catch (_) { return false; }
+  },
+  size() {
+    const b = this.bridge();
+    if (!b) return -1;
+    try { return Number(b.storageInfo()) || 0; } catch (_) { return -1; }
+  },
+};
+
+const IdbStore = (() => {
+  const NAME = 'qingliao-local';
+  const STORE = 'kv';
+  let dbPromise = null;
+  let usable = null;
+  function open() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve, reject) => {
+      let req;
+      try { req = indexedDB.open(NAME, 1); } catch (e) { reject(e); return; }
+      const timer = setTimeout(() => reject(new Error('idb timeout')), 2500);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+      };
+      req.onsuccess = () => { clearTimeout(timer); resolve(req.result); };
+      req.onerror = () => { clearTimeout(timer); reject(req.error || new Error('idb error')); };
+      req.onblocked = () => { clearTimeout(timer); reject(new Error('idb blocked')); };
+    });
+    dbPromise.catch(() => { dbPromise = null; });
+    return dbPromise;
+  }
+  async function get(key) {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, 'readonly');
+      const r = tx.objectStore(STORE).get(key);
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  }
+  async function set(key, val) {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).put(val, key);
+      tx.oncomplete = () => res(true);
+      tx.onerror = () => rej(tx.error);
+      tx.onabort = () => rej(tx.error || new Error('idb abort'));
+    });
+  }
+  async function available() {
+    if (usable !== null) return usable;
+    // 上一次已经确认不可用（file:// 下 IndexedDB 会一直挂）：别每次启动再等 2.5 秒
+    try { if (localStorage.getItem('ql.idb') === '0') { usable = false; return false; } } catch (_) {}
+    try {
+      await get('__probe__');
+      usable = true;
+    } catch (_) {
+      usable = false;
+      try { localStorage.setItem('ql.idb', '0'); } catch (_) {}
+    }
+    return usable;
+  }
+  return { get, set, available };
+})();
+
+const LocalState = {
+  mode: null,
+  async init() {
+    if (this.mode) return this.mode;
+    if (NativeStore.bridge()) this.mode = 'native';
+    else if (await IdbStore.available()) this.mode = 'idb';
+    else this.mode = 'ls';
+    return this.mode;
+  },
+  legacy() {
+    try { return localStorage.getItem('qingliao.state') || ''; } catch (_) { return ''; }
+  },
+  async loadRaw() {
+    const mode = await this.init();
+    if (mode === 'native') {
+      const raw = NativeStore.read();
+      if (raw) return raw;
+      const old = this.legacy();
+      if (old) {
+        // 写完再读回来比对，确认没写残才删 localStorage 的旧副本
+        if (NativeStore.write(old) && NativeStore.read() === old) {
+          try { localStorage.removeItem('qingliao.state'); } catch (_) {}
+        }
+        return old;
+      }
+      return '';
+    }
+    if (mode === 'idb') {
+      let raw = null;
+      try { raw = await IdbStore.get('state'); } catch (_) {}
+      if (raw) return String(raw);
+      const old = this.legacy();
+      if (old) {
+        try {
+          await IdbStore.set('state', old);
+          if (String(await IdbStore.get('state')) === old) {
+            try { localStorage.removeItem('qingliao.state'); } catch (_) {}
+          }
+        } catch (_) {}
+        return old;
+      }
+      return '';
+    }
+    return this.legacy();
+  },
+  async saveRaw(raw) {
+    const mode = await this.init();
+    if (mode === 'native') {
+      if (NativeStore.write(raw)) {
+        try { localStorage.removeItem('qingliao.state'); } catch (_) {}
+        return true;
+      }
+      try { localStorage.setItem('qingliao.state', raw); return true; } catch (_) { return false; }
+    }
+    if (mode === 'idb') {
+      try {
+        await IdbStore.set('state', raw);
+        try { localStorage.removeItem('qingliao.state'); } catch (_) {}
+        return true;
+      } catch (_) {
+        try { localStorage.setItem('qingliao.state', raw); return true; } catch (_) { return false; }
+      }
+    }
+    try { localStorage.setItem('qingliao.state', raw); return true; } catch (_) { return false; }
+  },
+  async size() {
+    const mode = await this.init();
+    if (mode === 'native') return NativeStore.size();
+    if (mode === 'idb') {
+      try { const raw = await IdbStore.get('state'); return raw ? String(raw).length : 0; } catch (_) { return 0; }
+    }
+    return this.legacy().length;
+  },
+};
+
 /* ---------------- 存储 ---------------- */
 
 const Store = {
   async load() {
     if (!isCloud()) {
       try {
-        const raw = localStorage.getItem('qingliao.state');
+        const raw = await LocalState.loadRaw();
         if (raw) return JSON.parse(raw);
       } catch (_) {}
       return null;
@@ -395,8 +563,9 @@ const Store = {
   },
   async save(s) {
     if (!isCloud()) {
-      try { localStorage.setItem('qingliao.state', JSON.stringify(s)); }
-      catch (e) { toast('存储空间满了，清理一下'); }
+      const raw = JSON.stringify(s);
+      const ok = await LocalState.saveRaw(raw);
+      if (!ok) reportStorageFull();
       return;
     }
     if (Store.saving) { Store.again = true; return; }
@@ -454,6 +623,8 @@ let saveTimer = null;
 let localRevision = 0;
 let saveHint = '';          // 下次保存顺带给服务端的一个提示（例如「我刚在群里发言」）
 function rememberDeleted(ids) {
+  // 单机模式没有多端同步，墓碑只会白占空间（清一次聊天就是几百个 id）
+  if (!isCloud()) return;
   // 离线设备可能很久以后才提交旧状态，不能按数量丢弃删除标记。
   state.deleted = [...new Set([...(state.deleted || []), ...ids])];
 }
@@ -2814,14 +2985,24 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   // 画了图就整条发：按行拆会把 <svg> 拆成两半，图就没了
   const parts = /<svg[\s>]/i.test(body) ? [body] : splitReply(body, limit);
   // 她会打错字：挑一条，先发错字版，再撤回、重发正确的
+  const recallOn = state.settings.recallOn !== false;
+  const recallChance = Math.max(0, Math.min(50, Number(state.settings.recallChance ?? 20)));
   let typoAt = -1;
-  if (kind === 'friend' && state.settings.alive && parts.length && Math.random() < 0.22) {
+  if (kind === 'friend' && recallOn && recallChance > 0 && parts.length
+      && Math.random() * 100 < recallChance) {
     const cands = [];
     parts.forEach((p, i) => {
       if (String(p).length >= 4 && !/<svg[\s>]/i.test(String(p))) cands.push(i);
     });
     if (cands.length) typoAt = cands[Math.floor(Math.random() * cands.length)];
   }
+
+  // 改口：说完补一句「不是，我不是这个意思」，和撤回是两件事
+  const rewordOn = state.settings.rewordOn !== false;
+  const rewordChance = Math.max(0, Math.min(50, Number(state.settings.rewordChance ?? 10)));
+  const doReword = kind === 'friend' && typoAt < 0 && rewordOn && rewordChance > 0
+    && !/<svg[\s>]/i.test(body) && !files.length
+    && Math.random() * 100 < rewordChance;
   const now = Date.now();
   // 时间戳必须单调：撤回的错字版要比后面的正确版早，否则服务端按 ts 排序会颠倒
   let tsCursor = now;
@@ -2857,6 +3038,18 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;
     sentCount += 1;
+  }
+
+  // 改口：一小句「不是，我不是这个意思」
+  if (doReword) {
+    const line = REWORD_LINES[Math.floor(Math.random() * REWORD_LINES.length)];
+    const m = { id: uid('m'), role: 'peer', authorId, text: line, ts: tsCursor };
+    tsCursor += 800;
+    conv.messages.push(m);
+    if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
+    else conv.unread = (conv.unread || 0) + 1;
+    sentCount += 1;
+    await sleep(420);
   }
 
   // 文件跟在文字后面发
@@ -2948,6 +3141,13 @@ function parseReminderTime(str) {
   return 0;
 }
 
+const REWORD_LINES = [
+  '……不是，我不是这个意思。',
+  '……啊不对，说错了。',
+  '……算了，你就当我没说。',
+  '……不对，我是说，随你吧。',
+];
+
 /** 生成一个「像手滑打错」的版本：交换相邻两个汉字。 */
 function typoText(text) {
   const chars = Array.from(String(text || ''));
@@ -3028,10 +3228,14 @@ function afterUserMessage(kind, conv) {
     rememberFriendEdit(conv, { lateReplyAt: 0 });
   }
 
-  // 偶尔先看一眼、过一两分钟才回：别每次都秒回，也别每 20 条才来一次
-  if (state.settings.alive && (conv.messages || []).length >= 6 && Math.random() < 0.05) {
+  // 偶尔先看一眼、过一会儿才回：概率/最长拖延都能在设置里调
+  const lateOn = state.settings.lateOn !== false;
+  const lateChance = Math.max(0, Math.min(30, Number(state.settings.lateChance ?? 5)));
+  const lateMaxMs = Math.max(60000, Math.min(30, Number(state.settings.lateMaxMin ?? 5) || 5) * 60000);
+  if (lateOn && lateChance > 0 && (conv.messages || []).length >= 6
+      && Math.random() * 100 < lateChance) {
     conv.peerReadAt = Date.now();
-    conv.lateReplyAt = Date.now() + 90000 + Math.random() * 180000;
+    conv.lateReplyAt = Date.now() + 60000 + Math.random() * Math.max(0, lateMaxMs - 60000);
     rememberFriendEdit(conv, { peerReadAt: conv.peerReadAt, lateReplyAt: conv.lateReplyAt });
     persist();
     if (isActive('friend', conv.id)) { setStatus('在线'); renderChat(); }
@@ -3043,7 +3247,6 @@ function afterUserMessage(kind, conv) {
 
 /** 到点了：她终于回了（别人看着像「已读，隔了一会儿才回」）。 */
 function lateReplyTick() {
-  if (!state.settings.alive) return;
   const now = Date.now();
   let changed = false;
   for (const f of state.friends) {
@@ -3515,7 +3718,13 @@ function fillForm() {
   $('#fMomentFreq').value = Math.max(1, Math.round(freq / 60));
   $('#fProactive').checked = !!s.proactive;
   $('#fIdle').value = s.idleMin ?? 20;
-  if ($('#fAlive')) $('#fAlive').checked = s.alive !== false;
+  if ($('#fRecall')) $('#fRecall').checked = s.recallOn !== false;
+  if ($('#fRecallChance')) $('#fRecallChance').value = Number(s.recallChance ?? 20);
+  if ($('#fReword')) $('#fReword').checked = s.rewordOn !== false;
+  if ($('#fRewordChance')) $('#fRewordChance').value = Number(s.rewordChance ?? 10);
+  if ($('#fLate')) $('#fLate').checked = s.lateOn !== false;
+  if ($('#fLateChance')) $('#fLateChance').value = Number(s.lateChance ?? 5);
+  if ($('#fLateMax')) $('#fLateMax').value = Number(s.lateMaxMin ?? 5);
   if ($('#fQuiet')) $('#fQuiet').checked = s.quietOn !== false;
   if ($('#fQuietStart')) $('#fQuietStart').value = Number(s.quietStart ?? 23);
   if ($('#fQuietEnd')) $('#fQuietEnd').value = Number(s.quietEnd ?? 8);
@@ -3573,7 +3782,13 @@ function saveForm() {
   s.momentInterval = Math.max(60, (Number($('#fMomentFreq').value) || 720) * 60);
   s.proactive = $('#fProactive').checked;
   s.idleMin = Math.max(3, Number($('#fIdle').value) || 20);
-  if ($('#fAlive')) s.alive = $('#fAlive').checked;
+  if ($('#fRecall')) s.recallOn = $('#fRecall').checked;
+  if ($('#fRecallChance')) s.recallChance = Math.max(0, Math.min(50, Number($('#fRecallChance').value) || 0));
+  if ($('#fReword')) s.rewordOn = $('#fReword').checked;
+  if ($('#fRewordChance')) s.rewordChance = Math.max(0, Math.min(50, Number($('#fRewordChance').value) || 0));
+  if ($('#fLate')) s.lateOn = $('#fLate').checked;
+  if ($('#fLateChance')) s.lateChance = Math.max(0, Math.min(30, Number($('#fLateChance').value) || 0));
+  if ($('#fLateMax')) s.lateMaxMin = Math.max(1, Math.min(30, Number($('#fLateMax').value) || 5));
   if ($('#fQuiet')) s.quietOn = $('#fQuiet').checked;
   if ($('#fQuietStart')) s.quietStart = Math.max(0, Math.min(23, Number($('#fQuietStart').value) || 0));
   if ($('#fQuietEnd')) s.quietEnd = Math.max(0, Math.min(23, Number($('#fQuietEnd').value) || 0));
@@ -4986,6 +5201,145 @@ function renderReminders() {
   }
 }
 
+
+/* ---------- 存储占用 ---------- */
+
+let storageWarnAt = 0;
+
+function reportStorageFull() {
+  if (Date.now() - storageWarnAt < 8000) return;
+  storageWarnAt = Date.now();
+  try { openStorageSheet(true); } catch (_) { toast('存储空间满了，清理一下'); }
+}
+
+function storageStats() {
+  let text = 0, img = 0, sticker = 0, avatar = 0, messages = 0;
+  for (const c of [...(state.friends || []), ...(state.groups || [])]) {
+    for (const m of c.messages || []) {
+      messages += 1;
+      if (m.text) text += String(m.text).length;
+      if (m.image && String(m.image).startsWith('data:')) img += String(m.image).length;
+    }
+  }
+  for (const it of state.stickers || []) sticker += String(it.url || '').length;
+  avatar = String(state.me.avatar || '').length;
+  for (const f of state.friends || []) avatar += String(f.avatar || '').length;
+  for (const g of state.groups || []) avatar += String(g.avatar || '').length;
+  let total = 0;
+  try { total = new Blob([JSON.stringify(state)]).size; }
+  catch (_) { try { total = JSON.stringify(state).length; } catch (__) { total = 0; } }
+  return { total, text, img, sticker, avatar, messages, deleted: (state.deleted || []).length };
+}
+
+function openStorageSheet(warn) {
+  const el = ensureSheet('storageSheet', `
+    <header class="sheet-nav">
+      <button class="text-btn" data-close="storageSheet">关闭</button>
+      <span class="sheet-title">存储占用</span>
+      <span class="text-btn" style="opacity:.35">·</span>
+    </header>
+    <div class="sheet-body">
+      <div class="group">
+        <div class="group-title">现在存在哪</div>
+        <div class="kv" id="storageMode"></div>
+        <div class="kv" id="storageEstimate"></div>
+        <div class="storage-warn" id="storageWarn" hidden>保存失败过：先导一份备份，再删表情包或清空旧聊天。</div>
+      </div>
+      <div class="group">
+        <div class="group-title">占用明细（约）</div>
+        <div class="storage-list" id="storageList"></div>
+      </div>
+      <div class="group">
+        <div class="group-title">清理</div>
+        <div class="row-btns">
+          <button type="button" class="ghost solid" id="btnStorageBackup">导出备份</button>
+          <button type="button" class="ghost" id="btnStorageStickers">管理表情包</button>
+        </div>
+        <div class="row-btns">
+          <button type="button" class="ghost" id="btnStorageTomb">清空删除标记</button>
+        </div>
+        <p class="hint">删除标记只有多端同步才用得上；单机模式已经不再产生，清掉不会影响聊天。</p>
+      </div>
+    </div>`);
+  if (!el.dataset.bound) {
+    el.dataset.bound = '1';
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-close]')) {
+        el.classList.remove('open');
+        el.setAttribute('aria-hidden', 'true');
+        return;
+      }
+      if (e.target.id === 'btnStorageBackup') { backupNow(); return; }
+      if (e.target.id === 'btnStorageStickers') {
+        el.classList.remove('open');
+        el.setAttribute('aria-hidden', 'true');
+        openStickerSheet();
+        return;
+      }
+      if (e.target.id === 'btnStorageTomb') {
+        state.deleted = [];
+        persist();
+        renderStorageSheet();
+        toast('已清空删除标记');
+      }
+    });
+  }
+  renderStorageSheet(warn);
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+}
+
+function renderStorageSheet(warn) {
+  const st = storageStats();
+  const mode = LocalState.mode || 'ls';
+  const modeEl = $('#storageMode');
+  if (modeEl) {
+    modeEl.textContent = mode === 'native'
+      ? 'App 私有文件：没有 5MB 限制，卸载 App 才会清掉。'
+      : mode === 'idb'
+        ? 'IndexedDB：没有 5MB 限制。'
+        : 'localStorage：上限约 5MB，满了会保存失败（建议改用新版本 APK / 本机模式）。';
+  }
+  const warnEl = $('#storageWarn');
+  if (warnEl) warnEl.hidden = !warn;
+  const list = $('#storageList');
+  if (list) {
+    list.textContent = '';
+    const rows = [
+      ['总计（state.json）', st.total, true],
+      ['聊天文字', st.text * 3],
+      ['聊天图片', st.img],
+      ['表情包', st.sticker],
+      ['头像', st.avatar],
+      ['删除标记', st.deleted * 36],
+    ];
+    for (const [label, n, strong] of rows) {
+      const row = document.createElement('div');
+      row.className = 'storage-row' + (strong ? ' strong' : '');
+      const k = document.createElement('span');
+      k.textContent = label;
+      const v = document.createElement('span');
+      v.className = 'storage-val';
+      v.textContent = humanSize(n);
+      row.append(k, v);
+      list.append(row);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'kv';
+    meta.textContent = `${st.messages} 条消息 · ${(state.friends || []).length} 个朋友 · `
+      + `${(state.groups || []).length} 个群 · ${(state.stickers || []).length} 个表情包`
+      + (st.deleted ? ` · ${st.deleted} 个删除标记` : '');
+    list.append(meta);
+  }
+  const estEl = $('#storageEstimate');
+  if (estEl && navigator.storage && navigator.storage.estimate) {
+    navigator.storage.estimate().then((e) => {
+      if (!e || !e.quota) return;
+      estEl.textContent = `浏览器报告：已用 ${humanSize(e.usage || 0)} / 配额 ${humanSize(e.quota)}`;
+    }).catch(() => {});
+  }
+}
+
 /* ---------- 角色卡 ---------- */
 
 async function exportRoleCard(f) {
@@ -6312,13 +6666,13 @@ async function doAuth(kind) {
     const j = await res.json().catch(() => ({}));
     if (!res.ok) return say(j.error || ('HTTP ' + res.status));
 
-    const local = localStorage.getItem('qingliao.state');
-    if (local) {
-      try {
-        const imported = migrate(JSON.parse(local));
+    try {
+      const localRaw = await LocalState.loadRaw();
+      if (localRaw) {
+        const imported = migrate(JSON.parse(localRaw));
         await postJson(SERVER + '/api/state', { ...imported, _edits: importEdits(imported) }, j.token);
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
 
     localStorage.setItem(TOKEN_KEY, j.token);
     localStorage.removeItem('ql.local');   // 登录后切回云端模式
@@ -6692,6 +7046,13 @@ function migrate(raw) {
   if (raw.social) s.social = raw.social;
   if (raw.drafts) s.drafts = raw.drafts;
 
+  // 老的「她会活过来」总开关 → 三个独立开关
+  if (raw.settings && raw.settings.alive === false) {
+    s.settings.recallOn = false;
+    s.settings.rewordOn = false;
+    s.settings.lateOn = false;
+  }
+  if (!isCloud()) s.deleted = [];
   s.conv = null;
   pruneDeleted(s);
   return s;

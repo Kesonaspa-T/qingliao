@@ -1,6 +1,7 @@
 package com.qingliao.app;
 
 import android.app.Activity;
+import android.content.ClipData;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
@@ -8,11 +9,17 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
 import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 
 public class MainActivity extends Activity {
 
@@ -64,6 +71,9 @@ public class MainActivity extends Activity {
                 Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
                 intent.setType("image/*");
+                // 表情包要批量导：网页里 input 带 multiple，这里要跟着放开
+                boolean multiple = params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE;
+                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
                 try {
                     startActivityForResult(Intent.createChooser(intent, "选择图片"), REQ_FILE);
                     return true;
@@ -74,8 +84,10 @@ public class MainActivity extends Activity {
             }
         });
 
-        // 不再注入 JS 桥：APK 只作为网页容器，避免被安全软件判定为高风险 WebView 壳
-        // （本地无服务器模式已不再支持，登录后一切请求都走 HTTP）
+        // 只注入一个「读写状态文件」的桥：单机模式的数据以前全塞 localStorage，
+        // 5MB 就满（图片/表情包一张就几百 KB）。这里改存 App 私有文件，没有 5MB 限制。
+        // 只有 readState / writeState 两个方法，不能发起网络请求，也不接触其它数据。
+        web.addJavascriptInterface(new StoreBridge(), "QingliaoStore");
 
         // Android 13+ 的手势返回 / 三键返回都走这里
         if (Build.VERSION.SDK_INT >= 33) {
@@ -98,8 +110,16 @@ public class MainActivity extends Activity {
         if (requestCode == REQ_FILE) {
             if (fileCallback != null) {
                 Uri[] result = null;
-                if (resultCode == RESULT_OK && data != null && data.getData() != null) {
-                    result = new Uri[]{ data.getData() };
+                if (resultCode == RESULT_OK && data != null) {
+                    ClipData clip = data.getClipData();
+                    if (clip != null && clip.getItemCount() > 0) {
+                        result = new Uri[clip.getItemCount()];
+                        for (int i = 0; i < clip.getItemCount(); i += 1) {
+                            result[i] = clip.getItemAt(i).getUri();
+                        }
+                    } else if (data.getData() != null) {
+                        result = new Uri[]{ data.getData() };
+                    }
                 }
                 fileCallback.onReceiveValue(result);
                 fileCallback = null;
@@ -107,6 +127,62 @@ public class MainActivity extends Activity {
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    /** 单机模式的状态文件：App 私有目录，卸载才会清掉。 */
+    public class StoreBridge {
+        private File stateFile() {
+            return new File(getFilesDir(), "qingliao-state.json");
+        }
+
+        @JavascriptInterface
+        public String readState() {
+            File f = stateFile();
+            if (!f.exists()) return "";
+            FileInputStream in = null;
+            try {
+                in = new FileInputStream(f);
+                ByteArrayOutputStream out = new ByteArrayOutputStream((int) Math.max(1024, f.length()));
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                return new String(out.toByteArray(), "UTF-8");
+            } catch (Exception e) {
+                return "";
+            } finally {
+                try { if (in != null) in.close(); } catch (Exception ignored) {}
+            }
+        }
+
+        @JavascriptInterface
+        public boolean writeState(String json) {
+            if (json == null) return false;
+            File dst = stateFile();
+            File tmp = new File(getFilesDir(), "qingliao-state.json.tmp");
+            FileOutputStream out = null;
+            try {
+                out = new FileOutputStream(tmp);
+                out.write(json.getBytes("UTF-8"));
+                out.flush();
+                out.getFD().sync();
+                out.close();
+                out = null;
+                if (tmp.renameTo(dst)) return true;
+                // rename 失败（少见）就删掉旧的再试一次
+                if (dst.delete() && tmp.renameTo(dst)) return true;
+                return false;
+            } catch (Exception e) {
+                return false;
+            } finally {
+                try { if (out != null) out.close(); } catch (Exception ignored) {}
+            }
+        }
+
+        @JavascriptInterface
+        public String storageInfo() {
+            File f = stateFile();
+            return f.exists() ? String.valueOf(f.length()) : "0";
+        }
     }
 
     /** 先让网页处理（关弹层 / 退出聊天），网页说没得退才关 App */

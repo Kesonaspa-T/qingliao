@@ -119,8 +119,10 @@ def default_state():
             "groupBursts": 3,
             "groupRoundMax": 10,
             "groupAutoTalk": True,
-            # 「她会活过来」：撤回 / 改口 / 偶尔看了不回
-            "alive": True,
+            # 「她会活过来」：撤回 / 改口 / 偶尔看了不回（三个独立开关 + 概率）
+            "recallOn": True, "recallChance": 20,
+            "rewordOn": True, "rewordChance": 10,
+            "lateOn": True, "lateChance": 5, "lateMaxMin": 5,
             # 免打扰时段（只挡她自己冒出来的消息；你发的消息照回、你定的提醒照响）
             "quietOn": True,
             "quietStart": 23,
@@ -879,7 +881,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v34",
+                    "build": "v35",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })

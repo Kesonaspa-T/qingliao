@@ -73,7 +73,7 @@ await send('Page.enable');
 await send('Network.setCacheDisabled', { cacheDisabled: true });
 await send('Page.navigate', { url: SITE + '/' });
 await sleep(1500);
-await ev(`localStorage.setItem('ql.token', ${JSON.stringify(TOKEN)}); location.reload();`);
+await ev(`localStorage.removeItem('ql.local'); localStorage.setItem('ql.token', ${JSON.stringify(TOKEN)}); location.reload();`);
 await sleep(2800);
 // 全测试期间 confirm 一律返回 false（避免原生弹窗卡住 headless）
 await ev(`window.__confirms = []; window.confirm = (m) => { window.__confirms.push(String(m)); return false; }; true`);
@@ -98,7 +98,13 @@ ok('设置新开关保存', (await ev(`(() => {
   document.getElementById('fBase').value = 'http://127.0.0.1:8797';
   document.getElementById('fKey').value = 'test-key';
   document.getElementById('fModel').value = 'deepseek-flash';
-  document.getElementById('fAlive').checked = true;
+  document.getElementById('fRecall').checked = true;
+  document.getElementById('fRecallChance').value = '20';
+  document.getElementById('fReword').checked = true;
+  document.getElementById('fRewordChance').value = '10';
+  document.getElementById('fLate').checked = true;
+  document.getElementById('fLateChance').value = '5';
+  document.getElementById('fLateMax').value = '5';
   document.getElementById('fQuiet').checked = true;
   document.getElementById('fQuietStart').value = '23';
   document.getElementById('fQuietEnd').value = '8';
@@ -107,7 +113,9 @@ ok('设置新开关保存', (await ev(`(() => {
   document.getElementById('fArchiveDays').value = '30';
   document.getElementById('btnSheetSave').click();
   const s = state.settings;
-  return s.alive === true && s.quietOn === true && s.quietStart === 23 && s.quietEnd === 8
+  return s.recallOn === true && s.recallChance === 20 && s.rewordOn === true
+    && s.rewordChance === 10 && s.lateOn === true && s.lateChance === 5 && s.lateMaxMin === 5
+    && s.quietOn === true && s.quietStart === 23 && s.quietEnd === 8
     && s.diaryOn === true && s.lifeOn === true && s.archiveDays === 30;
 })()`)) === true);
 
@@ -176,6 +184,40 @@ ok('会打错字再撤回', (await ev(`(async () => {
   const i = f.messages.indexOf(bad);
   const next = f.messages.slice(i + 1).find(m => m.role !== 'user' && m.text && !m.recalled);
   return !!next && next.ts > bad.ts;   // 错字版必须在正确版前面
+})()`)) === true);
+
+// 三个开关分开：撤回关掉后不再撤回；改口单独打开会补一句
+ok('撤回能单独关、改口能单独开', (await ev(`(async () => {
+  const f = friendById(window.__fid);
+  const s = state.settings;
+  const old = { r: s.recallOn, rc: s.recallChance, w: s.rewordOn, wc: s.rewordChance };
+  s.recallOn = false; s.recallChance = 50;
+  s.rewordOn = true; s.rewordChance = 50;
+  const before = f.messages.length;
+  const orig = Math.random;
+  Math.random = () => 0.1;
+  try { await deliver('friend', f, '我不想去了', f.id, 1); }
+  finally { Math.random = orig; }
+  const added = f.messages.slice(before);
+  Object.assign(s, { recallOn: old.r, recallChance: old.rc, rewordOn: old.w, rewordChance: old.wc });
+  return added.some(m => REWORD_LINES.includes(m.text)) && !added.some(m => m.recalled);
+})()`)) === true);
+
+// 已读不回开关：关掉 + 概率 100 也不该拖
+ok('已读不回能单独关', (await ev(`(async () => {
+  const f = friendById(window.__fid);
+  const s = state.settings;
+  const old = { on: s.lateOn, ch: s.lateChance };
+  s.lateOn = false; s.lateChance = 100;
+  f.lateReplyAt = 0;
+  f.messages.push({ id: 'u2-' + Date.now(), role: 'user', text: '在吗', ts: Date.now() });
+  afterUserMessage('friend', f);
+  const pending = !!f.lateReplyAt;
+  const r = rtOf(convKey('friend', f.id));
+  if (r.timer) { clearTimeout(r.timer); r.timer = null; }
+  r.phase = 'idle';
+  s.lateOn = old.on; s.lateChance = old.ch;
+  return pending === false;
 })()`)) === true);
 
 // 已读：给她设一条未来才到点的迟回，看看渲染有没有「已读」
@@ -299,6 +341,53 @@ ok('归档按钮不报错', (await ev(`(async () => {
   window.confirm = () => false;
   try { await archiveNow(); } finally { window.confirm = o; }
   return true;
+})()`)) === true);
+
+// ---------- 单机模式：localStorage → IndexedDB 迁移 + 落盘 ----------
+// 先把上一轮跑出来的本地库清干净，才能验证「迁移」本身
+await ev(`(async () => {
+  localStorage.removeItem('ql.local');
+  localStorage.removeItem('qingliao.state');
+  localStorage.removeItem('ql.idb');
+  await new Promise((res) => {
+    const r = indexedDB.deleteDatabase('qingliao-local');
+    r.onsuccess = r.onerror = r.onblocked = () => res();
+  });
+  const seed = { friends: [{ id: 'mig1', name: '迁移测试', persona: 'p', messages: [] }], settings: { alive: false } };
+  localStorage.setItem('qingliao.state', JSON.stringify(seed));
+  localStorage.setItem('ql.local', '1');
+  location.reload();
+  return true;
+})()`);
+await sleep(4500);
+ok('单机模式迁移到 IndexedDB', (await ev(`LocalState.mode === 'idb' && state.friends.some(f => f.name === '迁移测试')
+  && localStorage.getItem('qingliao.state') === null`)) === true);
+
+ok('老的 alive=false 映射成三个关', (await ev(`state.settings.recallOn === false
+  && state.settings.rewordOn === false && state.settings.lateOn === false`)) === true);
+
+ok('单机模式新数据能落盘', (await ev(`(async () => {
+  const f = makeFriend({ name: '本地测试' });
+  f.messages.push({ id: 'lm1', role: 'user', text: '本机模式', ts: Date.now() });
+  state.friends.push(f);
+  state.conv = { kind: 'friend', id: f.id };
+  persist();
+  await sleep(1200);
+  const raw = await LocalState.loadRaw();
+  return raw.includes('本地测试') && localStorage.getItem('qingliao.state') === null;
+})()`)) === true);
+
+await ev(`location.reload(); true`);
+await sleep(4500);
+ok('刷新后单机数据还在', (await ev(`state.friends.some(f => f.name === '本地测试')`)) === true);
+ok('单机模式不写墓碑', (await ev(`(() => {
+  rememberDeleted(['zzz-' + Date.now()]);
+  return (state.deleted || []).length === 0;
+})()`)) === true);
+ok('存储面板能打开', (await ev(`(() => {
+  openStorageSheet();
+  return !!document.querySelector('#storageSheet .storage-row')
+    && document.querySelector('#storageMode').textContent.includes('IndexedDB');
 })()`)) === true);
 
 const fails = results.filter((x) => x.startsWith('FAIL')).length;

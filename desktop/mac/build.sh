@@ -7,7 +7,7 @@
 set -e
 cd "$(dirname "$0")"
 
-VERSION="${1:-1.4.49}"
+VERSION="${1:-1.4.50}"
 NAME="轻聊"
 OUT="build"
 EXE="$OUT/$NAME.app/Contents/MacOS/$NAME"
