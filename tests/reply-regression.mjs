@@ -110,7 +110,7 @@ try {
     await check(`连发间隔 ${gap / 1000} 秒只生成一轮，10 秒截止不后移`, `
       await resetCase(); await send('今天下雨了'); const due = r.deadline;
       await advance(${gap}); await send('出门记得带伞');
-      if (r.deadline !== due || !chatEl.querySelector('.dots')) return false;
+      if (r.deadline !== due || chatEl.querySelector('.dots')) return false;   // 等待期不该冒出「正在输入」
       await advance(${10000 - gap});
       if (jobs.length !== 1 || !JSON.stringify(jobs[0].body).includes('今天下雨了') || !JSON.stringify(jobs[0].body).includes('出门记得带伞')) return false;
       await complete(); await advance(20000);

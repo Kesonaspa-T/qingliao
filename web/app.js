@@ -2587,9 +2587,21 @@ async function runChat(friend, conv, r, nudge) {
   const key = (state.settings.apiKey || '').trim();
   let text = '';
 
+  let painted = '';
+  const paint = (piece) => {
+    if (!piece) return;
+    painted += piece;
+    const h = r.holder;
+    if (!h || !h.bubble || !h.bubble.isConnected) return;
+    h.bubble.textContent = painted.slice(-6000);
+    if (isActive('friend', conv.id)) scrollBottom();
+  };
+
   for (let round = 0; round < 3; round += 1) {
     check();
-    const job = streamOnce({ url: chatUrl(), key, body: buildBody(convo, useTools) });
+    painted = '';
+    const job = streamOnce({ url: chatUrl(), key, body: buildBody(convo, useTools),
+      onDelta: (d) => { if (d && d.content) paint(d.content); } });
     r.abort = job.cancel;
     const res = await job.promise;
     check();
@@ -2643,16 +2655,16 @@ function renderReplyState(kind, conv) {
   const r = rtOf(convKey(kind, conv.id));
   if (r.holder) r.holder.row.remove();
   r.holder = null;
-  const busy = r.phase === 'waiting' || r.phase === 'streaming';
-  const typing = !r.delivering && (r.phase === 'streaming'
-    || (r.phase === 'waiting' && state.settings.typingFx));
+  // 假等待期间不显示「正在输入」：那是她还没开始打字。
+  // 只有真正开始生成（streaming）才冒气泡，避免「刚发出去她就在回」的错觉。
+  const typing = !r.delivering && r.phase === 'streaming';
   if (typing || r.error) {
     r.holder = renderMessage({ role: 'peer', authorId: conv.id, text: r.error || '' },
       { conv, kind, typing: !r.error, animate: false });
     if (r.error) r.holder.bubble.classList.add('error');
   }
-  setStatus(r.error ? '回复失败，请重试' : busy ? (r.phase === 'waiting' && !state.settings.typingFx
-    ? '正在等待回复…' : '对方正在输入…') : conv.lateReplyAt ? '已读，等会儿回' : '在线');
+  setStatus(r.error ? '回复失败，请重试' : r.phase === 'streaming' ? '对方正在输入…'
+    : conv.lateReplyAt ? '已读，等会儿回' : '在线');
   updateSendBtn();
 }
 
