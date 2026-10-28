@@ -3145,8 +3145,9 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     return;
   }
 
-  // 有新消息、而且不在当前聊天里：mac 弹系统通知 / 浏览器弹 Web Notification
-  if (!isActive(kind, conv.id)) {
+  // 有新消息：通知交给原生层判断窗口是否在前台（前台就不弹）。
+  // 浏览器则只在页面隐藏时弹，不会打扰正在看的人。
+  {
     const fallback = usedStickers.length ? '[表情包]' : (files.length ? '[文件]' : '');
     const bodyText = plainText(notifyText).slice(0, 60) || fallback;
     if (bodyText) {
@@ -6456,8 +6457,7 @@ function mergeRemote(remote) {
         if (m.role !== 'user' && !isActive(kind, local.id) && (m.ts || 0) > readAt) {
           local.unread = (local.unread || 0) + 1;
         }
-        if (m.role !== 'user' && !isActive(kind, local.id)
-            && Date.now() - (m.ts || 0) < 10 * 60 * 1000) {
+        if (m.role !== 'user' && Date.now() - (m.ts || 0) < 10 * 60 * 1000) {
           const txt = m.text ? plainText(m.text).slice(0, 60)
             : (m.image ? '[图片]' : (m.file ? '[文件]' : ''));
           if (txt) {
