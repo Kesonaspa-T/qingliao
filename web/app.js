@@ -34,10 +34,44 @@ const TOKEN_KEY = 'ql.token';
 const SERVER_KEY = 'ql.server';
 let TOKEN = localStorage.getItem(TOKEN_KEY) || '';
 let SERVER = (localStorage.getItem(SERVER_KEY) || '').replace(/\/+$/, '');
+// localStorage 被系统清过（安卓常见）→ 从原生会话文件里补回登录态
+try {
+  const native = (typeof NativeSession !== 'undefined') ? NativeSession.readMap() : {};
+  if (!TOKEN && native.token) { TOKEN = String(native.token); localStorage.setItem(TOKEN_KEY, TOKEN); }
+  if (!SERVER && native.server) { SERVER = String(native.server).replace(/\/+$/, ''); localStorage.setItem(SERVER_KEY, SERVER); }
+  ['ql.lastName', 'ql.lastPass', 'ql.lastServer', 'ql.local'].forEach((k) => {
+    if (!localStorage.getItem(k) && native[k]) localStorage.setItem(k, native[k]);
+  });
+} catch (_) {}
 let lastRev = -1;
 
 let LOCAL_MODE = localStorage.getItem('ql.local') === '1';
 const IN_APP = /Android/i.test(navigator.userAgent);
+/** 安卓壳的原生会话存储：WebView 把 localStorage 清掉时，登录态还能从文件里读回来。 */
+const NativeSession = {
+  bridge() {
+    try {
+      const b = window.QingliaoSession;
+      return b && typeof b.read === 'function' ? b : null;
+    } catch (_) { return null; }
+  },
+  readMap() {
+    const b = this.bridge();
+    if (!b) return {};
+    try { return JSON.parse(b.read() || '{}') || {}; } catch (_) { return {}; }
+  },
+  remember(key, val) {
+    const b = this.bridge();
+    if (!b) return;
+    try {
+      const m = this.readMap();
+      if (val === undefined || val === null || val === '') delete m[key];
+      else m[key] = String(val);
+      b.write(JSON.stringify(m));
+    } catch (_) {}
+  },
+};
+
 const IS_LOCAL_SERVER = location.hostname === '127.0.0.1';
 /** 服务器和当前页面是不是同一个源（本机模式才走 /__proxy）。 */
 function isSameOriginAsServer() {
@@ -6721,6 +6755,7 @@ async function autoRelogin() {
     const j = await r.json();
     if (!j || !j.token) return false;
     localStorage.setItem(TOKEN_KEY, j.token);
+    NativeSession.remember('token', j.token);
     TOKEN = j.token;
     syncFailures = 0;
     syncLastError = '';
@@ -6867,6 +6902,14 @@ async function doAuth(kind) {
       localStorage.setItem('ql.lastPass', pass);
       localStorage.setItem('ql.lastServer', SERVER);
     } catch (_) {}
+    NativeSession.remember('token', j.token);
+    NativeSession.remember('server', SERVER);
+    NativeSession.remember('ql.lastName', name);
+    NativeSession.remember('ql.lastPass', pass);
+    NativeSession.remember('ql.lastServer', SERVER);
+    NativeSession.remember('ql.local', '');
+    // 申请「持久存储」：系统空间紧张时优先别清这个站点的数据
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (_) {}
     localStorage.removeItem('ql.local');   // 登录后切回云端模式
     location.reload();
   } catch (e) {
@@ -6881,6 +6924,7 @@ $('#lgLogin').addEventListener('click', () => doAuth('login'));
 const lgLocalBtn = $('#lgLocal');
 if (lgLocalBtn) lgLocalBtn.addEventListener('click', () => {
   localStorage.setItem('ql.local', '1');
+  NativeSession.remember('ql.local', '1');
   location.reload();
 });
 $('#lgReg').addEventListener('click', () => doAuth('register'));
@@ -6889,6 +6933,7 @@ $('#lgPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') doAuth(
 function logout() {
   if (!confirm('退出登录？')) return;
   localStorage.removeItem(TOKEN_KEY);
+  NativeSession.remember('token', '');
   location.reload();
 }
 

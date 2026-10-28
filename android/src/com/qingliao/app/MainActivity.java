@@ -88,6 +88,8 @@ public class MainActivity extends Activity {
         // 5MB 就满（图片/表情包一张就几百 KB）。这里改存 App 私有文件，没有 5MB 限制。
         // 只有 readState / writeState 两个方法，不能发起网络请求，也不接触其它数据。
         web.addJavascriptInterface(new StoreBridge(), "QingliaoStore");
+        // 登录态另存一份原生文件：WebView 清 localStorage 也不会掉登录
+        web.addJavascriptInterface(new SessionBridge(this), "QingliaoSession");
 
         // Android 13+ 的手势返回 / 三键返回都走这里
         if (Build.VERSION.SDK_INT >= 33) {
