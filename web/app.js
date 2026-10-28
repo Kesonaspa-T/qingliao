@@ -4190,8 +4190,10 @@ async function addStickers(files) {
       ? await fileToDataUrl(file)
       : await imageToDataUrl(file, 480, 0.9);
     if (!dataUrl) continue;
+    // 云端模式先上传成 blob 再入状态，别把 data URL 塞进要同步的 state
+    const storedUrl = await uploadImage(dataUrl);
     const id = uid('st');
-    const item = { id, url: dataUrl, tags: [], ts: Date.now() };
+    const item = { id, url: storedUrl, tags: [], ts: Date.now() };
     state.stickers = stickers();
     state.stickers.push(item);
     renderStickers();
@@ -4202,7 +4204,6 @@ async function addStickers(files) {
       // 识别不出来也要留个标签，否则她根本不知道有这个表情包可用
       item.tags = tags.length ? tags : ['表情'];
       if (res && res.desc) item.desc = res.desc;
-      item.url = await uploadImage(dataUrl);
       renderStickers();
       persist();
     }).catch(() => {});
@@ -4239,7 +4240,8 @@ async function saveMsgAsSticker(msg) {
   const list = stickers();
   if (list.some((x) => x.url === dataUrl)) return toast('已经有了');
   const tags = (msg.stickerTags || []).slice();
-  const item = { id: uid('st'), url: dataUrl, tags, desc: msg.stickerDesc || '', ts: Date.now() };
+  const storedUrl = await uploadImage(dataUrl);
+  const item = { id: uid('st'), url: storedUrl, tags, desc: msg.stickerDesc || '', ts: Date.now() };
   state.stickers = list;
   state.stickers.push(item);
   renderStickers();
@@ -4251,13 +4253,10 @@ async function saveMsgAsSticker(msg) {
       const got = (res && res.tags) || [];
       item.tags = got.length ? got : ['表情'];
       if (res && res.desc) item.desc = res.desc;
-      item.url = await uploadImage(dataUrl);
       renderStickers();
       renderStickerCount();
       persist();
     }).catch(() => {});
-  } else {
-    uploadImage(dataUrl).then((ref) => { item.url = ref; persist(); }).catch(() => {});
   }
 }
 
@@ -6509,6 +6508,30 @@ function mergeRemote(remote) {
     lm.comments = lm.comments || [];
     const have = new Set(lm.comments.map((c) => c.id));
     for (const c of rm.comments || []) if (!have.has(c.id)) { lm.comments.push(c); changed = true; result.moments = true; }
+  }
+  // 表情包图片：服务器已经换成 @blob: 引用，客户端必须跟着换；
+  // 否则每次保存都把几十 MB 的 data URL 再传一遍（nginx 20MB 就是这么炸的）。
+  if (Array.isArray(remote.stickers)) {
+    const byId = new Map((state.stickers || []).map((x) => [x.id, x]));
+    for (const rs of remote.stickers) {
+      if (!rs || !rs.id) continue;
+      const ls = byId.get(rs.id);
+      if (!ls) continue;
+      if (typeof rs.url === 'string' && rs.url.startsWith('@blob:') && ls.url !== rs.url) {
+        ls.url = rs.url;
+        changed = true;
+      }
+      if (Array.isArray(rs.tags) && rs.tags.length && !(ls.tags || []).length) {
+        ls.tags = rs.tags.slice();
+        changed = true;
+      }
+      if (rs.desc && !ls.desc) { ls.desc = rs.desc; changed = true; }
+    }
+  }
+  if (remote.me && typeof remote.me.avatar === 'string'
+      && remote.me.avatar.startsWith('@blob:') && state.me.avatar !== remote.me.avatar) {
+    state.me.avatar = remote.me.avatar;
+    changed = true;
   }
   state.moments.sort((a, b) => b.ts - a.ts);
   // 新加入的会话也可能来自含有已删消息的旧快照。

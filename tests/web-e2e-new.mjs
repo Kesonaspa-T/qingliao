@@ -277,6 +277,13 @@ ok('zip 读写往返', (await ev(`(() => {
   return txt === '你好' && bin.join(',') === '1,2,3,255';
 })()`)) === true);
 
+// 服务器把表情图换成 @blob: 引用后，客户端要跟着换（否则每次保存都重传几十 MB）
+ok('表情包引用能同步', (await ev(`(() => {
+  state.stickers = [{ id: 'sk-test', url: 'data:image/png;base64,AAAA', tags: [] }];
+  mergeRemote({ friends: [], stickers: [{ id: 'sk-test', url: '@blob:abc.png' }] });
+  return state.stickers[0].url === '@blob:abc.png';
+})()`)) === true);
+
 // 另一台设备同步到「撤回」也要跟着变
 ok('另一台设备能看到撤回', (await ev(`(() => {
   const f = friendById(window.__fid);
