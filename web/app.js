@@ -2823,6 +2823,8 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     if (cands.length) typoAt = cands[Math.floor(Math.random() * cands.length)];
   }
   const now = Date.now();
+  // 时间戳必须单调：撤回的错字版要比后面的正确版早，否则服务端按 ts 排序会颠倒
+  let tsCursor = now;
   const active = isActive(kind, conv.id);
   if (active) clearReadMark();
 
@@ -2835,7 +2837,8 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     if (i === typoAt) {
       const badText = typoText(parts[i]);
       if (badText && badText !== parts[i]) {
-        const bad = { id: uid('m'), role: 'peer', authorId, text: badText, ts: Date.now() };
+        const bad = { id: uid('m'), role: 'peer', authorId, text: badText, ts: tsCursor };
+        tsCursor += 1000;
         conv.messages.push(bad);
         if (isActive(kind, conv.id)) renderMessage(bad, { conv, kind });
         else conv.unread = (conv.unread || 0) + 1;
@@ -2847,7 +2850,8 @@ async function deliver(kind, conv, text, authorId, maxParts) {
         await sleep(420);
       }
     }
-    const m = { id: uid('m'), role: 'peer', authorId, text: parts[i], ts: now + i * 1000 };
+    const m = { id: uid('m'), role: 'peer', authorId, text: parts[i], ts: tsCursor };
+    tsCursor += 1000;
     conv.messages.push(m);
 
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
@@ -2857,7 +2861,8 @@ async function deliver(kind, conv, text, authorId, maxParts) {
 
   // 文件跟在文字后面发
   for (const f of files) {
-    const m = { id: uid('m'), role: 'peer', authorId, text: '', file: f, ts: Date.now() };
+    const m = { id: uid('m'), role: 'peer', authorId, text: '', file: f, ts: tsCursor };
+    tsCursor += 300;
     conv.messages.push(m);
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;
@@ -2884,7 +2889,8 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   for (const item of usedStickers) {
     const m = { id: uid('m'), role: 'peer', authorId, text: '', image: item.url || '',
       sticker: true, stickerTags: (item.tags || []).slice(),
-      stickerDesc: item.desc || '', ts: Date.now() };
+      stickerDesc: item.desc || '', ts: tsCursor };
+    tsCursor += 300;
     conv.messages.push(m);
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;

@@ -171,7 +171,11 @@ ok('会打错字再撤回', (await ev(`(async () => {
   Math.random = () => 0.05;
   try { await deliver('friend', f, '今天有点累了\\n我先去睡了', f.id, 2); }
   finally { Math.random = orig; }
-  return f.messages.filter(m => m.recalled).length >= 1;
+  const bad = f.messages.find(m => m.recalled);
+  if (!bad) return false;
+  const i = f.messages.indexOf(bad);
+  const next = f.messages.slice(i + 1).find(m => m.role !== 'user' && m.text && !m.recalled);
+  return !!next && next.ts > bad.ts;   // 错字版必须在正确版前面
 })()`)) === true);
 
 // 已读：给她设一条未来才到点的迟回，看看渲染有没有「已读」
