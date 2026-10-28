@@ -213,7 +213,7 @@ const DEFAULT_SETTINGS = {
   // 「她会活过来」：三个独立开关 + 概率
   recallOn: true, recallChance: 20,
   rewordOn: true, rewordChance: 10,
-  lateOn: true, lateChance: 5, lateMaxMin: 5,
+  lateOn: false, lateChance: 5, lateMaxMin: 5,
   // 免打扰时段（只挡她自己冒出来的消息）
   quietOn: true,
   quietStart: 23,
@@ -1429,8 +1429,8 @@ function openChat(kind, id) {
   restoreDraft();
   updateSendBtn();
 
-  const r = rtOf(convKey(kind, id));
-  if (r.phase === 'streaming' || r.phase === 'waiting') setStatus('对方正在输入…');
+  renderReplyState(kind, conv);
+  if (kind === 'group' && rtOf(convKey(kind, id)).phase !== 'idle') setStatus('对方正在输入…');
 
   startClock();
   closeMention();
@@ -1493,6 +1493,7 @@ function renderChat() {
       }
     }
   }
+  renderReplyState(kind, conv);
   scrollBottom(true);
   updateFab();
 }
@@ -2462,6 +2463,7 @@ function startStream({ url, key, body, onDelta, onDone, onError }) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url, key, body }),
+      timeout: 0, // 对话由回复任务管理总超时，不能被普通接口的 25 秒截断。
       signal: ctrl.signal,
     });
     await ensureOk(res);
@@ -2573,17 +2575,24 @@ async function prepareLinkDoc(conv) {
 }
 
 async function runChat(friend, conv, r, nudge) {
+  const check = () => { if (r.cancelled) throw new Error('回复已取消'); };
+  check();
   if (!nudge) await prepareLinkDoc(conv);
+  check();
   const imgMap = state.settings.vision ? await resolveImagesForModel(conv, 2) : null;
+  check();
+  r.inputId = lastUserId(conv);
   const convo = buildMessages(friend, conv, nudge, imgMap);
   const useTools = searchEnabled();
   const key = (state.settings.apiKey || '').trim();
   let text = '';
 
   for (let round = 0; round < 3; round += 1) {
+    check();
     const job = streamOnce({ url: chatUrl(), key, body: buildBody(convo, useTools) });
     r.abort = job.cancel;
     const res = await job.promise;
+    check();
 
     if (res.toolCalls && res.toolCalls.length) {
       const assistant = { role: 'assistant', content: res.content || '' };
@@ -2598,7 +2607,9 @@ async function runChat(friend, conv, r, nudge) {
       }));
       convo.push(assistant);
       for (const tc of assistant.tool_calls) {
+        check();
         const out = await runTool(tc);
+        check();
         convo.push({ role: 'tool', tool_call_id: tc.id, content: out });
       }
       continue;
@@ -2615,20 +2626,65 @@ async function runChat(friend, conv, r, nudge) {
 
 function rtOf(key) {
   if (!rt.has(key)) {
-    rt.set(key, { phase: 'idle', timer: null, typing: [], abort: null, queued: false, since: 0, stopped: false, late: false });
+    rt.set(key, { phase: 'idle', timer: null, abort: null, queued: false, since: 0,
+      deadline: 0, stopped: false, late: false, job: null, holder: null, error: '', delivering: false });
   }
   return rt.get(key);
 }
 
-function clearTypingFx(r) {
-  for (const t of r.typing) clearTimeout(t);
-  r.typing = [];
+function lastUserId(conv) {
+  const m = [...(conv.messages || [])].reverse().find((x) => x.role === 'user' && !x.recalled);
+  return m ? m.id : null;
+}
+
+/** 临时气泡属于会话运行状态；同步重绘/切换聊天后按当前状态重建。 */
+function renderReplyState(kind, conv) {
+  if (kind !== 'friend' || !isActive(kind, conv.id)) return;
+  const r = rtOf(convKey(kind, conv.id));
+  if (r.holder) r.holder.row.remove();
+  r.holder = null;
+  const busy = r.phase === 'waiting' || r.phase === 'streaming';
+  const typing = !r.delivering && (r.phase === 'streaming'
+    || (r.phase === 'waiting' && state.settings.typingFx));
+  if (typing || r.error) {
+    r.holder = renderMessage({ role: 'peer', authorId: conv.id, text: r.error || '' },
+      { conv, kind, typing: !r.error, animate: false });
+    if (r.error) r.holder.bubble.classList.add('error');
+  }
+  setStatus(r.error ? '回复失败，请重试' : busy ? (r.phase === 'waiting' && !state.settings.typingFx
+    ? '正在等待回复…' : '对方正在输入…') : conv.lateReplyAt ? '已读，等会儿回' : '在线');
+  updateSendBtn();
+}
+
+function stopReply(kind, conv) {
+  const r = rtOf(convKey(kind, conv.id));
+  r.stopped = true;
+  r.queued = false;
+  clearTimeout(r.timer);
+  r.deadline = 0;
+  if (r.job) r.job.cancel('stopped');
+  else if (r.abort) r.abort();
+  if (r.phase === 'waiting') r.phase = 'idle';
+  renderReplyState(kind, conv);
+}
+
+/** 后台暂停了计时器时，恢复后直接执行到期任务，不重新抽一段延迟。 */
+function resumeReplies() {
+  lateReplyTick();
+  for (const f of state.friends) {
+    const r = rt.get(convKey('friend', f.id));
+    if (!r) continue;
+    if (r.phase === 'waiting' && r.deadline <= Date.now()) startReply('friend', f);
+    if (r.job && !r.delivering && r.job.expiresAt <= Date.now()) r.job.cancel('timeout');
+  }
+  const conv = currentConv();
+  if (conv) renderReplyState(state.conv.kind, conv);
 }
 
 function updateSendBtn() {
   const conv = currentConv();
   const r = conv ? rtOf(convKey(state.conv.kind, conv.id)) : null;
-  const streaming = r && r.phase === 'streaming';
+  const streaming = r && r.phase === 'streaming' && !inputEl.value.trim();
   sendBtn.classList.toggle('stop', !!streaming);
   sendBtn.textContent = streaming ? '停止' : '发送';
   sendBtn.disabled = false;
@@ -2697,68 +2753,43 @@ function memorySysFor(f) {
 }
 
 function delayFor(friend) {
-  const s = {
-    delayOn: fs(friend, 'delayOn', true),
-    delayMin: fs(friend, 'delayMin', 5),
-    delayMax: fs(friend, 'delayMax', 20),
-  };
-  if (!s.delayOn) return 400;
-  const min = Math.max(0, Number(s.delayMin) || 0);
-  const max = Math.max(min, Number(s.delayMax) || min);
+  if (!fs(friend, 'delayOn', true)) return 400;
+  const max = Math.max(0, Math.min(600, Number(fs(friend, 'delayMax', 30)) || 0));
+  const min = Math.min(max, Math.max(0, Number(fs(friend, 'delayMin', 5)) || 0));
   return (min + Math.random() * (max - min)) * 1000;
 }
 
-function scheduleReply(kind, conv, isNew) {
+function scheduleReply(kind, conv, isNew, immediate = false) {
   const key = convKey(kind, conv.id);
   const r = rtOf(key);
-  const active = isActive(kind, conv.id);
-
-  if (r.phase === 'streaming') { r.queued = true; return; }
-  if (isNew) r.since = Date.now();
-  r.phase = 'waiting';
-  clearTimeout(r.timer);
-  clearTypingFx(r);
-  if (active) { setStatus('在线'); updateSendBtn(); }
-
-  let delay = delayFor(kind === 'friend' ? conv : null);
-  const waited = Date.now() - r.since;
-  const cap = Math.max(Number(state.settings.delayMax) || 30, 45) * 1000;
-  if (waited + delay > cap) delay = Math.max(1200, cap - waited);
-
-  if (active && state.settings.typingFx) typingFx(r, delay);
-  r.timer = setTimeout(() => startReply(kind, conv), delay);
-}
-
-function typingFx(r, total) {
-  if (total < 3500) return;
-  const flashes = 1 + Math.floor(Math.random() * 2);
-  for (let i = 0; i < flashes; i += 1) {
-    const at = 700 + Math.random() * (total - 2200);
-    const dur = 900 + Math.random() * 1800;
-    r.typing.push(setTimeout(() => {
-      if (r.phase === 'waiting') {
-        const c = currentConv();
-        if (c && rtOf(convKey(state.conv.kind, c.id)) === r) setStatus('对方正在输入…');
-      }
-    }, at));
-    r.typing.push(setTimeout(() => {
-      if (r.phase === 'waiting') {
-        const c = currentConv();
-        if (c && rtOf(convKey(state.conv.kind, c.id)) === r) setStatus('在线');
-      }
-    }, at + dur));
+  if (r.phase === 'streaming') {
+    r.queued = true;
+    // 尚未发送的旧答案不再落地；合并最新消息后生成。已经发送的分段让它发完。
+    if (kind === 'friend' && r.job && !r.delivering) r.job.cancel('superseded');
+    return;
   }
+  // 连发共用首条消息的截止时间，后续消息会由 buildMessages 一起读入。
+  if (r.phase === 'waiting') { renderReplyState(kind, conv); return; }
+  r.since = Date.now();
+  r.phase = 'waiting';
+  r.stopped = false;
+  r.error = '';
+  r.queued = false;
+  const delay = immediate ? 0 : delayFor(kind === 'friend' ? conv : null);
+  r.deadline = r.since + delay;
+  clearTimeout(r.timer);
+  r.timer = setTimeout(() => startReply(kind, conv), delay);
+  renderReplyState(kind, conv);
 }
 
 async function startReply(kind, conv) {
   const key = convKey(kind, conv.id);
   const r = rtOf(key);
   if (r.phase !== 'waiting') return;
-
-  r.phase = 'streaming';
-  clearTypingFx(r);
-  const active = isActive(kind, conv.id);
-  if (active) { setStatus('对方正在输入…'); updateSendBtn(); }
+  clearTimeout(r.timer);
+  r.timer = null;
+  r.deadline = 0;
+  if (convById(kind, conv.id) !== conv) { r.phase = 'idle'; return; }
 
   const friend = kind === 'friend' ? conv : null;
   const authorId = kind === 'friend' ? conv.id : (conv.members[0] || conv.id);
@@ -2767,71 +2798,69 @@ async function startReply(kind, conv) {
     ? '还没填 API Key，点「我的」→ 设置'
     : (!state.settings.model ? '还没填模型名，试试 deepseek-flash' : '');
   if (precheck) {
-    const tip = active ? renderMessage({ role: 'peer', authorId, text: precheck }, { conv, kind }) : null;
-    if (tip) tip.bubble.classList.add('error');
-    if (active) { setStatus('在线'); updateSendBtn(); }
     r.phase = 'idle';
+    r.error = precheck;
+    renderReplyState(kind, conv);
     return;
   }
 
-  const holder = active
-    ? renderMessage({ role: 'peer', authorId, text: '' }, { conv, kind, typing: true })
-    : null;
-
-  // 卡住时给用户一个能看懂的结果，而不是一直挂着「正在输入」
-  let watchdog = null;
-  if (holder) {
-    watchdog = setTimeout(() => {
-      if (r.phase !== 'streaming' || !holder.bubble.isConnected) return;
-      holder.bubble.classList.add('error');
-      holder.bubble.textContent = '这条等太久了，可能是网络或接口卡住了。再发一次试试。';
-      setStatus('在线');
-      if (typeof toast === 'function') toast('回复超时');
-    }, 90000);
-  }
+  r.phase = 'streaming';
+  r.stopped = false;
+  r.delivering = false;
+  const job = { inputId: lastUserId(conv), abort: null, cancelled: false, expiresAt: Date.now() + 90000 };
+  const cancelled = new Promise((_, reject) => {
+    job.cancel = (reason) => {
+      if (job.cancelled) return;
+      job.cancelled = reason;
+      reject(new Error(reason === 'timeout' ? '回复超时了，请检查网络或模型接口后重试。' : '回复已取消'));
+      if (job.abort) job.abort();
+    };
+  });
+  r.job = job;
+  r.abort = () => job.cancel('stopped');
+  renderReplyState(kind, conv);
+  const watchdog = setTimeout(() => job.cancel('timeout'), 90000);
 
   try {
-    let text = await runChat(friend, conv, r, r.nudge || null);
-    if (holder) holder.row.remove();
-
-    if (!text.trim()) {
-      if (r.stopped) { r.stopped = false; return; }
-      throw new Error('这次没收到内容，再试一次？');
-    }
-
-    // 她刚才「已读没回」：这次补一句，别让你以为她故意晾着
+    let text = await Promise.race([runChat(friend, conv, job, r.nudge || null), cancelled]);
+    if (job.cancelled || rt.get(key) !== r || convById(kind, conv.id) !== conv) return;
+    // 同步也可能带来新的用户消息；不能把过期答案发在新问题后面。
+    if (kind === 'friend' && job.inputId !== lastUserId(conv)) { r.queued = true; return; }
+    if (!text.trim()) throw new Error('这次没收到内容，再试一次？');
     if (r.late && Math.random() < 0.75) text = '刚在忙，才看到。\n' + text;
     r.late = false;
-
-    r.stopped = false;
-    await deliver(kind, conv, text, authorId);
-    if (r.proactive && friend) {
-      r.proactive = false;
-      if (friend.settings && friend.settings.nextProactive) {
-        delete friend.settings.nextProactive;
-        rememberFriendEdit(friend, { settings: { nextProactive: null } });
-        persist();
-      }
+    r.delivering = true;
+    clearTimeout(watchdog);
+    renderReplyState(kind, conv);
+    await deliver(kind, conv, text, authorId, undefined,
+      () => !job.cancelled && rt.get(key) === r && convById(kind, conv.id) === conv);
+    r.answeredUpTo = job.inputId;
+    if (r.proactive && friend && friend.settings && friend.settings.nextProactive) {
+      delete friend.settings.nextProactive;
+      rememberFriendEdit(friend, { settings: { nextProactive: null } });
+      persist();
     }
   } catch (err) {
-    if (r.stopped) r.stopped = false;
-    else if (holder) {
-      holder.bubble.classList.add('error');
-      holder.bubble.textContent = err && err.message ? err.message : '出错了';
+    if (job.cancelled !== 'superseded' && job.cancelled !== 'stopped') {
+      r.error = err && err.message ? err.message : '出错了';
     }
   } finally {
-    if (watchdog) clearTimeout(watchdog);
+    clearTimeout(watchdog);
+    r.job = null;
     r.abort = null;
     r.nudge = null;
     r.proactive = false;
+    r.delivering = false;
     r.phase = 'idle';
-    if (isActive(kind, conv.id)) {
-      setStatus('在线');
-      updateSendBtn();
-      scrollBottom(true);
-      updateFab();
+    const queued = r.queued && !r.stopped && (job.cancelled === 'superseded'
+      || job.inputId !== lastUserId(conv));
+    r.queued = false;
+    r.stopped = false;
+    if (rt.get(key) === r && convById(kind, conv.id) === conv) {
+      if (queued) scheduleReply(kind, conv, true, true);
+      else renderReplyState(kind, conv);
+      if (isActive(kind, conv.id)) { scrollBottom(true); updateFab(); }
     }
-    if (r.queued) { r.queued = false; scheduleReply(kind, conv, true); }
   }
 }
 
@@ -2991,7 +3020,7 @@ function pickStickerForText(text, trigger) {
     || pool[Math.floor(Math.random() * pool.length)] || null;
 }
 
-async function deliver(kind, conv, text, authorId, maxParts) {
+async function deliver(kind, conv, text, authorId, maxParts, canContinue = () => true) {
   if (kind === 'group' && isCloud()) return;
   const owner = kind === 'friend' ? conv : null;
   let limit = kind === 'group'
@@ -3099,56 +3128,60 @@ async function deliver(kind, conv, text, authorId, maxParts) {
 
   let sentCount = 0;
   let notifyText = '';
+  const appendReply = (m) => {
+    conv.messages.push(m);
+    if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
+    else conv.unread = (conv.unread || 0) + 1;
+    // 每一段落地就保存、同步，切后台时不必等最后一个模拟打字计时器。
+    persist();
+  };
   for (let i = 0; i < parts.length; i += 1) {
     if (i > 0 && isActive(kind, conv.id)) {
       setStatus('对方正在输入…');
       await sleep(380 + Math.random() * 620);
     }
+    if (!canContinue()) return;
     if (i === typoAt) {
       const badText = typoText(parts[i]);
       if (badText && badText !== parts[i]) {
         const bad = { id: uid('m'), role: 'peer', authorId, text: badText, ts: tsCursor };
         tsCursor += 1000;
-        conv.messages.push(bad);
-        if (isActive(kind, conv.id)) renderMessage(bad, { conv, kind });
-        else conv.unread = (conv.unread || 0) + 1;
+        appendReply(bad);
         await sleep(600 + Math.random() * 700);
+        if (!canContinue()) return;
         bad.recalled = true;
         bad.text = '';
+        persist();
         if (isActive(kind, conv.id)) { rememberScroll(); renderChat(); restoreScrollIfNeeded(); }
         else renderConversations();
         await sleep(420);
+        if (!canContinue()) return;
       }
     }
     const m = { id: uid('m'), role: 'peer', authorId, text: parts[i], ts: tsCursor };
     tsCursor += 1000;
-    conv.messages.push(m);
-
     if (!notifyText && String(parts[i] || '').trim()) notifyText = String(parts[i]).trim();
-    if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
-    else conv.unread = (conv.unread || 0) + 1;
+    appendReply(m);
     sentCount += 1;
   }
 
   // 改口：一小句「不是，我不是这个意思」
   if (doReword) {
+    if (!canContinue()) return;
     const line = REWORD_LINES[Math.floor(Math.random() * REWORD_LINES.length)];
     const m = { id: uid('m'), role: 'peer', authorId, text: line, ts: tsCursor };
     tsCursor += 800;
-    conv.messages.push(m);
-    if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
-    else conv.unread = (conv.unread || 0) + 1;
+    appendReply(m);
     sentCount += 1;
     await sleep(420);
   }
 
   // 文件跟在文字后面发
   for (const f of files) {
+    if (!canContinue()) return;
     const m = { id: uid('m'), role: 'peer', authorId, text: '', file: f, ts: tsCursor };
     tsCursor += 300;
-    conv.messages.push(m);
-    if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
-    else conv.unread = (conv.unread || 0) + 1;
+    appendReply(m);
     sentCount += 1;
     await sleep(180);
   }
@@ -3170,21 +3203,20 @@ async function deliver(kind, conv, text, authorId, maxParts) {
 
   // 表情包跟在文字后面发
   for (const item of usedStickers) {
+    if (!canContinue()) return;
     const m = { id: uid('m'), role: 'peer', authorId, text: '', image: item.url || '',
       sticker: true, stickerTags: (item.tags || []).slice(),
       stickerDesc: item.desc || '', ts: tsCursor };
     tsCursor += 300;
-    conv.messages.push(m);
-    if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
-    else conv.unread = (conv.unread || 0) + 1;
+    appendReply(m);
     sentCount += 1;
     await sleep(320);
   }
 
-  // 清洗完什么都不剩（模型把系统标注照抄了一遍）：安静结束，别崩
+  if (!canContinue()) return;
+  // 清洗后没有可发送内容，也要给出可重试的错误，不能让输入气泡无声消失。
   if (!sentCount) {
-    if (isActive(kind, conv.id)) setStatus('在线');
-    return;
+    throw new Error('这次没收到可显示的内容，再试一次？');
   }
 
   // 有新消息：通知交给原生层判断窗口是否在前台（前台就不弹）。
@@ -3328,26 +3360,32 @@ function afterUserMessage(kind, conv) {
   }
 
   // 她上一次「已读没回」还没到点，你又发了 → 别晾着，这就回
-  if (conv.lateReplyAt) {
+  const wasLate = !!conv.lateReplyAt;
+  if (wasLate) {
     conv.lateReplyAt = 0;
     rememberFriendEdit(conv, { lateReplyAt: 0 });
+    persist();
   }
+  const r = rtOf(convKey(kind, conv.id));
+  r.nudge = null;
+  r.proactive = false;
 
   // 偶尔先看一眼、过一会儿才回：概率/最长拖延都能在设置里调
-  const lateOn = state.settings.lateOn !== false;
+  const lateOn = state.settings.lateOn === true;
   const lateChance = Math.max(0, Math.min(30, Number(state.settings.lateChance ?? 5)));
   const lateMaxMs = Math.max(60000, Math.min(30, Number(state.settings.lateMaxMin ?? 5) || 5) * 60000);
-  if (lateOn && lateChance > 0 && (conv.messages || []).length >= 6
+  if (!wasLate && r.phase === 'idle' && lateOn && lateChance > 0 && (conv.messages || []).length >= 6
       && Math.random() * 100 < lateChance) {
     conv.peerReadAt = Date.now();
     conv.lateReplyAt = Date.now() + 60000 + Math.random() * Math.max(0, lateMaxMs - 60000);
     rememberFriendEdit(conv, { peerReadAt: conv.peerReadAt, lateReplyAt: conv.lateReplyAt });
     persist();
-    if (isActive('friend', conv.id)) { setStatus('在线'); renderChat(); }
+    r.error = '';
+    if (isActive('friend', conv.id)) renderChat();
     return;
   }
 
-  scheduleReply(kind, conv, true);
+  scheduleReply(kind, conv, true, wasLate);
 }
 
 /** 到点了：她终于回了（别人看着像「已读，隔了一会儿才回」）。 */
@@ -3356,15 +3394,17 @@ function lateReplyTick() {
   let changed = false;
   for (const f of state.friends) {
     const due = Number(f.lateReplyAt) || 0;
-    if (!due || due > now) continue;
+    if (!due || (due > now && state.settings.lateOn === true)) continue;
     f.lateReplyAt = 0;
     f.peerReadAt = now;
     rememberFriendEdit(f, { lateReplyAt: 0, peerReadAt: now });
     changed = true;
     const r = rtOf(convKey('friend', f.id));
-    if (r.phase !== 'idle') { r.queued = true; continue; }
-    r.late = true;
-    scheduleReply('friend', f, true);
+    if (r.phase !== 'idle') continue;
+    const last = lastMessage(f);
+    if (!last || last.role !== 'user') { renderReplyState('friend', f); continue; }
+    r.late = state.settings.lateOn === true;
+    scheduleReply('friend', f, true, true);
     if (isActive('friend', f.id)) renderChat();
   }
   if (changed) persist();
@@ -3556,6 +3596,7 @@ function mentionKeydown(e) {
 
 inputEl.addEventListener('input', () => {
   autosize();
+  updateSendBtn();
   updateMentionPicker();
   clearTimeout(draftTimer);
   draftTimer = setTimeout(() => {
@@ -3585,10 +3626,8 @@ sendBtn.addEventListener('click', () => {
   const conv = currentConv();
   if (!conv) return;
   const r = rtOf(convKey(state.conv.kind, conv.id));
-  if (r.phase === 'streaming') {
-    r.stopped = true;
-    if (r.abort) r.abort();
-    updateSendBtn();
+  if (r.phase === 'streaming' && !inputEl.value.trim()) {
+    stopReply(state.conv.kind, conv);
     return;
   }
   send();
@@ -3827,7 +3866,7 @@ function fillForm() {
   if ($('#fRecallChance')) $('#fRecallChance').value = Number(s.recallChance ?? 20);
   if ($('#fReword')) $('#fReword').checked = s.rewordOn !== false;
   if ($('#fRewordChance')) $('#fRewordChance').value = Number(s.rewordChance ?? 10);
-  if ($('#fLate')) $('#fLate').checked = s.lateOn !== false;
+  if ($('#fLate')) $('#fLate').checked = s.lateOn === true;
   if ($('#fLateChance')) $('#fLateChance').value = Number(s.lateChance ?? 5);
   if ($('#fLateMax')) $('#fLateMax').value = Number(s.lateMaxMin ?? 5);
   if ($('#fQuiet')) $('#fQuiet').checked = s.quietOn !== false;
@@ -3906,6 +3945,7 @@ function saveForm() {
   const dirty = Object.keys(patch).length > 0;
   Object.assign(state.settings, patch);
   Object.assign(pendingEdits.settings, patch);
+  if (patch.lateOn === false) lateReplyTick();
   applyTheme();
   if (dirty) persist();          // 什么都没改就不必同步一次整份状态
   closeSheet();
@@ -4430,6 +4470,7 @@ function renderFriendRhythm(target, isMe) {
       + '<label class="field"><span>一次最多几条</span><input id="rBursts" type="number" min="1" max="5" placeholder="跟随全局"></label>'
       + '<label class="field"><span>最少隔几秒</span><input id="rDelayMin" type="number" min="0" max="300" placeholder="跟随全局"></label>'
       + '<label class="field"><span>最多隔几秒</span><input id="rDelayMax" type="number" min="0" max="300" placeholder="跟随全局"></label>'
+      + '<p class="hint" id="rDelayHint"></p>'
       + '<label class="field"><span>静默多久主动找你（分钟）</span><input id="rNudge" type="number" min="10" max="1440" placeholder="跟随全局"></label>'
       + '<label class="field"><span>多久发一条朋友圈（小时）</span><input id="rMomentIv" type="number" min="0.2" max="72" step="0.5" placeholder="跟随全局"></label>'
       + '<label class="field row-inline"><span>会主动找我</span><input id="rProactive" type="checkbox" class="switch"></label>'
@@ -4496,6 +4537,10 @@ function renderFriendRhythm(target, isMe) {
   set('rBursts', own.bursts);
   set('rDelayMin', own.delayMin);
   set('rDelayMax', own.delayMax);
+  $('#rDelayMin').placeholder = '跟随全局 ' + state.settings.delayMin + ' 秒';
+  $('#rDelayMax').placeholder = '跟随全局 ' + state.settings.delayMax + ' 秒';
+  $('#rDelayHint').textContent = '此处填写的秒数优先于全局；留空才跟随全局。随机延迟'
+    + (fs(target, 'delayOn', true) ? '已开启' : '已关闭') + '，模型生成和联网读取还需要时间。';
   set('rNudge', own.nudgeAfter);
   set('rMomentIv', own.momentInterval ? (own.momentInterval / 3600) : undefined);
   set('rWake', own.wake);
@@ -4812,6 +4857,7 @@ function clearFriendChat(f) {
   f.unread = 0;
   f.readAt = Date.now();
   rememberFriendEdit(f, { unread: 0, readAt: f.readAt });
+  stopReply('friend', f);
   rt.delete(convKey('friend', f.id));
   if (isActive('friend', f.id)) closeChat();
   renderConversations();
@@ -4839,6 +4885,7 @@ $('#btnFDelete').addEventListener('click', () => {
   rememberDeleted([f.id, ...f.messages.map((m) => m.id)]);
   state.friends = state.friends.filter((x) => x.id !== f.id);
   state.groups.forEach((g) => { g.members = g.members.filter((id) => id !== f.id); });
+  stopReply('friend', f);
   rt.delete(convKey('friend', f.id));
   if (isActive('friend', f.id)) closeChat();
   closeFriendSheet();
@@ -6523,6 +6570,13 @@ function mergeRemote(remote) {
     if (mergeFriendSettings(lf, rf, dirty)) { changed = true; result.friends = true; }
     if (mergeFields(lf, rf, FRIEND_FIELDS, dirty)) { changed = true; result.friends = true; }
     if (mergeMsgs(lf, rf.messages, 'friend')) result.friends = true;
+    // 服务器兜底已经回答了这条问题时，取消本机尚未发送的答案。
+    const replyRuntime = rt.get(convKey('friend', lf.id));
+    const latestUserId = lastUserId(lf);
+    const answered = lf.messages.some((m) => m.source === 'fallback' && m.replyTo === latestUserId);
+    if (answered && replyRuntime && replyRuntime.phase !== 'idle' && !replyRuntime.delivering) {
+      stopReply('friend', lf);
+    }
     // 服务端用过一次「下一条主动消息」的指令后，会打上 proactiveUsedAt。
     // 本地还留着那条指令的话会被下一次快照带回去、重复用，这里清掉。
     const usedAt = Number(rf.proactiveUsedAt) || 0;
@@ -7387,8 +7441,8 @@ async function init() {
 
   setInterval(proactiveTick, 30000);
   setInterval(clientSocialTick, 30000);
-  // 「已读没回」的到点回复：15 秒看一次，别让她晾你太久也别太准
-  setInterval(lateReplyTick, 15000);
+  // 已读等待到点就回复，避免额外多等一轮 15 秒。
+  setInterval(lateReplyTick, 1000);
 
   document.documentElement.classList.toggle('native', NATIVE);
   if (!isCloud()) {
@@ -7423,10 +7477,10 @@ document.addEventListener('wheel', wheelFallback, { passive: true });
 
 // 回到前台 / 网络恢复时立刻补一次同步：手机切后台再回来不该等下一轮轮询。
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) syncWake('visible');
+  if (!document.hidden) { resumeReplies(); syncWake('visible'); }
 });
 window.addEventListener('online', () => syncWake('online'));
-window.addEventListener('pageshow', () => syncWake('pageshow'));
+window.addEventListener('pageshow', () => { resumeReplies(); syncWake('pageshow'); });
 // 别让某个漏网的 promise 把同步循环带走。
 window.addEventListener('unhandledrejection', (e) => {
   syncLastError = String((e && e.reason && e.reason.message) || (e && e.reason) || 'unhandledrejection').slice(0, 120);

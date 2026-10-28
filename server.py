@@ -122,7 +122,7 @@ def default_state():
             # 「她会活过来」：撤回 / 改口 / 偶尔看了不回（三个独立开关 + 概率）
             "recallOn": True, "recallChance": 20,
             "rewordOn": True, "rewordChance": 10,
-            "lateOn": True, "lateChance": 5, "lateMaxMin": 5,
+            "lateOn": False, "lateChance": 5, "lateMaxMin": 5,
             # 免打扰时段（只挡她自己冒出来的消息；你发的消息照回、你定的提醒照响）
             "quietOn": True,
             "quietStart": 23,
@@ -505,6 +505,16 @@ def merge_state(old, new, *, background=False):
             continue
         base = old_friends.get(f.get("id")) or {}
         msgs = list(f.get("messages") or [])
+        if background:
+            # 生成期间客户端可能已经回答、补发消息或清空记录。
+            # 后台持有旧快照，落盘时必须再次核对兜底回复对应的最后一条问题。
+            base_msgs = base.get("messages") or []
+            base_ids = {m.get("id") for m in base_msgs}
+            latest = base_msgs[-1] if base_msgs else {}
+            msgs = [m for m in msgs if m.get("source") != "fallback"
+                    or m.get("id") in base_ids
+                    or (latest.get("role") == "user"
+                        and latest.get("id") == m.get("replyTo"))]
         have = {m.get("id") for m in msgs}
         if not import_mode:
             for m in base.get("messages") or []:
@@ -887,7 +897,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v37",
+                    "build": "v38",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -2549,6 +2559,8 @@ def social_tick(uid="local", force=False):
             last = msgs[-1]
             if last.get("role") != "user":
                 continue
+            if s.get("lateOn") and float(f.get("lateReplyAt") or 0) > now * 1000:
+                continue
             if now * 1000 - float(last.get("ts") or 0) < 90 * 1000:
                 continue
             if float(f.get("lastFallbackAt") or 0) == float(last.get("ts") or 0):
@@ -2566,6 +2578,7 @@ def social_tick(uid="local", force=False):
                 f.setdefault("messages", []).append({
                     "id": _nid("m"), "role": "peer", "authorId": f.get("id"),
                     "text": line, "ts": int(time.time() * 1000),
+                    "source": "fallback", "replyTo": last.get("id"),
                 })
                 f["unread"] = int(f.get("unread") or 0) + 1
                 f["lastFallbackAt"] = float(last.get("ts") or 0)

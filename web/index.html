@@ -213,6 +213,7 @@
           <label class="field row-inline"><span>随机延迟</span><input id="fDelayOn" type="checkbox" class="switch"></label>
           <label class="field"><span>最短（秒）</span><input id="fDelayMin" type="number" min="0" max="600" step="1"></label>
           <label class="field"><span>最长（秒）</span><input id="fDelayMax" type="number" min="0" max="600" step="1"></label>
+          <p class="hint">这是开始生成前的等待时间，模型生成和联网读取还需要时间。好友资料里填写的节奏优先；留空才跟随这里。</p>
           <label class="field row-inline"><span>正在输入特效</span><input id="fTypingFx" type="checkbox" class="switch"></label>
           <label class="field"><span>私聊最多几条</span><input id="fBursts" type="number" min="1" max="5" step="1"></label>
           <label class="field"><span>群聊每人最多几条</span><input id="fGroupBursts" type="number" min="1" max="10" step="1"></label>
@@ -232,7 +233,7 @@
           <label class="field row-inline"><span>偶尔已读不回</span><input id="fLate" type="checkbox" class="switch"></label>
           <label class="field"><span>已读不回概率（%）</span><input id="fLateChance" type="number" min="0" max="30" step="1"></label>
           <label class="field"><span>最多拖（分钟）</span><input id="fLateMax" type="number" min="1" max="30" step="1"></label>
-          <p class="hint">她先「已读」你，过一会儿才回一句「刚在忙」；你中间再发一条，她就立刻回。</p>
+          <p class="hint">默认关闭。开启后会额外等 1～设定上限分钟，不受上面的秒数限制；聊天里显示「已读，等会儿回」。你再发一条就取消这段等待。</p>
           <label class="field row-inline"><span>夜里不打扰</span><input id="fQuiet" type="checkbox" class="switch"></label>
           <label class="field"><span>从（整点）</span><input id="fQuietStart" type="number" min="0" max="23" step="1"></label>
           <label class="field"><span>到（整点）</span><input id="fQuietEnd" type="number" min="0" max="23" step="1"></label>
@@ -533,6 +534,6 @@
   </div>
 </div>
 
-<script src="app.js?v=73"></script>
+<script src="app.js?v=74"></script>
 </body>
 </html>
