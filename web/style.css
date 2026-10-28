@@ -1589,12 +1589,16 @@ html[data-theme="dark"] .storage-warn { color: #ff9b90; background: rgba(255, 99
 
 /* 桌面：聊天内容再长也不能把中间列挤成一条（长小作文会触发 flex-basis:auto 的挤压） */
 @media (min-width: 900px) {
-  #pageContacts, #pageMoments, #pageMe {
-    flex: 1 1 0;
+  /* 打开聊天时：左边（消息/通讯录/朋友圈/我的）: 右边聊天 = 2 : 3 */
+  .phone.chat-open #pageMsg,
+  .phone.chat-open #pageContacts,
+  .phone.chat-open #pageMoments,
+  .phone.chat-open #pageMe {
+    flex: 2 1 0;
     min-width: 300px;
   }
-  .chat-page {
-    flex: 1 1 0;
+  .phone.chat-open .chat-page {
+    flex: 3 1 0;
     min-width: 360px;
   }
 }

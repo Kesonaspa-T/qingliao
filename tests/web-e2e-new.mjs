@@ -416,7 +416,9 @@ ok('桌面四栏不被长消息挤扁', (await ev(`(() => {
     if (!page || !chat) return false;
     out.push({ tab, w: page.getBoundingClientRect().width, c: chat.getBoundingClientRect().width });
   }
-  return out.every(x => x.w >= 300 && x.c >= 300);
+  // 左边:右边 = 2:3（中间列占 40%）
+  return out.every(x => x.w >= 300 && x.c >= 300
+    && Math.abs(x.w / (x.w + x.c) - 0.4) < 0.03);
 })()`)) === true);
 
 // ---------- 单机模式：localStorage → IndexedDB 迁移 + 落盘 ----------
