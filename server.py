@@ -1102,6 +1102,14 @@ class Handler(SimpleHTTPRequestHandler):
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = "Bearer " + key
+        else:
+            # 本机模式：登录态是页面的 Bearer token，要原样带上，否则转发过去全是 401
+            auth = (self.headers.get("Authorization") or "").strip()
+            if auth:
+                headers["Authorization"] = auth
+            build = (self.headers.get("X-Qingliao-Build") or "").strip()
+            if build:
+                headers["X-Qingliao-Build"] = build
         req = Request(
             target,
             data=None if method_name == "GET" else json.dumps(payload, ensure_ascii=False).encode("utf-8"),

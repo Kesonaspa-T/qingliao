@@ -39,6 +39,13 @@ let lastRev = -1;
 let LOCAL_MODE = localStorage.getItem('ql.local') === '1';
 const IN_APP = /Android/i.test(navigator.userAgent);
 const IS_LOCAL_SERVER = location.hostname === '127.0.0.1';
+/** 服务器和当前页面是不是同一个源（本机模式才走 /__proxy）。 */
+function isSameOriginAsServer() {
+  const base = (SERVER || '').replace(/\/+$/, '').toLowerCase();
+  if (!/^https?:\/\//.test(base)) return false;
+  try { return new URL(base).origin.toLowerCase() === location.origin.toLowerCase(); }
+  catch (_) { return false; }
+}
 function isCloud() { return LOCAL_MODE ? false : (IN_APP ? !!SERVER : true); }
 
 // 单个接口的默认超时（毫秒）。没有上限的话，一个卡住的请求就能让同步永久停摆。
@@ -68,8 +75,9 @@ function apiFetch(path, opts) {
     setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, budget);
   }
 
-  // App 跑在 http://127.0.0.1 上：所有云端接口也交给原生代理，避免跨域
-  if (IS_LOCAL_SERVER && /^https?:\/\//.test(target)) {
+  // 本机模式（页面和服务器都是 127.0.0.1）才走 /__proxy；页面只是恰好开在
+  // 127.0.0.1（比如 Mac 上用本地调试），服务器却在别的机器上时必须直连。
+  if (IS_LOCAL_SERVER && isSameOriginAsServer()) {
     const method = (o.method || 'GET').toUpperCase();
     const ph = Object.assign({}, headers, {
       'Content-Type': 'application/json',
@@ -1969,7 +1977,7 @@ function toolsUrl(path) {
 }
 
 function requestJson(url, key, body) {
-  if (IS_LOCAL_SERVER) {
+  if (IS_LOCAL_SERVER && isSameOriginAsServer()) {
     return fetch('/__proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Target-Url': url, 'X-Target-Key': key || '' },
@@ -2369,7 +2377,7 @@ function startStream({ url, key, body, onDelta, onDone, onError }) {
 
   const ctrl = new AbortController();
   (async () => {
-    if (IS_LOCAL_SERVER) {
+    if (IS_LOCAL_SERVER && isSameOriginAsServer()) {
       // 单机版走本地代理，直接要完整结果，不折腾流式
       const nb = Object.assign({}, body, { stream: false });
       const pr = await fetch('/__proxy', {
@@ -3896,7 +3904,7 @@ $('#btnTest').addEventListener('click', async () => {
     window.AndroidChat.ping(id, base + '/models', key);
     return;
   }
-  if (IS_LOCAL_SERVER) {
+  if (IS_LOCAL_SERVER && isSameOriginAsServer()) {
     try {
       const j = await requestJson(base + '/chat/completions', key, {
         model: state.settings.model || 'deepseek-flash',
@@ -6608,6 +6616,7 @@ let syncRunning = false;
 let syncStartedAt = 0;
 let syncAborter = null;
 let syncFailures = 0;
+let autoReloginRunning = false;
 let syncLastOkAt = 0;
 let syncStaleCount = 0;
 let syncLastFullAt = 0;
@@ -6693,15 +6702,54 @@ function startSync() {
   syncSchedule(300);
 }
 
+/** 服务器说这个 token 不认了（可能服务器重装过/会话表丢了）→ 自动重新登录，别让人干等到重启。 */
+async function autoRelogin() {
+  if (autoReloginRunning) return false;
+  const name = localStorage.getItem('ql.lastName') || '';
+  const pass = localStorage.getItem('ql.lastPass') || '';
+  // 记住的必须就是当前服务器，换过服务器就别拿旧账号去登
+  const saved = localStorage.getItem('ql.lastServer') || '';
+  if (!name || !pass || !SERVER || (saved && saved !== SERVER)) return false;
+  autoReloginRunning = true;
+  try {
+    const r = await fetch(SERVER + '/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, password: pass }),
+    });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (!j || !j.token) return false;
+    localStorage.setItem(TOKEN_KEY, j.token);
+    TOKEN = j.token;
+    syncFailures = 0;
+    syncLastError = '';
+    return true;
+  } catch (_) {
+    return false;
+  } finally {
+    autoReloginRunning = false;
+  }
+}
+
 async function syncTick(signal, force) {
   const opts = signal ? { signal } : {};
   if (!force) {
     const r = await apiFetch('/api/rev', Object.assign({ timeout: 15000 }, opts));
-    if (!r.ok) throw new Error('rev HTTP ' + r.status);
+    if (r.status === 401 && await autoRelogin()) {
+      const r2 = await apiFetch('/api/rev', Object.assign({ timeout: 15000 }, opts));
+      if (!r2.ok) throw new Error('rev HTTP ' + r2.status);
+      const info2 = await r2.json();
+      if (!(Number(info2.rev) > lastRev)) return true;
+    } else if (!r.ok) throw new Error('rev HTTP ' + r.status);
     const info = await r.json();
     if (!(Number(info.rev) > lastRev)) return true;     // 没变化，算一轮成功
   }
-  const res = await apiFetch('/api/state', Object.assign({ timeout: 45000 }, opts));
+  let res = await apiFetch('/api/state', Object.assign({ timeout: 45000 }, opts));
+  if (res.status === 401 && await autoRelogin()) {
+    res = await apiFetch('/api/state', Object.assign({ timeout: 45000 }, opts));
+  }
+  if (res.status === 401) { showLogin('登录过期了，重新登录一下（账号数据在服务器上，重新登录就回来）'); throw new Error('登录过期'); }
   if (!res.ok) throw new Error('state HTTP ' + res.status);
   const remote = await res.json();
   if (!remote || !Array.isArray(remote.friends)) throw new Error('bad state');
@@ -6772,7 +6820,7 @@ async function doAuth(kind) {
   const postJson = (url, body, token) => {
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = 'Bearer ' + token;
-    if (IS_LOCAL_SERVER) {
+    if (IS_LOCAL_SERVER && isSameOriginAsServer()) {
       headers['X-Target-Url'] = url;
       headers['X-Method'] = 'POST';
       return fetch('/__proxy', { method: 'POST', headers, body: JSON.stringify(body) });
@@ -6785,15 +6833,40 @@ async function doAuth(kind) {
     const j = await res.json().catch(() => ({}));
     if (!res.ok) return say(j.error || ('HTTP ' + res.status));
 
+    // 登上之后先看一眼服务器上到底有没有数据，免得「登上了却是空的」还莫名其妙删了本地。
+    let remoteCount = -1;
     try {
-      const localRaw = await LocalState.loadRaw();
-      if (localRaw) {
+      const rr = await postJson(SERVER + '/api/state', {}, j.token);   // GET 语义：读
+      const st = await rr.json();
+      remoteCount = Array.isArray(st && st.friends) ? st.friends.length : -1;
+    } catch (_) { /* 读不到就当作不知道 */ }
+
+    // 本地有数据、账号是按新账号建的：先问一句要不要带上，别默默清空
+    let localRaw = null;
+    try { localRaw = await LocalState.loadRaw(); } catch (_) { localRaw = null; }
+    let importLocal = false;
+    if (localRaw && remoteCount === 0) {
+      importLocal = confirm(
+        '服务器上这个账号还是空的。\n'
+        + '要把这台设备上的聊天记录/通讯录一起带上去吗？\n\n'
+        + '「确定」= 带上（推荐）　「取消」= 不要，从头开始（本地数据会保留在设备上，不会被删）');
+    }
+    if (localRaw && importLocal) {
+      try {
         const imported = migrate(JSON.parse(localRaw));
         await postJson(SERVER + '/api/state', { ...imported, _edits: importEdits(imported) }, j.token);
+      } catch (e) {
+        say('本地数据上传失败：' + ((e && e.message) || e));
       }
-    } catch (_) {}
+    }
 
     localStorage.setItem(TOKEN_KEY, j.token);
+    // 记住账号密码（只存在本机），服务器会话丢了能自动重登，不用人再输一次
+    try {
+      localStorage.setItem('ql.lastName', name);
+      localStorage.setItem('ql.lastPass', pass);
+      localStorage.setItem('ql.lastServer', SERVER);
+    } catch (_) {}
     localStorage.removeItem('ql.local');   // 登录后切回云端模式
     location.reload();
   } catch (e) {
@@ -7190,14 +7263,47 @@ async function init() {
         return;
       }
     }
+    // 网络抖一下不该把人踢回登录页：重试几次，失败也给「重试」按钮而不是清掉登录态。
+    let res = null;
+    let lastErr = null;
+    for (let i = 0; i < 3; i += 1) {
+      try {
+        res = await apiFetch('/api/state', { timeout: 45000 });
+        if (res.status === 401) break;
+        if (res.ok) break;
+        lastErr = new Error('HTTP ' + res.status);
+      } catch (e) {
+        lastErr = e;
+      }
+      res = null;
+      if (i < 2) await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+    }
+    if (res && res.status === 401) {
+      showLogin('登录过期了，重新登录一下（账号数据在服务器上，重新登录就回来）');
+      return;
+    }
+    if (!res || !res.ok) {
+      showLogin('连不上服务器：' + ((lastErr && lastErr.message) || '未知错误')
+        + '\n地址：' + (SERVER || '(空)')
+        + '\n登录状态还留着，网络恢复后点下面「重试」就行，不用重新登录。');
+      const box = document.getElementById('login');
+      const old = document.getElementById('lgRetry');
+      if (old) old.remove();
+      if (box) {
+        const b = document.createElement('button');
+        b.id = 'lgRetry';
+        b.textContent = '重试';
+        b.style.marginTop = '10px';
+        b.onclick = () => location.reload();
+        (document.getElementById('lgMsg') || box).appendChild(b);
+      }
+      return;
+    }
     try {
-      const res = await apiFetch('/api/state', { timeout: 45000 });
-      if (res.status === 401) { showLogin('登录过期了，重新登录一下'); return; }
-      if (!res.ok) throw new Error('服务器无法读取聊天数据，请稍后重试');
       raw = await res.json();
       lastRev = Number(raw.rev) || 0;
     } catch (e) {
-      showLogin('连不上服务器：' + (e.message || e));
+      showLogin('服务器返回的数据读不出来，稍后点「重试」');
       return;
     }
   } else {
