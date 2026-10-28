@@ -3,7 +3,7 @@
 > 给下一个接手的人（或 agent）。
 > 这份文档讲清楚：**提示词分成哪几段、写在哪、哪些能让用户改、哪些绝对不能动**。
 
-版本：服务端 build `v36`，前端 `app.js?v=65` / `style.css?v=29`。
+版本：服务端 build `v37`，前端 `app.js?v=66` / `style.css?v=29`。
 
 ---
 
@@ -107,7 +107,8 @@
 1.4.51 起改成「每天按概率掷一次」，不再用 `nextEssayAt` 的长排期：
 
 - 全局 `settings.essayChance`（0~100，默认 15）；`friend.settings.essayChance` 可单独覆盖；
-  老字段 `friend.settings.essay === false` 视为 0（保存朋友资料时会清掉这个旧键）；
+  老字段 `friend.settings.essay` 已作废（老版本给新建朋友默认写过 false，继续认它会让所有人都变 0%）；
+  想关就把 `essayChance` 设成 0。保存朋友资料时会清掉这个旧键。
 - 服务端 `social_tick`：每天 9:00–22:00 掷一次，`essayRollDay` 记「今天掷过了」，
   `lastEssayAt` 是当天 0 点之后也跳过；每人每天最多一篇；
 - 单机版 `clientSocialTick` 同样的规则（`genEssayLocal`）；

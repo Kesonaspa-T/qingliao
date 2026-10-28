@@ -887,7 +887,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v36",
+                    "build": "v37",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1423,10 +1423,12 @@ def anniversary_today(friend):
 
 
 def essay_chance(friend, settings):
-    """小作文的日均概率（0~100）。朋友自己填了就用朋友的，否则用全局默认。"""
+    """小作文的日均概率（0~100）。朋友自己填了就用朋友的，否则用全局默认。
+
+    旧的 `settings.essay`（布尔开关）已经作废：老版本给新建朋友默认写过 false，
+    如果继续认它，升级后所有人还是 0%。想关就把 essayChance 设成 0。
+    """
     own = (friend or {}).get("settings") or {}
-    if own.get("essay") is False:
-        return 0.0
     v = own.get("essayChance")
     if v is None or v == "":
         v = (settings or {}).get("essayChance", 15)

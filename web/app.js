@@ -2626,7 +2626,7 @@ function quietFor(f) { return quietNow() || friendAsleep(f); }
 
 function essayChanceFor(f) {
   const own = (f && f.settings) || {};
-  if (own.essay === false) return 0;
+  // 旧的 essay 布尔值作废（老版本默认写 false，会把新概率压成 0）
   const v = own.essayChance !== undefined ? own.essayChance : (state.settings.essayChance ?? 15);
   const n = Number(v);
   return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 15;
@@ -4461,7 +4461,7 @@ function renderFriendRhythm(target, isMe) {
   chk('rProactive', own.proactive, true);
   chk('rGreet', own.greet, true);
   chk('rDoodle', own.doodle, true);
-  set('rEssayChance', own.essayChance !== undefined ? own.essayChance : (own.essay === false ? 0 : undefined));
+  set('rEssayChance', own.essayChance !== undefined ? own.essayChance : undefined);
   chk('rDiary', own.diary, true);
   set('rNextProactive', own.nextProactive);
   renderAnnivList(target);

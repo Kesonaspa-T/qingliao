@@ -259,6 +259,10 @@ mf = merged["friends"][0]
 ok("客户端能清零 unread / 写 readAt", mf.get("unread") == 0 and mf.get("readAt") == 1700000000000,
    (mf.get("unread"), mf.get("readAt")))
 
+# 旧的 essay=false 不再把概率压成 0（老版本新建朋友默认写 false）
+ok("旧 essay=false 不再压住概率",
+   srv.essay_chance({"settings": {"essay": False}}, {"essayChance": 15}) == 15)
+
 # ---------- 小作文：每天按概率掷一次 ----------
 
 make_state("u_essay", essayChance=100)
