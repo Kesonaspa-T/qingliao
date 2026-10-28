@@ -2253,6 +2253,7 @@ function buildMessages(friend, conv, nudge, imgMap) {
   // 人设刚改过：历史里若还有旧口吻，模型会惯性模仿，这里明确打断。
   // 判断依据是「这次真的发给模型的上下文里还有没有改之前的消息」，
   // 不是「改完之后聊了几条」——以前按 30 条算，聊得快的时候早就打回原形了。
+  let personaReminder = '';
   const personaChangedAt = Number(friend.personaChangedAt) || 0;
   if (personaChangedAt) {
     const ctxN = Math.max(6, Number(s.contextLimit) || 60);
@@ -2261,6 +2262,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
       .slice(-ctxN);
     const stale = !tail.length || tail.some((m) => (Number(m.ts) || 0) < personaChangedAt);
     if (stale) {
+      personaReminder = '【设定刚更新过】你现在的人设是刚改的，以这段为准，历史里你以前的说话方式作废：\n'
+        + String(friend.persona || '').slice(0, 1200);
       sys += '\n\n【设定刚更新过】上面这段人设是刚改的，以它为准。'
         + '历史里你以前的说话方式、口癖、称呼、性格都作废，只当成发生过的事实，'
         + '不要模仿你以前怎么说话，也不要提「我变了」这件事。从这一条开始就是新人设。';
@@ -2284,12 +2287,6 @@ function buildMessages(friend, conv, nudge, imgMap) {
   // 画图：不是「聊够多少轮就画」，而是由具体的事情触发
   const canDraw = fs(friend, 'doodle', s.doodle !== false);
   const stk = stickers();
-  const stkList = stk.filter((x) => x.tags && x.tags.length).slice(0, 12).map((x) => {
-    const kw = x.tags.join('/');
-    const d = (x.desc || '').slice(0, 14);
-    return d ? kw + '=' + d : kw;
-  });
-  const stkTags = [...new Set(stk.flatMap((x) => x.tags || []))].slice(0, 40);
   const chance = Math.max(0, Math.min(100, Number(s.stickerChance ?? 25)));
   // 关键词必发（逗号分隔）：说到就发，不看概率。和概率是两套并行的规则：
   //   概率 30 + 关键词「生气」→ 平时 30% 随机发，你说「生气」时必发；
@@ -2300,6 +2297,18 @@ function buildMessages(friend, conv, nudge, imgMap) {
     .find((m) => m.role === 'user' && !m.recalled);
   const lastUserText = (lastUserMsg && lastUserMsg.text) || '';
   const hitTrigger = stickerTriggers.find((w) => w && lastUserText.includes(w)) || '';
+  const usableStk = stk.filter((x) => x.tags && x.tags.length);
+  const stkHit = (x) => hitTrigger && (x.tags || []).some((t) => t && (t.includes(hitTrigger) || hitTrigger.includes(t)));
+  const stkList = [...usableStk]
+    .sort((a, b) => (stkHit(b) ? 1 : 0) - (stkHit(a) ? 1 : 0)
+      || (Number(b.ts) || 0) - (Number(a.ts) || 0))
+    .slice(0, 20)
+    .map((x) => {
+      const kw = x.tags.join('/');
+      const d = (x.desc || '').slice(0, 14);
+      return d ? kw + '=' + d : kw;
+    });
+  const stkTags = [...new Set(stk.flatMap((x) => x.tags || []))].slice(0, 60);
   // 每回合真掷一次骰子：不进就完全不提表情包，模型没有机会硬发；
   // 进了就由代码兜底（deliver 会补一张），不能只靠模型自己想起来写标记。
   const stickerRoll = Math.random() * 100 < chance;
@@ -2421,6 +2430,7 @@ function buildMessages(friend, conv, nudge, imgMap) {
   }
 
   for (const m of prepared) out.push(m);
+  if (personaReminder) out.push({ role: 'system', content: personaReminder });
   if (nudge) out.push({ role: 'system', content: nudge });
   return out;
 }
@@ -2804,8 +2814,19 @@ function scheduleReply(kind, conv, isNew, immediate = false) {
     if (kind === 'friend' && r.job && !r.delivering) r.job.cancel('superseded');
     return;
   }
-  // 连发共用首条消息的截止时间，后续消息会由 buildMessages 一起读入。
-  if (r.phase === 'waiting') { renderReplyState(kind, conv); return; }
+  // 连发：共用这一次生成，但每多一句「多想一会儿」，截止时间小幅后移（最多 45 秒）。
+  if (r.phase === 'waiting') {
+    const cap = Math.max(Number(state.settings.delayMax) || 30, 45) * 1000;
+    const extra = 700 + Math.random() * 1100;
+    const next = Math.min(r.since + cap, (r.deadline || Date.now()) + extra);
+    if (next > (r.deadline || 0)) {
+      r.deadline = next;
+      clearTimeout(r.timer);
+      r.timer = setTimeout(() => startReply(kind, conv), Math.max(0, next - Date.now()));
+    }
+    renderReplyState(kind, conv);
+    return;
+  }
   r.since = Date.now();
   r.phase = 'waiting';
   r.stopped = false;

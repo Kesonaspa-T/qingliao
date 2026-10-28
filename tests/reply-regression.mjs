@@ -107,11 +107,12 @@ try {
     console.log('PASS ' + name); count++;
   }
   for (const gap of [1000, 3000, 8000]) {
-    await check(`连发间隔 ${gap / 1000} 秒只生成一轮，10 秒截止不后移`, `
+    await check(`连发间隔 ${gap / 1000} 秒只生成一轮，等待小幅后移`, `
       await resetCase(); await send('今天下雨了'); const due = r.deadline;
       await advance(${gap}); await send('出门记得带伞');
-      if (r.deadline !== due || chatEl.querySelector('.dots')) return false;   // 等待期不该冒出「正在输入」
-      await advance(${10000 - gap});
+      // 连发只生成一轮；等待时间允许小幅后移（模拟多想一会儿），但不超过 45 秒上限
+      if (!(r.deadline > due && r.deadline <= r.since + 45000) || chatEl.querySelector('.dots')) return false;
+      await advance(20000);
       if (jobs.length !== 1 || !JSON.stringify(jobs[0].body).includes('今天下雨了') || !JSON.stringify(jobs[0].body).includes('出门记得带伞')) return false;
       await complete(); await advance(20000);
       return f.messages.filter(m => m.role === 'peer').length === 1 && jobs.length === 1 && r.phase === 'idle' && !chatEl.querySelector('.dots');
