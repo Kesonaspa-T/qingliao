@@ -176,9 +176,10 @@ const DEFAULT_SETTINGS = {
   quietOn: true,
   quietStart: 23,
   quietEnd: 8,
-  // 她的日记 / 她自己的生活事件
+  // 她的日记 / 她自己的生活事件 / 小作文（%/天，朋友可覆盖）
   diaryOn: true,
   lifeOn: true,
+  essayChance: 15,
   // 0 = 不归档
   archiveDays: 0,
 };
@@ -242,6 +243,7 @@ let pendingEdits = { settings: {}, groups: {}, friends: {} };
 const GROUP_FIELDS = ['name', 'avatar', 'members', 'prompt', 'muted'];
 const FRIEND_FIELDS = ['name', 'avatar', 'persona', 'relations', 'dmMoment',
   'note', 'region', 'signature', 'personaChangedAt',
+  'unread', 'readAt',
   'memoryNotes', 'memoryOff', 'anniversaries', 'reminders', 'peerReadAt', 'lateReplyAt',
   'diary', 'diaryAt', 'events', 'lastLifeAt', 'nextLifeAt', 'lastAnnivKey',
   'archivedBefore', 'archivedCount'];
@@ -971,6 +973,14 @@ function renderTabBadge() {
     }
     badge.textContent = unreadChats > 99 ? '99+' : String(unreadChats);
   }
+  updateDockBadge(unreadChats);
+}
+
+/** mac 壳：Dock 角标（网页没有这个能力，走原生桥） */
+function updateDockBadge(n) {
+  const b = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.badge;
+  if (!b) return;
+  try { b.postMessage(Number(n) || 0); } catch (_) {}
 }
 
 /* ---------------- 朋友圈 ---------------- */
@@ -1364,6 +1374,8 @@ function openChat(kind, id) {
   conv.unread = 0;
   const lastSeen = lastMessage(conv);
   if (lastSeen) conv.readAt = Math.max(Number(conv.readAt) || 0, lastSeen.ts || 0);
+  // 必须把「清零」同步给服务器：否则下次拉状态又拿回旧 unread，红点永远在
+  if (kind === 'friend') rememberFriendEdit(conv, { unread: 0, readAt: conv.readAt });
   renderConversations();
 
   $('#peerName').textContent = conv.note || conv.name;
@@ -2612,6 +2624,14 @@ function friendAsleep(f) {
 
 function quietFor(f) { return quietNow() || friendAsleep(f); }
 
+function essayChanceFor(f) {
+  const own = (f && f.settings) || {};
+  if (own.essay === false) return 0;
+  const v = own.essayChance !== undefined ? own.essayChance : (state.settings.essayChance ?? 15);
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 15;
+}
+
 function memoryNotesOf(f) {
   return ((f && f.memoryNotes) || []).map((x) => (typeof x === 'string' ? x : (x && x.text) || ''))
     .map((x) => String(x).trim()).filter(Boolean);
@@ -2881,11 +2901,37 @@ async function groupTurn(group) {
   }
 }
 
-function notifyPeer(name, text) {
+const notifyLast = new Map();
+
+/** 新消息提醒：mac 走原生通知（会判断窗口是否在前台），浏览器退回 Web Notification。
+ *  同一个会话 15 秒内只弹一次，避免一次拆 5 条就炸 5 个通知。 */
+function notifyPeer(name, text, convId, kind) {
+  const body = String(text || '').trim().slice(0, 80);
+  if (!body) return;
+  const key = (kind || 'friend') + ':' + (convId || '');
+  const now = Date.now();
+  if (now - (notifyLast.get(key) || 0) < 15000) return;
+  notifyLast.set(key, now);
+
+  const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.notify;
+  if (bridge) {
+    try {
+      bridge.postMessage({ title: name || '轻聊', body: body, conv: convId || '', kind: kind || 'friend' });
+      return;
+    } catch (_) {}
+  }
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   if (!document.hidden) return;
-  try { new Notification(name, { body: text.slice(0, 60) }); } catch (_) {}
+  try { new Notification(name, { body: body.slice(0, 60) }); } catch (_) {}
 }
+
+/** 点通知时，mac 壳会调这个函数把对应聊天打开 */
+window.qingliaoOpenConv = function (kind, id) {
+  try {
+    if (!id) return;
+    openChat(kind === 'group' ? 'group' : 'friend', id);
+  } catch (_) {}
+};
 
 /* 在表情包库里找一张「标签出现在这段文字里」的；找不到返回 null。 */
 function findStickerByText(text) {
@@ -3010,6 +3056,7 @@ async function deliver(kind, conv, text, authorId, maxParts) {
   if (active) clearReadMark();
 
   let sentCount = 0;
+  let notifyText = '';
   for (let i = 0; i < parts.length; i += 1) {
     if (i > 0 && isActive(kind, conv.id)) {
       setStatus('对方正在输入…');
@@ -3035,6 +3082,7 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     tsCursor += 1000;
     conv.messages.push(m);
 
+    if (!notifyText && String(parts[i] || '').trim()) notifyText = String(parts[i]).trim();
     if (isActive(kind, conv.id)) renderMessage(m, { conv, kind });
     else conv.unread = (conv.unread || 0) + 1;
     sentCount += 1;
@@ -3097,9 +3145,23 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     return;
   }
 
+  // 有新消息、而且不在当前聊天里：mac 弹系统通知 / 浏览器弹 Web Notification
+  if (!isActive(kind, conv.id)) {
+    const fallback = usedStickers.length ? '[表情包]' : (files.length ? '[文件]' : '');
+    const bodyText = plainText(notifyText).slice(0, 60) || fallback;
+    if (bodyText) {
+      const title = kind === 'group' ? (conv.name || '群聊') : nameOf(authorId);
+      notifyPeer(title, kind === 'group' ? (nameOf(authorId) + '：' + bodyText) : bodyText,
+        conv.id, kind);
+    }
+  }
+
   if (isActive(kind, conv.id)) {
     setStatus('在线');
     lastTs = conv.messages[conv.messages.length - 1].ts;
+    conv.unread = 0;
+    conv.readAt = Math.max(Number(conv.readAt) || 0, lastTs);
+    if (kind === 'friend') rememberFriendEdit(conv, { unread: 0, readAt: conv.readAt });
     markRead();
   }
   // 提醒收好了：把「到点我提醒你」记进她的待办，存在服务器上（关掉 App 也会响）
@@ -3730,6 +3792,7 @@ function fillForm() {
   if ($('#fQuietEnd')) $('#fQuietEnd').value = Number(s.quietEnd ?? 8);
   if ($('#fDiary')) $('#fDiary').checked = s.diaryOn !== false;
   if ($('#fLife')) $('#fLife').checked = s.lifeOn !== false;
+  if ($('#fEssayChance')) $('#fEssayChance').value = Number(s.essayChance ?? 15);
   if ($('#fArchiveDays')) $('#fArchiveDays').value = Number(s.archiveDays) || 0;
   syncChips();
 }
@@ -3794,6 +3857,7 @@ function saveForm() {
   if ($('#fQuietEnd')) s.quietEnd = Math.max(0, Math.min(23, Number($('#fQuietEnd').value) || 0));
   if ($('#fDiary')) s.diaryOn = $('#fDiary').checked;
   if ($('#fLife')) s.lifeOn = $('#fLife').checked;
+  if ($('#fEssayChance')) s.essayChance = Math.max(0, Math.min(100, Number($('#fEssayChance').value) || 0));
   if ($('#fArchiveDays')) s.archiveDays = Math.max(0, Math.min(3650, Number($('#fArchiveDays').value) || 0));
   const patch = changedFields(before, s, Object.keys(s));
   const dirty = Object.keys(patch).length > 0;
@@ -4329,8 +4393,9 @@ function renderFriendRhythm(target, isMe) {
       + '<label class="field row-inline"><span>会主动找我</span><input id="rProactive" type="checkbox" class="switch"></label>'
       + '<label class="field row-inline"><span>每天早晚问候</span><input id="rGreet" type="checkbox" class="switch"></label>'
       + '<label class="field row-inline"><span>她会画图</span><input id="rDoodle" type="checkbox" class="switch"></label>'
-      + '<label class="field row-inline"><span>偶尔发篇小作文</span><input id="rEssay" type="checkbox" class="switch"></label>'
-      + '<p class="hint">很偶尔（大约一周一次，8:00-23:00）：她主动发一段 300~600 字的长消息，不用你先说话。</p>'
+      + '<label class="field"><span>小作文概率（%/天）</span><input id="rEssayChance" type="number" min="0" max="100" step="5" placeholder="跟随全局 15"></label>'
+      + '<p class="hint">每天 9:00-22:00 按这个概率写一篇 300~600 字的长消息；0 = 关，100 = 每天写。</p>'
+      + '<button type="button" class="ghost" id="btnEssayNow">让她现在写一篇</button>'
       + '<label class="field col"><span>下一条主动消息发什么（只生效一次）</span>'
       + '<input id="rNextProactive" type="text" maxlength="300" placeholder="例：发一篇特别抒情的长文章给我"></label>'
       + '<p class="hint">填了之后，她下次主动找你时一定按这个写；用掉自动清空。留空＝她自己决定。</p>'
@@ -4376,7 +4441,8 @@ function renderFriendRhythm(target, isMe) {
         rememberFriendEdit(f, { anniversaries: f.anniversaries });
         persist();
         renderAnnivList(f);
-      } else if (btn.id === 'btnMemory') openMemorySheet(f);
+      } else if (btn.id === 'btnEssayNow') { writeEssayNow(f); }
+      else if (btn.id === 'btnMemory') openMemorySheet(f);
       else if (btn.id === 'btnDiaryBook') openDiarySheet(f);
       else if (btn.id === 'btnRoleCard') exportRoleCard(f);
     });
@@ -4395,7 +4461,7 @@ function renderFriendRhythm(target, isMe) {
   chk('rProactive', own.proactive, true);
   chk('rGreet', own.greet, true);
   chk('rDoodle', own.doodle, true);
-  chk('rEssay', own.essay, false);
+  set('rEssayChance', own.essayChance !== undefined ? own.essayChance : (own.essay === false ? 0 : undefined));
   chk('rDiary', own.diary, true);
   set('rNextProactive', own.nextProactive);
   renderAnnivList(target);
@@ -4451,7 +4517,7 @@ function readFriendRhythm() {
     proactive: document.getElementById('rProactive').checked,
     greet: document.getElementById('rGreet').checked,
     doodle: document.getElementById('rDoodle').checked,
-    essay: document.getElementById('rEssay').checked,
+    essayChance: num('rEssayChance'),
     diary: document.getElementById('rDiary').checked,
     nextProactive: (document.getElementById('rNextProactive').value || '').trim() || undefined,
   };
@@ -4460,9 +4526,9 @@ function readFriendRhythm() {
 }
 
 const FRIEND_RHYTHM_KEYS = ['bursts', 'delayMin', 'delayMax', 'nudgeAfter',
-  'momentInterval', 'proactive', 'greet', 'doodle', 'essay', 'diary',
+  'momentInterval', 'proactive', 'greet', 'doodle', 'essayChance', 'diary',
   'wake', 'sleep', 'nextProactive'];
-const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true, essay: false, diary: true };
+const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true, essayChance: 15, diary: true };
 
 /** 面板上的值 vs 这个好友当前的 settings → 只给出真正变了的那几项。 */
 function friendSettingsPatch(friend, want) {
@@ -4661,6 +4727,8 @@ $('#btnFSave').addEventListener('click', () => {
     const dmMoment = $('#fDm').checked;
     if ((f.dmMoment !== false) !== dmMoment) patch.dmMoment = dmMoment;
     const settingsPatch = friendSettingsPatch(f, rhythm);
+    // 小作文改成概率后，旧的 essay 布尔值作废；保存一次就清掉
+    settingsPatch.essay = null;
     if (Object.keys(settingsPatch).length) patch.settings = settingsPatch;
 
     f.name = name;
@@ -4701,6 +4769,7 @@ function clearFriendChat(f) {
   f.messages = [];
   f.unread = 0;
   f.readAt = Date.now();
+  rememberFriendEdit(f, { unread: 0, readAt: f.readAt });
   rt.delete(convKey('friend', f.id));
   if (isActive('friend', f.id)) closeChat();
   renderConversations();
@@ -6031,6 +6100,26 @@ async function genDiaryLocal(f) {
   return cleanBlock(await quickChat([{ role: 'system', content: sys }]), 520);
 }
 
+/** 朋友资料里的「让她现在写一篇」：不依赖概率，方便确认效果。 */
+async function writeEssayNow(f) {
+  if (!f) return;
+  if (!(state.settings.apiKey || '').trim()) return toast('还没填 API Key');
+  toast('她正在写…', 30000);
+  let txt = '';
+  try { txt = await genEssayLocal(f); } catch (_) {}
+  if (!txt) return toast('这次没写出来');
+  f.messages = f.messages || [];
+  f.messages.push({
+    id: uid('m'), role: 'peer', authorId: f.id, text: txt, ts: Date.now(), essay: true,
+  });
+  f.lastEssayAt = Date.now();
+  if (isActive('friend', f.id)) { renderChat(); scrollBottom(true); markRead(); }
+  else f.unread = (f.unread || 0) + 1;
+  persist();
+  renderConversations();
+  toast('写好了，去聊天里看');
+}
+
 async function clientSocialTick(force) {
   if (isCloud() && !force) return;   // 云端模式这些活由服务器干
   if (!(state.settings.apiKey || '').trim()) return;
@@ -6146,41 +6235,37 @@ async function clientSocialTick(force) {
     changed = true;
   }
 
-  // 偶尔一篇小作文（单机模式；云端由服务端排期）
+  // 小作文（单机模式）：每天 9:00-22:00 按概率掷一次，每人每天最多一篇
   if (!isCloud()) {
     const nowMs = Date.now();
-    const hourNow = new Date().getHours();
-    for (const f of state.friends) {
-      const own = f.settings || {};
-      if (!own.essay) continue;
-      if (quietFor(f)) continue;
-      const ne = Number(f.nextEssayAt) || 0;
-      if (!ne) {
-        f.nextEssayAt = nowMs + (2 + Math.random() * 2) * 86400000;
+    const d = new Date();
+    const hourNow = d.getHours();
+    const todayKey = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    if (!quiet && hourNow >= 9 && hourNow <= 22) {
+      for (const f of state.friends) {
+        const chance = essayChanceFor(f);
+        if (chance <= 0) continue;
+        if ((f.essayRollDay || '') === todayKey) continue;
+        if (Number(f.lastEssayAt) >= dayStart) continue;
+        if (quietFor(f)) continue;
+        f.essayRollDay = todayKey;
         changed = true;
-        continue;
+        if (Math.random() * 100 >= chance) continue;
+        try {
+          const txt = await genEssayLocal(f);
+          if (txt) {
+            f.messages = f.messages || [];
+            f.messages.push({
+              id: uid('m'), role: 'peer', authorId: f.id, text: txt, ts: Date.now(), essay: true,
+            });
+            f.unread = (f.unread || 0) + 1;
+            f.lastEssayAt = Date.now();
+            changed = true;
+          }
+        } catch (_) {}
+        break;
       }
-      if (nowMs < ne) continue;
-      if (f.lastEssayAt && nowMs - f.lastEssayAt < 3 * 86400000) {
-        f.nextEssayAt = nowMs + 86400000;
-        changed = true;
-        continue;
-      }
-      if (hourNow < 8 || hourNow > 23) continue;
-      try {
-        const txt = await genEssayLocal(f);
-        if (txt) {
-          f.messages = f.messages || [];
-          f.messages.push({
-            id: uid('m'), role: 'peer', authorId: f.id, text: txt, ts: Date.now(), essay: true,
-          });
-          f.unread = (f.unread || 0) + 1;
-          f.lastEssayAt = Date.now();
-          f.nextEssayAt = Date.now() + (5 + Math.random() * 4) * 86400000;
-          changed = true;
-        }
-      } catch (_) {}
-      break;
     }
   }
 
@@ -6370,6 +6455,16 @@ function mergeRemote(remote) {
         local.messages.push(m);
         if (m.role !== 'user' && !isActive(kind, local.id) && (m.ts || 0) > readAt) {
           local.unread = (local.unread || 0) + 1;
+        }
+        if (m.role !== 'user' && !isActive(kind, local.id)
+            && Date.now() - (m.ts || 0) < 10 * 60 * 1000) {
+          const txt = m.text ? plainText(m.text).slice(0, 60)
+            : (m.image ? '[图片]' : (m.file ? '[文件]' : ''));
+          if (txt) {
+            const title = kind === 'group' ? (local.name || '群聊') : nameOf(m.authorId || local.id);
+            notifyPeer(title, kind === 'group' ? (nameOf(m.authorId) + '：' + txt) : txt,
+              local.id, kind);
+          }
         }
         changed = true; hit = true;
       }
@@ -6973,9 +7068,9 @@ function normalizeFriend(raw) {
     'note', 'region', 'signature', 'personaChangedAt',
     // 她记得的事 / 纪念日 / 提醒 / 已读 / 日记 / 她的生活 / 归档水位线
     'memoryNotes', 'memoryOff', 'anniversaries', 'reminders',
-    'peerReadAt', 'lateReplyAt',
+    'peerReadAt', 'lateReplyAt', 'readAt',
     'diary', 'diaryAt', 'events', 'lastLifeAt', 'nextLifeAt', 'lastAnnivKey',
-    'archivedBefore', 'archivedCount']) {
+    'archivedBefore', 'archivedCount', 'essayRollDay']) {
     if (raw && raw[key] !== undefined && raw[key] !== null) f[key] = raw[key];
   }
   f.messages = (f.messages || []).map((m) => ({

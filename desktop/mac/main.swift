@@ -1,5 +1,6 @@
 import Cocoa
 import WebKit
+import UserNotifications
 
 let DEFAULT_SERVER = "http://127.0.0.1:8777"
 
@@ -72,11 +73,69 @@ final class SaveFileHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// 网页 → 系统通知 / Dock 角标（WKWebView 不支持 Web Notification，只能走原生）
+final class NotifyHandler: NSObject, WKScriptMessageHandler, UNUserNotificationCenterDelegate {
+    weak var web: WKWebView?
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        switch message.name {
+        case "notify":
+            guard let body = message.body as? [String: Any] else { return }
+            // 窗口在前台就不打扰；最小化/切到别的 App 才弹
+            if NSApp.isActive {
+                let win = NSApp.keyWindow
+                if win?.isVisible == true && win?.isMiniaturized != true { return }
+            }
+            let content = UNMutableNotificationContent()
+            content.title = (body["title"] as? String) ?? "轻聊"
+            content.body = (body["body"] as? String) ?? ""
+            content.sound = .default
+            content.userInfo = [
+                "conv": (body["conv"] as? String) ?? "",
+                "kind": (body["kind"] as? String) ?? "friend",
+            ]
+            let req = UNNotificationRequest(identifier: UUID().uuidString,
+                                            content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+        case "badge":
+            let n = (message.body as? NSNumber)?.intValue ?? 0
+            NSApp.dockTile.badgeLabel = n > 0 ? String(n) : nil
+        default:
+            break
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler:
+                                @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let info = response.notification.request.content.userInfo
+        let conv = (info["conv"] as? String) ?? ""
+        let kind = (info["kind"] as? String) ?? "friend"
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        if !conv.isEmpty, let w = web {
+            let safe = conv.replacingOccurrences(of: "'", with: "")
+            let js = "window.qingliaoOpenConv && window.qingliaoOpenConv('\(kind)','\(safe)')"
+            w.evaluateJavaScript(js, completionHandler: nil)
+        }
+        completionHandler()
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     let navigator = Navigator()
     let saveFileHandler = SaveFileHandler()
+    let notifyHandler = NotifyHandler()
     var localServer: LocalWebServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -94,7 +153,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.userContentController.add(saveFileHandler, name: "saveFile")
+        config.userContentController.add(notifyHandler, name: "notify")
+        config.userContentController.add(notifyHandler, name: "badge")
         webView = WKWebView(frame: rect, configuration: config)
+        notifyHandler.web = webView
+        UNUserNotificationCenter.current().delegate = notifyHandler
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = navigator
         webView.uiDelegate = self

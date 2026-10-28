@@ -218,6 +218,8 @@
           <label class="field"><span>群聊每人最多几条</span><input id="fGroupBursts" type="number" min="1" max="10" step="1"></label>
           <label class="field"><span>群里一轮总共最多几条</span><input id="fGroupRound" type="number" min="1" max="60" step="1"></label>
           <p class="hint">她一次回复会拆成 1 到这么多条气泡。群聊里 @ 谁，谁就接着说。</p>
+          <label class="field"><span>小作文概率（%/天，默认）</span><input id="fEssayChance" type="number" min="0" max="100" step="5"></label>
+          <p class="hint">每个朋友可以单独覆盖；0 = 关，100 = 每天一篇。默认 15，大约一周一篇。</p>
         </div>
 
         <div class="group">
@@ -531,6 +533,6 @@
   </div>
 </div>
 
-<script src="app.js?v=64"></script>
+<script src="app.js?v=65"></script>
 </body>
 </html>

@@ -105,6 +105,7 @@ ok('设置新开关保存', (await ev(`(() => {
   document.getElementById('fLate').checked = true;
   document.getElementById('fLateChance').value = '5';
   document.getElementById('fLateMax').value = '5';
+  document.getElementById('fEssayChance').value = '20';
   document.getElementById('fQuiet').checked = true;
   document.getElementById('fQuietStart').value = '23';
   document.getElementById('fQuietEnd').value = '8';
@@ -115,6 +116,7 @@ ok('设置新开关保存', (await ev(`(() => {
   const s = state.settings;
   return s.recallOn === true && s.recallChance === 20 && s.rewordOn === true
     && s.rewordChance === 10 && s.lateOn === true && s.lateChance === 5 && s.lateMaxMin === 5
+    && s.essayChance === 20
     && s.quietOn === true && s.quietStart === 23 && s.quietEnd === 8
     && s.diaryOn === true && s.lifeOn === true && s.archiveDays === 30;
 })()`)) === true);
@@ -159,6 +161,41 @@ const replied = await waitFor(`(state.friends.find(f => f.id === window.__fid).m
 const logAfter = (() => { try { return readFileSync('/tmp/mockllm.log', 'utf8'); } catch (_) { return ''; } })();
 ok('收到回复', !!replied);
 ok('手写的记忆进了提示词', logAfter.includes(note), logAfter.slice(-300));
+
+// 已读：打开会话后 unread 要写回服务器，否则重启又冒红点
+ok('已读后服务器 unread 清零', (await ev(`(async () => {
+  const f = friendById(window.__fid);
+  f.unread = 7;
+  openChat('friend', f.id);
+  await sleep(1500);
+  const s = await (await apiFetch('/api/state')).json();
+  const rf = (s.friends || []).find(x => x.id === f.id);
+  return f.unread === 0 && rf && rf.unread === 0 && Number(rf.readAt) > 0;
+})()`)) === true);
+
+// 小作文：概率可调 + 手动写一篇
+ok('小作文概率可调、能手动写一篇', (await ev(`(async () => {
+  const f = friendById(window.__fid);
+  f.settings = Object.assign({}, f.settings, { essayChance: 0 });
+  const zero = essayChanceFor(f) === 0;
+  await writeEssayNow(f);
+  return zero && f.messages.some(m => m.essay);
+})()`)) === true);
+
+// mac 通知桥：notify / badge 能收到
+ok('mac 通知桥和 Dock 角标', (await ev(`(() => {
+  const sent = [];
+  const oldWk = window.webkit;
+  window.webkit = { messageHandlers: {
+    notify: { postMessage: (m) => sent.push(Object.assign({ type: 'notify' }, m)) },
+    badge: { postMessage: (n) => sent.push({ type: 'badge', n }) },
+  } };
+  notifyPeer('小满', '测试通知', 'conv1', 'friend');
+  updateDockBadge(3);
+  window.webkit = oldWk;
+  return sent.some(x => x.type === 'notify' && x.title === '小满')
+    && sent.some(x => x.type === 'badge' && x.n === 3);
+})()`)) === true);
 
 // 提醒：她写的协议要被收进提醒列表、不能漏成正文
 ok('提醒协议被解析', (await ev(`(async () => {
@@ -341,6 +378,18 @@ ok('归档按钮不报错', (await ev(`(async () => {
   window.confirm = () => false;
   try { await archiveNow(); } finally { window.confirm = o; }
   return true;
+})()`)) === true);
+
+// 刷新一次：已经读过的会话不该再冒红点
+await ev('location.reload(); true');
+await sleep(4000);
+ok('重开后已读不再冒红点', (await ev(`(() => {
+  const rows = [...document.querySelectorAll('#convList .conv')];
+  const row = rows.find((el) => {
+    const n = el.querySelector('.conv-name');
+    return n && n.textContent === '小满';
+  });
+  return !!row && !row.querySelector('.unread');
 })()`)) === true);
 
 // ---------- 单机模式：localStorage → IndexedDB 迁移 + 落盘 ----------

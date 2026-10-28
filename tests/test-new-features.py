@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import datetime
+import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP = tempfile.mkdtemp(prefix="ql-test-")
@@ -242,6 +243,68 @@ mf = merged["friends"][0]
 ids = [m["id"] for m in mf["messages"]]
 ok("恢复会整份替换消息", ids == ["y"], ids)
 ok("恢复带回记忆和日记", mf.get("memory") == "备份里的记忆" and mf.get("diary"), mf.get("memory"))
+
+# ---------- 已读：客户端能把 unread 清零 / readAt 推上去 ----------
+
+u4 = "u_read"
+st = srv.default_state()
+st["friends"] = [{"id": "fr", "name": "A", "persona": "p", "createdAt": 1,
+                  "messages": [{"id": "m1", "role": "user", "text": "hi", "ts": 5}],
+                  "unread": 7, "readAt": 0}]
+srv.save_state(st, u4)
+inc = {"id": "fr", "unread": 0, "readAt": 1700000000000}
+merged = srv.merge_state(srv.load_state(u4), {"friends": [inc],
+                                              "_edits": {"friends": {"fr": inc}}})
+mf = merged["friends"][0]
+ok("客户端能清零 unread / 写 readAt", mf.get("unread") == 0 and mf.get("readAt") == 1700000000000,
+   (mf.get("unread"), mf.get("readAt")))
+
+# ---------- 小作文：每天按概率掷一次 ----------
+
+make_state("u_essay", essayChance=100)
+st = srv.load_state("u_essay")
+st["friends"][0]["settings"] = {"essayChance": 100}
+st["friends"][0]["lastEssayAt"] = 0
+st["friends"][0]["essayRollDay"] = ""
+srv.save_state(st, "u_essay")
+
+real_dt = srv.datetime
+class _FD(real_dt.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 10, 28, 12, 0, 0)
+class _FDate(real_dt.date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 10, 28)
+srv.datetime = types.SimpleNamespace(datetime=_FD, date=_FDate,
+                                     time=real_dt.time, timedelta=real_dt.timedelta)
+orig_essay = srv.gen_essay
+srv.gen_essay = lambda *a, **k: "这是一篇测试小作文。" * 20
+try:
+    srv.social_tick("u_essay")
+    st = srv.load_state("u_essay")
+    n1 = len([m for m in st["friends"][0]["messages"] if m.get("essay")])
+    srv.social_tick("u_essay")
+    st = srv.load_state("u_essay")
+    n2 = len([m for m in st["friends"][0]["messages"] if m.get("essay")])
+    ok("小作文概率 100% 当天写一篇且只写一篇", n1 == 1 and n2 == 1, (n1, n2))
+finally:
+    srv.gen_essay = orig_essay
+
+make_state("u_essay0", essayChance=0)
+st = srv.load_state("u_essay0")
+st["friends"][0]["settings"] = {"essayChance": 0}
+st["friends"][0]["lastEssayAt"] = 0
+srv.save_state(st, "u_essay0")
+srv.gen_essay = lambda *a, **k: "不该出现的小作文"
+try:
+    srv.social_tick("u_essay0")
+    st = srv.load_state("u_essay0")
+    ok("小作文概率 0 不写", not any(m.get("essay") for m in st["friends"][0]["messages"]))
+finally:
+    srv.gen_essay = orig_essay
+    srv.datetime = real_dt
 
 shutil.rmtree(TMP, ignore_errors=True)
 print()

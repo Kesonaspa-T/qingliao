@@ -3,7 +3,7 @@
 > 给下一个接手的人（或 agent）。
 > 这份文档讲清楚：**提示词分成哪几段、写在哪、哪些能让用户改、哪些绝对不能动**。
 
-版本：服务端 build `v35`，前端 `app.js?v=64` / `style.css?v=29`。
+版本：服务端 build `v36`，前端 `app.js?v=65` / `style.css?v=29`。
 
 ---
 
@@ -104,10 +104,14 @@
 
 ### 小作文（`gen_essay` / `genEssayLocal`）
 
-每人一个开关（朋友资料 →「偶尔发篇小作文」，`friend.settings.essay`）：
-- 服务端 `social_tick` 排期：`nextEssayAt` 首次 = now + 2~4 天，之后 5~9 天；
-  触发条件还要 `lastEssayAt` 至少 3 天前、且 8:00–23:00；
-- 单机版 `clientSocialTick` 里同样的规则（`genEssayLocal`）；
+1.4.51 起改成「每天按概率掷一次」，不再用 `nextEssayAt` 的长排期：
+
+- 全局 `settings.essayChance`（0~100，默认 15）；`friend.settings.essayChance` 可单独覆盖；
+  老字段 `friend.settings.essay === false` 视为 0（保存朋友资料时会清掉这个旧键）；
+- 服务端 `social_tick`：每天 9:00–22:00 掷一次，`essayRollDay` 记「今天掷过了」，
+  `lastEssayAt` 是当天 0 点之后也跳过；每人每天最多一篇；
+- 单机版 `clientSocialTick` 同样的规则（`genEssayLocal`）；
+- 朋友资料里的「让她现在写一篇」走 `writeEssayNow(f)`，不掷概率，方便验收；
 - 要求：300~600 字、2~4 段、第一人称、不要提问/大道理/标题；
 - 消息带 `essay: true`，只是长消息，不占正常主动消息的节流。
 

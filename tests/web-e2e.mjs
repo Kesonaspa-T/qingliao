@@ -79,8 +79,8 @@ ok('链接正文进了提示词', logText.includes('Example Domain') && logText.
 await ev(`(() => { openPromptSheet(); document.getElementById('prChat').value='一条只说一句'; document.getElementById('btnPrClose').click(); return 'x'; })()`);
 ok('提示词关闭即保存', (await ev(`state.settings.prompts.chat==='一条只说一句'`))===true);
 
-await ev(`(() => { openFriendSheet(friendById(window.__fid),'edit'); const b=document.getElementById('rEssay'); if(!b) return 'no'; b.checked=true; document.getElementById('btnFSave').click(); return 'ok'; })()`);
-ok('小作文开关保存', (await ev(`!!(friendById(window.__fid).settings||{}).essay`))===true);
+await ev(`(() => { openFriendSheet(friendById(window.__fid),'edit'); const b=document.getElementById('rEssayChance'); if(!b) return 'no'; b.value='30'; document.getElementById('btnFSave').click(); return 'ok'; })()`);
+ok('小作文概率保存', (await ev(`(friendById(window.__fid).settings||{}).essayChance===30`))===true);
 
 await ev(`(() => { window.confirm=()=>true; openFriendSheet(friendById(window.__fid),'edit'); document.getElementById('btnFClearChat').click(); return 'cleared'; })()`);
 ok('清空聊天记录', (await ev(`friendById(window.__fid).messages.length===0`))===true);
@@ -90,13 +90,13 @@ const st = await api('/api/state', null, TOKEN);
 const fid = await ev(`window.__fid`);
 const rf = (st.body.friends||[]).find(f=>f.id===fid) || {};
 ok('服务器落盘（朋友/小作文/提示词/清空）',
-  rf.name==='小满' && (rf.settings||{}).essay===true
+  rf.name==='小满' && (rf.settings||{}).essayChance===30
   && ((st.body.settings||{}).prompts||{}).chat==='一条只说一句'
   && (rf.messages||[]).length===0,
-  JSON.stringify({name:rf.name, essay:(rf.settings||{}).essay, prompts:(st.body.settings||{}).prompts, msgs:(rf.messages||[]).length}));
+  JSON.stringify({name:rf.name, essayChance:(rf.settings||{}).essayChance, prompts:(st.body.settings||{}).prompts, msgs:(rf.messages||[]).length}));
 
 await ev(`location.reload()`); await sleep(2600);
-ok('刷新后数据还在', (await ev(`(() => { const f=state.friends.find(x=>x.name==='小满'); return !!f && !!(f.settings||{}).essay && f.messages.length===0; })()`))===true);
+ok('刷新后数据还在', (await ev(`(() => { const f=state.friends.find(x=>x.name==='小满'); return !!f && (f.settings||{}).essayChance===30 && f.messages.length===0; })()`))===true);
 
 console.log(results.join('\n'));
 console.log('FAILS:', results.filter(r=>r.startsWith('FAIL')).length);

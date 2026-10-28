@@ -130,6 +130,8 @@ def default_state():
             # 她的日记 / 她自己的生活事件
             "diaryOn": True,
             "lifeOn": True,
+            # 小作文：每人每天按这个概率写一篇（0~100），朋友自己的设置可以覆盖
+            "essayChance": 15,
             # 0 = 不自动归档；>0 = 把这么多天前的消息挪进归档文件
             "archiveDays": 0,
         },
@@ -214,7 +216,10 @@ FRIEND_FIELDS = ("name", "avatar", "persona", "relations", "dmMoment", "settings
                  # 「她记得的事 / 纪念日 / 提醒 / 已读」这些是客户端可编辑的数据。
                  # 提醒虽然由服务端在到点时删掉，但添加/删除是用户动作，所以放在这里。
                  "memoryNotes", "memoryOff", "anniversaries", "reminders",
-                 "peerReadAt", "lateReplyAt")
+                 "peerReadAt", "lateReplyAt",
+                 # 已读位置：客户端打开会话时把 unread 清零/readAt 推进，必须能写回磁盘，
+                 # 否则一重启就从服务器拿回旧 unread，红点永远消不掉。
+                 "unread", "readAt")
 # 后台任务写入的好友字段：只有后台合并才允许更新。
 FRIEND_SERVER_FIELDS = ("unread", "lastGreet", "lastNudgeAt", "lastFallbackAt",
                         "lastEssayAt", "nextEssayAt",
@@ -226,7 +231,8 @@ FRIEND_SERVER_FIELDS = ("unread", "lastGreet", "lastNudgeAt", "lastFallbackAt",
                         "reminders",
                         # 她的日记 / 她的生活 / 纪念日 / 数据瘦身水位线
                         "diary", "diaryAt", "events", "lastLifeAt", "nextLifeAt",
-                        "lastAnnivKey", "archivedBefore", "archivedCount")
+                        "lastAnnivKey", "archivedBefore", "archivedCount",
+                        "essayRollDay")
 
 
 def _dict(x):
@@ -881,7 +887,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v35",
+                    "build": "v36",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1414,6 +1420,21 @@ def anniversary_today(friend):
         if raw[5:] == md or raw == md:
             return name
     return ""
+
+
+def essay_chance(friend, settings):
+    """小作文的日均概率（0~100）。朋友自己填了就用朋友的，否则用全局默认。"""
+    own = (friend or {}).get("settings") or {}
+    if own.get("essay") is False:
+        return 0.0
+    v = own.get("essayChance")
+    if v is None or v == "":
+        v = (settings or {}).get("essayChance", 15)
+    try:
+        v = float(v)
+    except Exception:
+        v = 15.0
+    return max(0.0, min(100.0, v))
 
 
 def _notes_for_prompt(friend):
@@ -2589,51 +2610,48 @@ def social_tick(uid="local", force=False):
                     changed = True
                 break
 
-        # 偶尔一篇小作文：每人单独开关，服务端排期（默认 5~9 天一次，8:00-23:00）
-        for f in st.get("friends") or []:
-            own = f.get("settings") or {}
-            if not own.get("essay"):
-                continue
-            if quiet_for(f, s) and not force:
-                continue
-            ne = float(f.get("nextEssayAt") or 0)
-            if ne <= 0:
-                f["nextEssayAt"] = now + random.uniform(2, 4) * 86400
-                changed = True
-                continue
-            if now < ne:
-                continue
-            if now - float(f.get("lastEssayAt") or 0) < 3 * 86400:
-                f["nextEssayAt"] = now + 86400
-                changed = True
-                continue
-            hour_now = datetime.datetime.now().hour
-            if hour_now < 8 or hour_now > 23:
-                continue
-            me_name = (st.get("me") or {}).get("name") or "对方"
-            if me_name in ("我", "对方"):
-                me_name = "对方"
-            msgs = f.get("messages") or []
-            hist = dm_history(f, me_name, msgs, 6)
-            try:
-                essay = gen_essay(f, me_name, hist, s, key, recent_msgs=msgs)
-            except Exception as e:
-                print("[social] 小作文失败：", e)
-                essay = ""
-            if essay:
-                f.setdefault("messages", []).append({
-                    "id": _nid("m"), "role": "peer", "authorId": f.get("id"),
-                    "text": essay, "ts": int(time.time() * 1000), "essay": True,
-                })
-                f["unread"] = int(f.get("unread") or 0) + 1
-                f["lastEssayAt"] = now
-                f["nextEssayAt"] = now + random.uniform(5, 9) * 86400
-                print("[social] 小作文 -> %s (%d 字)" % (f.get("name"), len(essay)), flush=True)
-                changed = True
-            else:
-                f["nextEssayAt"] = now + 86400
-                changed = True
-            break
+        # 小作文：每天 9:00-22:00 之间按概率掷一次；每人每天最多一篇
+        if not quiet:
+            now_dt = datetime.datetime.now()
+            today_key = now_dt.date().isoformat()
+            day_start = datetime.datetime.combine(now_dt.date(), datetime.time.min).timestamp()
+            if 9 <= now_dt.hour <= 22:
+                for f in st.get("friends") or []:
+                    chance = essay_chance(f, s)
+                    if chance <= 0:
+                        continue
+                    if (f.get("essayRollDay") or "") == today_key:
+                        continue
+                    if float(f.get("lastEssayAt") or 0) >= day_start:
+                        continue
+                    if quiet_for(f, s):
+                        continue
+                    # 先记「今天掷过了」，避免每 20 秒重掷一次
+                    f["essayRollDay"] = today_key
+                    changed = True
+                    if random.random() * 100 >= chance:
+                        continue
+                    me_name = (st.get("me") or {}).get("name") or "对方"
+                    if me_name in ("我", "对方"):
+                        me_name = "对方"
+                    msgs = f.get("messages") or []
+                    hist = dm_history(f, me_name, msgs, 6)
+                    try:
+                        essay = gen_essay(f, me_name, hist, s, key, recent_msgs=msgs)
+                    except Exception as e:
+                        print("[social] 小作文失败：", e)
+                        essay = ""
+                    if essay:
+                        f.setdefault("messages", []).append({
+                            "id": _nid("m"), "role": "peer", "authorId": f.get("id"),
+                            "text": essay, "ts": int(time.time() * 1000), "essay": True,
+                        })
+                        f["unread"] = int(f.get("unread") or 0) + 1
+                        f["lastEssayAt"] = now
+                        print("[social] 小作文 -> %s (%d 字, 概率 %d%%)" % (
+                            f.get("name"), len(essay), int(chance)), flush=True)
+                        changed = True
+                    break
 
         # 群里她们互相接话：轮流传，每人每轮不超过设置里的「群聊最多几条」
         me_name = (st.get("me") or {}).get("name") or "我"

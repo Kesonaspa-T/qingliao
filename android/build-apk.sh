@@ -1,7 +1,7 @@
 #!/bin/bash
 # 打 Android 包：用 ecj 编译 android/src 下的 Java，再用 d8 生成 classes.dex；编译不了才回退旧 dex。
 # 用法：./android/build-apk.sh [版本名] [versionCode]
-#   ./android/build-apk.sh 1.4.50 50
+#   ./android/build-apk.sh 1.4.51 51
 # 依赖可用环境变量覆盖：BT、AJ、JAVA、KS、DEXSRC（回退用）、ECJ（编译器 jar，缺了会尝试下载）
 set -euo pipefail
 

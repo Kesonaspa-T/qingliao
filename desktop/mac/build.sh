@@ -7,24 +7,27 @@
 set -e
 cd "$(dirname "$0")"
 
-VERSION="${1:-1.4.50}"
+VERSION="${1:-1.4.51}"
 NAME="轻聊"
 OUT="build"
 EXE="$OUT/$NAME.app/Contents/MacOS/$NAME"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/$NAME.app/Contents/MacOS" "$OUT/$NAME.app/Contents/Resources"
+# 编译缓存放 build/ 下（某些环境 ~/Library/Caches 或 /var/folders 不可写，会报 module cache 错误）
+MODCACHE="$OUT/.modcache"
+mkdir -p "$MODCACHE"
 
 # ---- 编译：默认 arm64 + x86_64，lipo 成一个包 ----
 # 注意：两个架构都显式指定 target。在 Intel Mac 上「本机编译 + x86 target」会是同一
 # 架构的两份，lipo 会报错，所以不能用「本机 + x86」这种写法。
 if [ "${ARCH:-universal}" = "native" ]; then
-  swiftc -O -o "$EXE" main.swift uidlg.swift LocalServer.swift -framework Cocoa -framework WebKit
+  swiftc -O -module-cache-path "$MODCACHE" -o "$EXE" main.swift uidlg.swift LocalServer.swift -framework Cocoa -framework WebKit -framework UserNotifications
 else
   BUILT=""
   for arch in arm64 x86_64; do
-    if swiftc -O -target "${arch}-apple-macos11" -o "$OUT/$NAME-$arch" main.swift uidlg.swift LocalServer.swift \
-         -framework Cocoa -framework WebKit 2>/dev/null; then
+    if swiftc -O -module-cache-path "$MODCACHE" -target "${arch}-apple-macos11" -o "$OUT/$NAME-$arch" main.swift uidlg.swift LocalServer.swift \
+         -framework Cocoa -framework WebKit -framework UserNotifications 2>/dev/null; then
       BUILT="$BUILT $arch"
     fi
   done
