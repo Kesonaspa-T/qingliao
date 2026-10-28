@@ -5006,7 +5006,7 @@ async function downloadBlob(blob, name) {
   if (bridge) {
     try {
       bridge.postMessage({ name, base64: await blobToBase64(blob) });
-      toast('已保存到「下载」文件夹');
+      toast('已保存到「下载」文件夹：' + name);
       return true;
     } catch (_) { /* 掉到浏览器下载 */ }
   }
@@ -5019,6 +5019,7 @@ async function downloadBlob(blob, name) {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 6000);
+    toast('已开始下载：' + name + '（浏览器默认存到「下载」）');
     return true;
   } catch (_) {
     toast('这台设备不让下载，换浏览器打开试试');
@@ -5659,7 +5660,7 @@ async function backupNow() {
   const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
   const ok = await downloadBlob(new Blob([zip], { type: 'application/zip' }),
     `轻聊备份-${stamp}.zip`);
-  if (ok) toast(`备份好了：${count} 个文件`);
+  if (ok) toast(`备份好了：${count} 个文件 → 轻聊备份-${stamp}.zip`);
 }
 
 async function restoreFromZip(file) {
@@ -5775,7 +5776,7 @@ async function archiveNow() {
 if (!document.getElementById('btnBackup')) {
   const wrap = document.createElement('div');
   wrap.className = 'menu-group';
-  wrap.innerHTML = '<button class="menu-item" id="btnBackup"><span>备份到文件（含图片）</span><b>↓</b></button>'
+  wrap.innerHTML = '<button class="menu-item" id="btnBackup"><span>备份到文件（含图片，存到「下载」）</span><b>↓</b></button>'
     + '<button class="menu-item" id="btnRestore"><span>从备份恢复</span><b>↑</b></button>'
     + '<button class="menu-item" id="btnChatBook"><span>做一本聊天书（.docx）</span><b>›</b></button>'
     + '<button class="menu-item" id="btnReminders"><span>提醒</span><b>›</b></button>'
