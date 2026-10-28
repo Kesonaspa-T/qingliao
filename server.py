@@ -390,7 +390,7 @@ def save_blob(uid, data_url):
         raw = base64.b64decode(b64, validate=False)
     except Exception:
         return None
-    if not raw or len(raw) > 8 * 1024 * 1024:
+    if not raw or len(raw) > 40 * 1024 * 1024:
         return None
     name = hashlib.sha1(raw).hexdigest() + "." + ("jpg" if ext == "jpeg" else ext)
     d = os.path.join(BLOB_DIR, uid)
@@ -897,7 +897,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v38",
+                    "build": "v39",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
