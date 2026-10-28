@@ -270,6 +270,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         webView.load(req)
     }
 
+    @objc func resetLocalData() {
+        HardReset.run(webView: webView) { [weak self] in
+            guard let self = self else { return }
+            UserDefaults.standard.set("server", forKey: "mode")
+            self.webView.load(URLRequest(url: URL(string: "about:blank")!))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.webView.load(URLRequest(url: URL(string: "about:blank")!))
+                self.changeServer()
+            }
+        }
+    }
+
     @objc func useLocalMode() {
         UserDefaults.standard.set("local", forKey: "mode")
         startLocal()
@@ -309,6 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "本机模式（不需要服务器）", action: #selector(useLocalMode), keyEquivalent: "")
         appMenu.addItem(withTitle: "服务器地址…", action: #selector(changeServer), keyEquivalent: ",")
+        appMenu.addItem(withTitle: "清空本地数据并重新登录…", action: #selector(resetLocalData), keyEquivalent: "")
         appMenu.addItem(withTitle: "重新加载首页", action: #selector(hardReload), keyEquivalent: "R")
         appMenu.addItem(withTitle: "刷新", action: #selector(reload), keyEquivalent: "r")
         appMenu.addItem(NSMenuItem.separator())

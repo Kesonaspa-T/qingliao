@@ -22,11 +22,11 @@ mkdir -p "$MODCACHE"
 # 注意：两个架构都显式指定 target。在 Intel Mac 上「本机编译 + x86 target」会是同一
 # 架构的两份，lipo 会报错，所以不能用「本机 + x86」这种写法。
 if [ "${ARCH:-universal}" = "native" ]; then
-  swiftc -O -module-cache-path "$MODCACHE" -o "$EXE" main.swift uidlg.swift LocalServer.swift -framework Cocoa -framework WebKit -framework UserNotifications
+  swiftc -O -module-cache-path "$MODCACHE" -o "$EXE" main.swift uidlg.swift LocalServer.swift HardReset.swift -framework Cocoa -framework WebKit -framework UserNotifications
 else
   BUILT=""
   for arch in arm64 x86_64; do
-    if swiftc -O -module-cache-path "$MODCACHE" -target "${arch}-apple-macos11" -o "$OUT/$NAME-$arch" main.swift uidlg.swift LocalServer.swift \
+    if swiftc -O -module-cache-path "$MODCACHE" -target "${arch}-apple-macos11" -o "$OUT/$NAME-$arch" main.swift uidlg.swift LocalServer.swift HardReset.swift \
          -framework Cocoa -framework WebKit -framework UserNotifications 2>/dev/null; then
       BUILT="$BUILT $arch"
     fi

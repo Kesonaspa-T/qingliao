@@ -10,7 +10,7 @@ OUT="build/$NAME"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "一键编译.command" build.sh main.swift uidlg.swift LocalServer.swift \
+cp "一键编译.command" build.sh main.swift uidlg.swift LocalServer.swift HardReset.swift \
    "如何打开（重要）.txt" "修复打不开.command" ../icon.png "$OUT/"
 rm -rf "$OUT/web" && cp -R ../../web "$OUT/web"
 chmod +x "$OUT/一键编译.command" "$OUT/修复打不开.command"
