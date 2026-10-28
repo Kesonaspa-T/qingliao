@@ -787,6 +787,27 @@ function fileToDataUrl(file, max, quality) {
   });
 }
 
+/** 把已有 data URL 缩小成 max 边长、JPEG 质量 quality；本来就是小图就原样返回。 */
+function resizeDataUrl(dataUrl, max, quality) {
+  return new Promise((resolve) => {
+    if (!dataUrl || !/^data:image\//i.test(dataUrl)) return resolve(dataUrl || '');
+    const img = new Image();
+    img.onload = () => {
+      const w = img.width || 1;
+      const h = img.height || 1;
+      const scale = Math.min(1, max / Math.max(w, h));
+      if (scale >= 0.999) return resolve(dataUrl);
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w * scale));
+      c.height = Math.max(1, Math.round(h * scale));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      try { resolve(c.toDataURL('image/jpeg', quality)); } catch (_) { resolve(dataUrl); }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
 function imageToDataUrl(file, max, quality) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -1827,8 +1848,10 @@ function renderMessage(msg, opts = {}) {
       bubble.classList.add('pic');
       img.className = 'pic';
     }
-    img.src = imgSrc(msg.image);
+    img.src = imgSrc(msg.thumb || msg.image);
     img.alt = '';
+    img.loading = 'lazy';
+    img.addEventListener('click', () => openLightbox(msg.image));
     bubble.append(img);
   } else if (msg.file && msg.file.name) {
     bubble.classList.add('file-bubble');
@@ -2116,8 +2139,9 @@ async function imageForModel(ref) {
     }
   }
   if (!url) return '';
-  if (/^data:image\/gif/i.test(url) || /\.gif$/i.test(ref)) return await firstFrame(url);
-  return url;
+  if (/^data:image\/gif/i.test(url) || /\.gif$/i.test(ref)) url = await firstFrame(url);
+  // 模型不需要原图：长边压到 1568、JPEG 0.85，省 token 也省上传时间
+  return await resizeDataUrl(url, 1568, 0.85);
 }
 
 /** gif 的首帧转成 jpeg（顺带缩到 512，省 token）。 */
@@ -3453,7 +3477,9 @@ async function sendImage(dataUrl) {
   const conv = currentConv();
   if (!conv) return;
   const kind = state.conv.kind;
-  const msg = { id: uid('m'), role: 'user', text: '', image: dataUrl, ts: Date.now() };
+  // 原图照旧留着（服务端会存成 blob）；聊天里先用 420px 缩略图，点开再看原图。
+  const thumb = await resizeDataUrl(dataUrl, 420, 0.72);
+  const msg = { id: uid('m'), role: 'user', text: '', image: dataUrl, thumb, ts: Date.now() };
   conv.messages.push(msg);
   clearReadMark();
   renderMessage(msg, { conv, kind });

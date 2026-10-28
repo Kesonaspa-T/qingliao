@@ -457,8 +457,12 @@ def extract_blobs(uid, st):
             if not isinstance(c, dict):
                 continue
             for m in c.get("messages") or []:
-                if isinstance(m, dict) and m.get("image"):
+                if not isinstance(m, dict):
+                    continue
+                if m.get("image"):
                     m["image"] = conv(m["image"])
+                if m.get("thumb"):
+                    m["thumb"] = conv(m["thumb"])
     for m in st.get("moments") or []:
         if not isinstance(m, dict):
             continue
@@ -897,7 +901,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v39",
+                    "build": "v40",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
