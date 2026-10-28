@@ -399,6 +399,26 @@ ok('重开后已读不再冒红点', (await ev(`(() => {
   return !!row && !row.querySelector('.unread');
 })()`)) === true);
 
+// 桌面布局：长小作文不能把中间列挤成一条
+await ev(`window.__fid = (state.friends.find(f => f.name === '小满') || {}).id; true`);
+await send('Emulation.setDeviceMetricsOverride', { width: 1180, height: 760, deviceScaleFactor: 1, mobile: false });
+await sleep(500);
+ok('桌面四栏不被长消息挤扁', (await ev(`(() => {
+  const f = friendById(window.__fid);
+  f.messages.push({ id: 'long-layout-' + Date.now(), role: 'peer', authorId: f.id,
+    text: '这是一条很长的小作文。'.repeat(120), ts: Date.now() });
+  openChat('friend', f.id);
+  const out = [];
+  for (const tab of ['msg', 'contacts', 'moments', 'me']) {
+    switchTab(tab);
+    const page = document.querySelector('.page:not([hidden])');
+    const chat = document.getElementById('pageChat');
+    if (!page || !chat) return false;
+    out.push({ tab, w: page.getBoundingClientRect().width, c: chat.getBoundingClientRect().width });
+  }
+  return out.every(x => x.w >= 300 && x.c >= 300);
+})()`)) === true);
+
 // ---------- 单机模式：localStorage → IndexedDB 迁移 + 落盘 ----------
 // 先把上一轮跑出来的本地库清干净，才能验证「迁移」本身
 await ev(`(async () => {

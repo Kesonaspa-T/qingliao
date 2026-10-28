@@ -1586,3 +1586,15 @@ html[data-theme="dark"] .file-card { background: #232629; }
   line-height: 1.65;
 }
 html[data-theme="dark"] .storage-warn { color: #ff9b90; background: rgba(255, 99, 88, .14); }
+
+/* 桌面：聊天内容再长也不能把中间列挤成一条（长小作文会触发 flex-basis:auto 的挤压） */
+@media (min-width: 900px) {
+  #pageContacts, #pageMoments, #pageMe {
+    flex: 1 1 0;
+    min-width: 300px;
+  }
+  .chat-page {
+    flex: 1 1 0;
+    min-width: 360px;
+  }
+}
