@@ -2120,7 +2120,7 @@ function buildBody(messages, withTools) {
 
 
 /** 取一张图给模型看：@blob: 先下载成 data URL；gif 只取首帧（有些接口不收 gif）。 */
-async function imageForModel(ref) {
+async function imageForModel(ref, max = 1568, quality = 0.85) {
   if (!ref) return '';
   let url = ref;
   if (ref.startsWith('@blob:')) {
@@ -2141,7 +2141,7 @@ async function imageForModel(ref) {
   if (!url) return '';
   if (/^data:image\/gif/i.test(url) || /\.gif$/i.test(ref)) url = await firstFrame(url);
   // 模型不需要原图：长边压到 1568、JPEG 0.85，省 token 也省上传时间
-  return await resizeDataUrl(url, 1568, 0.85);
+  return await resizeDataUrl(url, max, quality);
 }
 
 /** gif 的首帧转成 jpeg（顺带缩到 512，省 token）。 */
@@ -2173,7 +2173,15 @@ async function resolveImagesForModel(conv, budget = 2) {
     const m = list[i];
     if (!m.image || m.role !== 'user') continue;   // 她自己发的图不带（接口不收）
     left -= 1;
-    map.set(m.id, await imageForModel(m.image));
+    // 刚发出去的这一张：第一次给模型看原图（仅存在内存里，不落盘／不上传），
+    // 之后同一张就只用服务端存的 1568 副本，原图在第一次请求后丢掉。
+    const fresh = conv && conv.__freshImage;
+    if (fresh && fresh.id === m.id) {
+      map.set(m.id, await imageForModel(fresh.data, 4096, 0.92));
+      conv.__freshImage = null;
+    } else {
+      map.set(m.id, await imageForModel(m.image));
+    }
   }
   return map;
 }
@@ -3498,9 +3506,12 @@ async function sendImage(dataUrl) {
   const conv = currentConv();
   if (!conv) return;
   const kind = state.conv.kind;
-  // 原图照旧留着（服务端会存成 blob）；聊天里先用 420px 缩略图，点开再看原图。
+  // 原图只放内存里给第一轮模型看；落盘/同步的是 2048 压缩版（+ 420 缩略图），
+  // 这样服务器不会被 20MB 原图撑爆，第一眼又是最清楚的。
   const thumb = await resizeDataUrl(dataUrl, 420, 0.72);
-  const msg = { id: uid('m'), role: 'user', text: '', image: dataUrl, thumb, ts: Date.now() };
+  const stored = await resizeDataUrl(dataUrl, 2048, 0.9);
+  const msg = { id: uid('m'), role: 'user', text: '', image: stored, thumb, ts: Date.now() };
+  conv.__freshImage = { id: msg.id, data: dataUrl };
   conv.messages.push(msg);
   clearReadMark();
   renderMessage(msg, { conv, kind });
