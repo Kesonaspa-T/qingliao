@@ -168,6 +168,17 @@ const DEFAULT_SETTINGS = {
   idleMin: 20,
   momentInterval: 43200,
   groupReplyMax: 2,
+  // 「她会活过来」：撤回 / 改口 / 偶尔看了不回
+  alive: true,
+  // 免打扰时段（只挡她自己冒出来的消息）
+  quietOn: true,
+  quietStart: 23,
+  quietEnd: 8,
+  // 她的日记 / 她自己的生活事件
+  diaryOn: true,
+  lifeOn: true,
+  // 0 = 不归档
+  archiveDays: 0,
 };
 
 const uid = (p) => (p || '') + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -202,6 +213,11 @@ function makeFriend(o = {}) {
     dmMoment: o.dmMoment !== false,
     unread: 0,
     createdAt: o.createdAt || Date.now(),
+    // 她记得的事 / 必须记住 / 纪念日 / 提醒 / 已读
+    memoryNotes: Array.isArray(o.memoryNotes) ? o.memoryNotes : [],
+    memoryOff: !!o.memoryOff,
+    anniversaries: Array.isArray(o.anniversaries) ? o.anniversaries : [],
+    reminders: Array.isArray(o.reminders) ? o.reminders : [],
   };
 }
 
@@ -223,7 +239,10 @@ let state = defaultState();
 let pendingEdits = { settings: {}, groups: {}, friends: {} };
 const GROUP_FIELDS = ['name', 'avatar', 'members', 'prompt', 'muted'];
 const FRIEND_FIELDS = ['name', 'avatar', 'persona', 'relations', 'dmMoment',
-  'note', 'region', 'signature', 'personaChangedAt'];
+  'note', 'region', 'signature', 'personaChangedAt',
+  'memoryNotes', 'memoryOff', 'anniversaries', 'reminders', 'peerReadAt', 'lateReplyAt',
+  'diary', 'diaryAt', 'events', 'lastLifeAt', 'nextLifeAt', 'lastAnnivKey',
+  'archivedBefore', 'archivedCount'];
 
 function changedFields(before, after, fields) {
   const patch = {};
@@ -1224,6 +1243,31 @@ function renderChat() {
   }
 
   for (const m of conv.messages) renderMessage(m, { conv, kind, animate: false });
+
+  // 数据瘦身后的老消息：顶上给一个「加载更早」的入口（只在服务器模式有归档）
+  if (kind === 'friend' && conv.archivedBefore && isCloud()) {
+    const btn = document.createElement('button');
+    btn.className = 'load-earlier';
+    btn.textContent = '加载更早的消息';
+    btn.addEventListener('click', () => loadEarlier(conv, btn));
+    chatEl.prepend(btn);
+  }
+
+  // 「已读」：她看过这条了、而且还没回 —— 只在最后一条你的消息下面显示
+  const lastUser = [...conv.messages].reverse().find((m) => m.role === 'user');
+  if (lastUser && Number(conv.peerReadAt) >= Number(lastUser.ts || 0)) {
+    const idx = conv.messages.lastIndexOf(lastUser);
+    const replied = conv.messages.slice(idx + 1).some((m) => m.role !== 'user');
+    if (!replied) {
+      const row = chatEl.querySelector('.row.me[data-id="' + String(lastUser.id).replace(/"/g, '') + '"]');
+      if (row) {
+        const tag = document.createElement('div');
+        tag.className = 'read-tag';
+        tag.textContent = '已读';
+        row.append(tag);
+      }
+    }
+  }
   scrollBottom(true);
   updateFab();
 }
@@ -1918,7 +1962,7 @@ function buildMessages(friend, conv, nudge, imgMap) {
   const isGroup = conv.members && Array.isArray(conv.members);
 
   let sys = (friend.persona || DEFAULT_PERSONA).trim();
-  if (friend.memory) sys += `\n\n【你记得的事】${friend.memory}`;
+  sys += memorySysFor(friend);
   const meName = state.me.name || '我';
   sys += `\n\n【环境】现在是 ${timeOf(now.getTime())}，${weekday(now)}。你在和「${meName}」聊天，用手机。`;
   // 小模型最容易犯的错：时间对不上、一句话塞好几件事、说错了硬编。
@@ -2081,6 +2125,11 @@ function buildMessages(friend, conv, nudge, imgMap) {
     + (wantsFile
       ? '\n- 他这次已经在要文件了：这一条回复里就要把文件给出来，不要只说「我写就写」「马上写」「写短一点」。'
       : '');
+
+  // 「提醒我」：她说一句人话，后面跟一行协议；客户端收进提醒列表，到点由她开口。
+  sys += '\n\n【提醒】他让你在某个时间提醒他一件事时，正常回一句话，'
+    + '然后在最后单独一行写 [[提醒:YYYY-MM-DD HH:MM|要做的事]]（24 小时制，用【环境】的时间和日期推算）。'
+    + '没给准确时间就先问清楚（「几点呀」），别自己猜。不要跟他解释这个标记。';
 
   const bursts = isGroup
     ? Math.max(1, Math.min(10, Number(s.groupBursts) || 10))
@@ -2341,7 +2390,7 @@ async function runChat(friend, conv, r, nudge) {
 
 function rtOf(key) {
   if (!rt.has(key)) {
-    rt.set(key, { phase: 'idle', timer: null, typing: [], abort: null, queued: false, since: 0, stopped: false });
+    rt.set(key, { phase: 'idle', timer: null, typing: [], abort: null, queued: false, since: 0, stopped: false, late: false });
   }
   return rt.get(key);
 }
@@ -2365,6 +2414,53 @@ function fs(friend, key, fallback) {
   if (own !== undefined && own !== null && own !== '') return own;
   const g = state.settings[key];
   return g !== undefined ? g : fallback;
+}
+
+/** start <= hour < end，支持跨零点（23 → 8）。 */
+function hourIn(hour, start, end) {
+  const a = ((Number(start) % 24) + 24) % 24;
+  const b = ((Number(end) % 24) + 24) % 24;
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a === b) return false;
+  return a < b ? (hour >= a && hour < b) : (hour >= a || hour < b);
+}
+
+/** 设置里的免打扰时段：只挡她自己冒出来的消息。 */
+function quietNow() {
+  const s = state.settings;
+  if (!s || !s.quietOn) return false;
+  return hourIn(new Date().getHours(), s.quietStart ?? 23, s.quietEnd ?? 8);
+}
+
+/** 她的作息：wake/sleep 两个整点，留空=一直醒着。 */
+function friendAsleep(f) {
+  const own = (f && f.settings) || {};
+  if (own.wake === undefined || own.wake === null || own.wake === ''
+      || own.sleep === undefined || own.sleep === null || own.sleep === '') return false;
+  return !hourIn(new Date().getHours(), own.wake, own.sleep);
+}
+
+function quietFor(f) { return quietNow() || friendAsleep(f); }
+
+function memoryNotesOf(f) {
+  return ((f && f.memoryNotes) || []).map((x) => (typeof x === 'string' ? x : (x && x.text) || ''))
+    .map((x) => String(x).trim()).filter(Boolean);
+}
+
+function memorySysFor(f) {
+  let out = '';
+  const notes = memoryNotesOf(f);
+  if (notes.length) {
+    out += '\n\n【他明确要求你记住的事（必须遵守，不要忘）】\n'
+      + notes.slice(0, 30).map((n) => '- ' + n.slice(0, 120)).join('\n');
+  }
+  if (f && f.memory && !f.memoryOff) out += `\n\n【你记得的事】${String(f.memory).slice(0, 600)}`;
+  const evs = ((f && f.events) || []).slice(-4)
+    .map((e) => String((e && e.text) || '').trim()).filter(Boolean);
+  if (evs.length) {
+    out += '\n\n【你最近的生活（背景，不用主动汇报；聊到了可以自然带出来）】\n'
+      + evs.map((x) => '- ' + x.slice(0, 80)).join('\n');
+  }
+  return out;
 }
 
 function delayFor(friend) {
@@ -2462,13 +2558,17 @@ async function startReply(kind, conv) {
   }
 
   try {
-    const text = await runChat(friend, conv, r, r.nudge || null);
+    let text = await runChat(friend, conv, r, r.nudge || null);
     if (holder) holder.row.remove();
 
     if (!text.trim()) {
       if (r.stopped) { r.stopped = false; return; }
       throw new Error('这次没收到内容，再试一次？');
     }
+
+    // 她刚才「已读没回」：这次补一句，别让你以为她故意晾着
+    if (r.late && Math.random() < 0.75) text = '刚在忙，才看到。\n' + text;
+    r.late = false;
 
     r.stopped = false;
     await deliver(kind, conv, text, authorId);
@@ -2698,8 +2798,30 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     body = '给你写好了，文件在下面。';
   }
 
+  // 「提醒我」：[[提醒:2026-11-01 20:30|吃药]] → 收进她的提醒列表，到点由她开口。
+  // 免打扰时段也照响：时间是你自己定的。
+  const newReminders = [];
+  body = body.replace(/\[\[提醒[:：]([^\]\n]{1,80})\]\]/g, (_all, spec) => {
+    const raw = String(spec || '').trim();
+    const bar = raw.lastIndexOf('|');
+    const when = bar > 0 ? raw.slice(0, bar).trim() : raw;
+    const what = bar > 0 ? raw.slice(bar + 1).trim() : '提醒你一件事';
+    const due = parseReminderTime(when);
+    if (due && what) newReminders.push({ id: uid('rm'), text: what.slice(0, 60), dueAt: due });
+    return '';
+  }).trim();
+
   // 画了图就整条发：按行拆会把 <svg> 拆成两半，图就没了
   const parts = /<svg[\s>]/i.test(body) ? [body] : splitReply(body, limit);
+  // 她会打错字：挑一条，先发错字版，再撤回、重发正确的
+  let typoAt = -1;
+  if (kind === 'friend' && state.settings.alive && parts.length && Math.random() < 0.22) {
+    const cands = [];
+    parts.forEach((p, i) => {
+      if (String(p).length >= 4 && !/<svg[\s>]/i.test(String(p))) cands.push(i);
+    });
+    if (cands.length) typoAt = cands[Math.floor(Math.random() * cands.length)];
+  }
   const now = Date.now();
   const active = isActive(kind, conv.id);
   if (active) clearReadMark();
@@ -2709,6 +2831,21 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     if (i > 0 && isActive(kind, conv.id)) {
       setStatus('对方正在输入…');
       await sleep(380 + Math.random() * 620);
+    }
+    if (i === typoAt) {
+      const badText = typoText(parts[i]);
+      if (badText && badText !== parts[i]) {
+        const bad = { id: uid('m'), role: 'peer', authorId, text: badText, ts: Date.now() };
+        conv.messages.push(bad);
+        if (isActive(kind, conv.id)) renderMessage(bad, { conv, kind });
+        else conv.unread = (conv.unread || 0) + 1;
+        await sleep(600 + Math.random() * 700);
+        bad.recalled = true;
+        bad.text = '';
+        if (isActive(kind, conv.id)) { rememberScroll(); renderChat(); restoreScrollIfNeeded(); }
+        else renderConversations();
+        await sleep(420);
+      }
     }
     const m = { id: uid('m'), role: 'peer', authorId, text: parts[i], ts: now + i * 1000 };
     conv.messages.push(m);
@@ -2766,10 +2903,57 @@ async function deliver(kind, conv, text, authorId, maxParts) {
     lastTs = conv.messages[conv.messages.length - 1].ts;
     markRead();
   }
+  // 提醒收好了：把「到点我提醒你」记进她的待办，存在服务器上（关掉 App 也会响）
+  if (newReminders.length && owner && kind === 'friend') {
+    owner.reminders = [...(owner.reminders || []), ...newReminders].slice(-50);
+    rememberFriendEdit(owner, { reminders: owner.reminders });
+    const first = newReminders[0];
+    const d = new Date(first.dueAt);
+    toast(`好，${d.getMonth() + 1} 月 ${d.getDate()} 日 ${pad(d.getHours())}:${pad(d.getMinutes())} 提醒你`);
+  }
   lastActivity = Date.now();
   renderConversations();
   renderTabBadge();
   persist();
+}
+
+/** 「[[提醒:…]]」里的时间：支持 2026-11-01 20:30 / 20:30 / 11-01。 */
+function parseReminderTime(str) {
+  const s = String(str || '').trim();
+  const now = Date.now();
+  const ok = (t) => Number.isFinite(t) && t > now - 120000 && t < now + 800 * 86400000;
+  let m = s.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})[ T](\d{1,2}):(\d{2})/);
+  if (m) {
+    const t = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], 0).getTime();
+    return ok(t) ? t : 0;
+  }
+  m = s.match(/^(\d{1,2}):(\d{2})/);
+  if (m) {
+    const d = new Date();
+    d.setHours(+m[1], +m[2], 0, 0);
+    if (d.getTime() < now - 60000) d.setDate(d.getDate() + 1);
+    return ok(d.getTime()) ? d.getTime() : 0;
+  }
+  m = s.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (m) {
+    const t = new Date(+m[1], +m[2] - 1, +m[3], 9, 0, 0).getTime();
+    return ok(t) ? t : 0;
+  }
+  return 0;
+}
+
+/** 生成一个「像手滑打错」的版本：交换相邻两个汉字。 */
+function typoText(text) {
+  const chars = Array.from(String(text || ''));
+  if (chars.length < 4) return '';
+  for (let i = 0; i < chars.length - 1; i += 1) {
+    if (!/[\u4e00-\u9fa5]/.test(chars[i]) || !/[\u4e00-\u9fa5]/.test(chars[i + 1])) continue;
+    const out = chars.slice();
+    const t = out[i]; out[i] = out[i + 1]; out[i + 1] = t;
+    const s = out.join('');
+    if (s !== chars.join('')) return s;
+  }
+  return '';
 }
 
 function splitReply(text, limit) {
@@ -2831,7 +3015,45 @@ function afterUserMessage(kind, conv) {
     else r.queued = true;
     return;
   }
+
+  // 她上一次「已读没回」还没到点，你又发了 → 别晾着，这就回
+  if (conv.lateReplyAt) {
+    conv.lateReplyAt = 0;
+    rememberFriendEdit(conv, { lateReplyAt: 0 });
+  }
+
+  // 偶尔先看一眼、过一两分钟才回：别每次都秒回，也别每 20 条才来一次
+  if (state.settings.alive && (conv.messages || []).length >= 6 && Math.random() < 0.05) {
+    conv.peerReadAt = Date.now();
+    conv.lateReplyAt = Date.now() + 90000 + Math.random() * 180000;
+    rememberFriendEdit(conv, { peerReadAt: conv.peerReadAt, lateReplyAt: conv.lateReplyAt });
+    persist();
+    if (isActive('friend', conv.id)) { setStatus('在线'); renderChat(); }
+    return;
+  }
+
   scheduleReply(kind, conv, true);
+}
+
+/** 到点了：她终于回了（别人看着像「已读，隔了一会儿才回」）。 */
+function lateReplyTick() {
+  if (!state.settings.alive) return;
+  const now = Date.now();
+  let changed = false;
+  for (const f of state.friends) {
+    const due = Number(f.lateReplyAt) || 0;
+    if (!due || due > now) continue;
+    f.lateReplyAt = 0;
+    f.peerReadAt = now;
+    rememberFriendEdit(f, { lateReplyAt: 0, peerReadAt: now });
+    changed = true;
+    const r = rtOf(convKey('friend', f.id));
+    if (r.phase !== 'idle') { r.queued = true; continue; }
+    r.late = true;
+    scheduleReply('friend', f, true);
+    if (isActive('friend', f.id)) renderChat();
+  }
+  if (changed) persist();
 }
 
 async function send(raw) {
@@ -3109,6 +3331,8 @@ function openMenu(row, x, y) {
   const msg = conv.messages[idx];
   const regen = msgMenu.querySelector('[data-act="regen"]');
   regen.style.display = idx === conv.messages.length - 1 && msg.role === 'peer' ? '' : 'none';
+  const stkBtn = msgMenu.querySelector('[data-act="sticker"]');
+  if (stkBtn) stkBtn.style.display = msg.image ? '' : 'none';
 
   const rect = phone.getBoundingClientRect();
   msgMenu.hidden = false;
@@ -3179,6 +3403,13 @@ if (!msgMenu.querySelector('[data-act="speak"]')) {
   b.textContent = '朗读';
   msgMenu.insertBefore(b, msgMenu.querySelector('[data-act="del"]'));
 }
+// 她发的图 / 表情包 → 一键收进自己的表情包库（自动打标签）
+if (!msgMenu.querySelector('[data-act="sticker"]')) {
+  const b = document.createElement('button');
+  b.dataset.act = 'sticker';
+  b.textContent = '存为表情包';
+  msgMenu.insertBefore(b, msgMenu.querySelector('[data-act="del"]'));
+}
 
 msgMenu.addEventListener('click', async (e) => {
   const btn = e.target.closest('button');
@@ -3212,6 +3443,9 @@ msgMenu.addEventListener('click', async (e) => {
       u.lang = 'zh-CN';
       speechSynthesis.speak(u);
     } catch (_) { toast('这台设备不支持朗读'); }
+  }
+  else if (act === 'sticker') {
+    saveMsgAsSticker(msg);
   }
   else if (act === 'del') {
     conv.messages.splice(idx, 1);
@@ -3275,6 +3509,13 @@ function fillForm() {
   $('#fMomentFreq').value = Math.max(1, Math.round(freq / 60));
   $('#fProactive').checked = !!s.proactive;
   $('#fIdle').value = s.idleMin ?? 20;
+  if ($('#fAlive')) $('#fAlive').checked = s.alive !== false;
+  if ($('#fQuiet')) $('#fQuiet').checked = s.quietOn !== false;
+  if ($('#fQuietStart')) $('#fQuietStart').value = Number(s.quietStart ?? 23);
+  if ($('#fQuietEnd')) $('#fQuietEnd').value = Number(s.quietEnd ?? 8);
+  if ($('#fDiary')) $('#fDiary').checked = s.diaryOn !== false;
+  if ($('#fLife')) $('#fLife').checked = s.lifeOn !== false;
+  if ($('#fArchiveDays')) $('#fArchiveDays').value = Number(s.archiveDays) || 0;
   syncChips();
 }
 
@@ -3326,6 +3567,13 @@ function saveForm() {
   s.momentInterval = Math.max(60, (Number($('#fMomentFreq').value) || 720) * 60);
   s.proactive = $('#fProactive').checked;
   s.idleMin = Math.max(3, Number($('#fIdle').value) || 20);
+  if ($('#fAlive')) s.alive = $('#fAlive').checked;
+  if ($('#fQuiet')) s.quietOn = $('#fQuiet').checked;
+  if ($('#fQuietStart')) s.quietStart = Math.max(0, Math.min(23, Number($('#fQuietStart').value) || 0));
+  if ($('#fQuietEnd')) s.quietEnd = Math.max(0, Math.min(23, Number($('#fQuietEnd').value) || 0));
+  if ($('#fDiary')) s.diaryOn = $('#fDiary').checked;
+  if ($('#fLife')) s.lifeOn = $('#fLife').checked;
+  if ($('#fArchiveDays')) s.archiveDays = Math.max(0, Math.min(3650, Number($('#fArchiveDays').value) || 0));
   const patch = changedFields(before, s, Object.keys(s));
   const dirty = Object.keys(patch).length > 0;
   Object.assign(state.settings, patch);
@@ -3415,6 +3663,18 @@ $('#btnClearAll').addEventListener('click', () => {
   closeSheet();
   toast('已清空');
 });
+
+const archiveBtn = document.getElementById('btnArchiveNow');
+if (archiveBtn) {
+  archiveBtn.addEventListener('click', () => {
+    // 先按设置里填的天数存一次，再归档（不需要用户记得先点「完成」）
+    const val = Math.max(0, Math.min(3650, Number($('#fArchiveDays').value) || 0));
+    state.settings.archiveDays = val;
+    pendingEdits.settings.archiveDays = val;
+    persist();
+    archiveNow();
+  });
+}
 
 /* ---------------- 朋友资料 ---------------- */
 
@@ -3665,6 +3925,56 @@ async function addStickers(files) {
   toast('加好了');
 }
 
+/** blob 引用 → data URL（存表情包、备份时都要用）。 */
+async function blobToDataUrl(blob) {
+  return new Promise((resolve) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ''));
+    fr.onerror = () => resolve('');
+    fr.readAsDataURL(blob);
+  });
+}
+
+/** 聊天里她发的图 → 一键收进表情包库，顺手打标签。 */
+async function saveMsgAsSticker(msg) {
+  if (!msg || !msg.image) return toast('这条不是图片');
+  let dataUrl = msg.image;
+  if (dataUrl.startsWith('@blob:')) {
+    if (!isCloud()) return toast('这张图取不到');
+    try {
+      const res = await fetch(imgSrc(dataUrl));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const blob = await res.blob();
+      if (blob.size > 3 * 1024 * 1024) return toast('这张太大了');
+      dataUrl = await blobToDataUrl(blob);
+    } catch (_) { return toast('取不到这张图'); }
+  }
+  if (!/^data:image\//.test(dataUrl)) return toast('这条不是图片');
+  const list = stickers();
+  if (list.some((x) => x.url === dataUrl)) return toast('已经有了');
+  const tags = (msg.stickerTags || []).slice();
+  const item = { id: uid('st'), url: dataUrl, tags, desc: msg.stickerDesc || '', ts: Date.now() };
+  state.stickers = list;
+  state.stickers.push(item);
+  renderStickers();
+  renderStickerCount();
+  persist();
+  toast('存进表情包了');
+  if (!tags.length) {
+    tagSticker(dataUrl).then(async (res) => {
+      const got = (res && res.tags) || [];
+      item.tags = got.length ? got : ['表情'];
+      if (res && res.desc) item.desc = res.desc;
+      item.url = await uploadImage(dataUrl);
+      renderStickers();
+      renderStickerCount();
+      persist();
+    }).catch(() => {});
+  } else {
+    uploadImage(dataUrl).then((ref) => { item.url = ref; persist(); }).catch(() => {});
+  }
+}
+
 /* ---------------- 个人资料页 ---------------- */
 
 let profileFriendId = null;
@@ -3708,6 +4018,43 @@ function renderProfile() {
   const momentCount = (state.moments || []).filter((m) => m.authorId === f.id).length;
   $('#pfStats').textContent = `认识 ${days} 天 · 一共 ${msgs} 条消息（她说 ${hers}，你说 ${mine}）\n`
     + `画过 ${pics} 张图 · 发过 ${momentCount} 条朋友圈`;
+
+  // 她的近况 / 纪念日 + 记忆、日记入口（只建一次）
+  let life = document.getElementById('pfLife');
+  if (!life) {
+    life = document.createElement('div');
+    life.className = 'kv';
+    life.id = 'pfLife';
+    $('#pfStats').after(life);
+    const editBtn = document.getElementById('btnPfEdit');
+    if (editBtn && editBtn.parentNode) {
+      const row = document.createElement('div');
+      row.className = 'row-btns';
+      row.id = 'pfExtraBtns';
+      const mk = (id, text) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'ghost';
+        b.id = id;
+        b.textContent = text;
+        return b;
+      };
+      row.append(mk('btnPfMemory', '她记得的事'), mk('btnPfDiary', '她的日记'));
+      row.addEventListener('click', (e) => {
+        const f2 = friendById(profileFriendId);
+        if (!f2) return;
+        if (e.target.id === 'btnPfMemory') openMemorySheet(f2);
+        if (e.target.id === 'btnPfDiary') openDiarySheet(f2);
+      });
+      editBtn.parentNode.insertBefore(row, editBtn);
+    }
+  }
+  const latest = (f.events || []).slice(-1)[0];
+  const anns = (f.anniversaries || []).map((a) => `${a.name}(${String(a.date || '').slice(5)})`).slice(0, 3);
+  life.textContent = [
+    latest ? `近况：${latest.text}` : '',
+    anns.length ? `纪念日：${anns.join('、')}` : '',
+  ].filter(Boolean).join('\n');
 }
 
 function saveProfile() {
@@ -3765,9 +4112,53 @@ function renderFriendRhythm(target, isMe) {
       + '<p class="hint">很偶尔（大约一周一次，8:00-23:00）：她主动发一段 300~600 字的长消息，不用你先说话。</p>'
       + '<label class="field col"><span>下一条主动消息发什么（只生效一次）</span>'
       + '<input id="rNextProactive" type="text" maxlength="300" placeholder="例：发一篇特别抒情的长文章给我"></label>'
-      + '<p class="hint">填了之后，她下次主动找你时一定按这个写；用掉自动清空。留空＝她自己决定。</p>';
+      + '<p class="hint">填了之后，她下次主动找你时一定按这个写；用掉自动清空。留空＝她自己决定。</p>'
+      + '<div class="group-title" style="margin-top:18px">她的作息（这段时间她不发消息）</div>'
+      + '<label class="field"><span>几点醒</span><input id="rWake" type="number" min="0" max="23" step="1" placeholder="不限"></label>'
+      + '<label class="field"><span>几点睡</span><input id="rSleep" type="number" min="0" max="23" step="1" placeholder="不限"></label>'
+      + '<label class="field row-inline"><span>每天写日记</span><input id="rDiary" type="checkbox" class="switch"></label>'
+      + '<p class="hint">留空 = 全天醒着。和设置里的「夜里不打扰」叠加生效；你发消息她照回。</p>'
+      + '<div class="group-title" style="margin-top:18px">纪念日</div>'
+      + '<div id="annivList"></div>'
+      + '<div class="anniv-add">'
+      + '<input id="annivName" maxlength="16" placeholder="比如：第一次聊天">'
+      + '<input id="annivDate" type="date">'
+      + '<button type="button" class="ghost" id="btnAnnivAdd">＋ 加</button>'
+      + '</div>'
+      + '<p class="hint">到那天她会自己提起。认识第 100 / 200 / 365 / 500 / 1000 天也会自动记住。</p>'
+      + '<div class="row-btns">'
+      + '<button type="button" class="ghost" id="btnMemory">她记得的事</button>'
+      + '<button type="button" class="ghost" id="btnDiaryBook">她的日记</button>'
+      + '<button type="button" class="ghost" id="btnRoleCard">角色卡</button>'
+      + '</div>';
     const anchor = document.getElementById('relationGroup');
     anchor.parentNode.insertBefore(box, anchor);
+
+    // 用事件委托：这几个按钮是动态生成的，重新渲染时不用重新绑
+    box.addEventListener('click', (e) => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const f = friendById(editingFriendId);
+      if (!f) { toast('先保存这个人，再用这些功能'); return; }
+      if (btn.id === 'btnAnnivAdd') {
+        const name = (document.getElementById('annivName').value || '').trim();
+        const date = document.getElementById('annivDate').value || '';
+        if (!name || !date) return toast('名字和日期都要填');
+        f.anniversaries = [...(f.anniversaries || []), { id: uid('an'), name: name.slice(0, 16), date }];
+        rememberFriendEdit(f, { anniversaries: f.anniversaries });
+        persist();
+        document.getElementById('annivName').value = '';
+        renderAnnivList(f);
+        toast('加好了');
+      } else if (btn.dataset.del) {
+        f.anniversaries = (f.anniversaries || []).filter((a) => a.id !== btn.dataset.del);
+        rememberFriendEdit(f, { anniversaries: f.anniversaries });
+        persist();
+        renderAnnivList(f);
+      } else if (btn.id === 'btnMemory') openMemorySheet(f);
+      else if (btn.id === 'btnDiaryBook') openDiarySheet(f);
+      else if (btn.id === 'btnRoleCard') exportRoleCard(f);
+    });
   }
   box.style.display = isMe ? 'none' : '';
   const own = (target && target.settings) || {};
@@ -3778,11 +4169,47 @@ function renderFriendRhythm(target, isMe) {
   set('rDelayMax', own.delayMax);
   set('rNudge', own.nudgeAfter);
   set('rMomentIv', own.momentInterval ? (own.momentInterval / 3600) : undefined);
+  set('rWake', own.wake);
+  set('rSleep', own.sleep);
   chk('rProactive', own.proactive, true);
   chk('rGreet', own.greet, true);
   chk('rDoodle', own.doodle, true);
   chk('rEssay', own.essay, false);
+  chk('rDiary', own.diary, true);
   set('rNextProactive', own.nextProactive);
+  renderAnnivList(target);
+}
+
+/** 纪念日列表（在朋友资料面板里）。 */
+function renderAnnivList(f) {
+  const box = document.getElementById('annivList');
+  if (!box) return;
+  box.textContent = '';
+  const list = (f && f.anniversaries) || [];
+  if (!list.length) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = '还没有纪念日。加一个吧——她到那天会自己提起。';
+    box.append(p);
+    return;
+  }
+  for (const a of list) {
+    const row = document.createElement('div');
+    row.className = 'anniv-row';
+    const nm = document.createElement('span');
+    nm.className = 'anniv-name';
+    nm.textContent = a.name || '';
+    const dt = document.createElement('span');
+    dt.className = 'anniv-date';
+    dt.textContent = /^\d{4}-\d{2}-\d{2}$/.test(a.date || '') ? a.date.slice(5) : (a.date || '');
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'mini-btn';
+    del.textContent = '删';
+    if (a.id) del.dataset.del = a.id;
+    row.append(nm, dt, del);
+    box.append(row);
+  }
 }
 
 function readFriendRhythm() {
@@ -3798,10 +4225,13 @@ function readFriendRhythm() {
     delayMax: num('rDelayMax'),
     nudgeAfter: num('rNudge'),
     momentInterval: (() => { const h = num('rMomentIv'); return h ? Math.round(h * 3600) : undefined; })(),
+    wake: (() => { const h = num('rWake'); return h === undefined ? undefined : Math.max(0, Math.min(23, Math.round(h))); })(),
+    sleep: (() => { const h = num('rSleep'); return h === undefined ? undefined : Math.max(0, Math.min(23, Math.round(h))); })(),
     proactive: document.getElementById('rProactive').checked,
     greet: document.getElementById('rGreet').checked,
     doodle: document.getElementById('rDoodle').checked,
     essay: document.getElementById('rEssay').checked,
+    diary: document.getElementById('rDiary').checked,
     nextProactive: (document.getElementById('rNextProactive').value || '').trim() || undefined,
   };
   Object.keys(out).forEach((k) => { if (out[k] === undefined) delete out[k]; });
@@ -3809,8 +4239,9 @@ function readFriendRhythm() {
 }
 
 const FRIEND_RHYTHM_KEYS = ['bursts', 'delayMin', 'delayMax', 'nudgeAfter',
-  'momentInterval', 'proactive', 'greet', 'doodle', 'essay', 'nextProactive'];
-const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true, essay: false };
+  'momentInterval', 'proactive', 'greet', 'doodle', 'essay', 'diary',
+  'wake', 'sleep', 'nextProactive'];
+const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true, essay: false, diary: true };
 
 /** 面板上的值 vs 这个好友当前的 settings → 只给出真正变了的那几项。 */
 function friendSettingsPatch(friend, want) {
@@ -4262,50 +4693,709 @@ window.qingliaoBack = function () {
   return false;
 };
 
+/* ---------------- 记忆 / 日记 / 提醒 / 角色卡 / 聊天书 / 备份 / 归档 ---------------- */
+
+/** 动态创建一个 sheet，只建一次。 */
+function ensureSheet(id, html) {
+  let el = document.getElementById(id);
+  if (el) return el;
+  el = document.createElement('section');
+  el.className = 'sheet';
+  el.id = id;
+  el.setAttribute('aria-hidden', 'true');
+  el.innerHTML = html;
+  phone.appendChild(el);
+  // 新加的 sheet 也要纳入「关掉弹层再补刷新」的观察，否则同步会在这期间被推迟
+  try { sheetWatcher.observe(el, { attributes: true, attributeFilter: ['class'] }); } catch (_) {}
+  return el;
+}
+
+/** 通用「存成文件」：mac 壳走原生保存，其它走浏览器下载。 */
+async function downloadBlob(blob, name) {
+  const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveFile;
+  if (bridge) {
+    try {
+      bridge.postMessage({ name, base64: await blobToBase64(blob) });
+      toast('已保存到「下载」文件夹');
+      return true;
+    } catch (_) { /* 掉到浏览器下载 */ }
+  }
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 6000);
+    return true;
+  } catch (_) {
+    toast('这台设备不让下载，换浏览器打开试试');
+    return false;
+  }
+}
+
+/* ---------- 她记得的事 ---------- */
+
+let memoryFriendId = null;
+
+function openMemorySheet(f) {
+  if (!f) return;
+  memoryFriendId = f.id;
+  const el = ensureSheet('memorySheet', `
+    <header class="sheet-nav">
+      <button class="text-btn" data-close="memorySheet">关闭</button>
+      <span class="sheet-title">她记得的事</span>
+      <button class="text-btn primary" id="btnMemSave">完成</button>
+    </header>
+    <div class="sheet-body">
+      <div class="group">
+        <div class="group-title">自动记忆</div>
+        <div class="kv" id="memAuto"></div>
+        <label class="field row-inline"><span>不再自动更新记忆</span><input id="memOff" type="checkbox" class="switch"></label>
+        <p class="hint">她每 30 条消息自己总结一次。关掉后只用下面你手写的。</p>
+      </div>
+      <div class="group">
+        <div class="group-title">你必须记住的事</div>
+        <div id="memNoteList"></div>
+        <div class="anniv-add">
+          <input id="memNew" maxlength="60" placeholder="比如：我不吃香菜">
+          <button type="button" class="ghost" id="btnMemAdd">＋ 加</button>
+        </div>
+        <p class="hint">这些会直接进她的提示词，优先级比自动记忆高。她记错了就加一条纠正她。</p>
+      </div>
+    </div>`);
+  $('#memAuto').textContent = f.memory
+    ? String(f.memory)
+    : '还没有自动记忆（聊到 30 条她才会开始总结）。';
+  $('#memOff').checked = !!f.memoryOff;
+  renderMemoryNotes(f);
+  if (!el.dataset.bound) {
+    el.dataset.bound = '1';
+    el.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-close]');
+      if (t) {
+        // 关掉也保存：免得改完顺手点关闭就白改了
+        saveMemorySheet();
+        return;
+      }
+      if (e.target.id === 'btnMemAdd') {
+        const f2 = friendById(memoryFriendId);
+        if (!f2) return;
+        const inp = $('#memNew');
+        const text = (inp.value || '').trim();
+        if (!text) return;
+        f2.memoryNotes = [...(f2.memoryNotes || []), { id: uid('mn'), text: text.slice(0, 120) }];
+        rememberFriendEdit(f2, { memoryNotes: f2.memoryNotes });
+        inp.value = '';
+        renderMemoryNotes(f2);
+      } else if (e.target.dataset.delNote) {
+        const f2 = friendById(memoryFriendId);
+        if (!f2) return;
+        f2.memoryNotes = (f2.memoryNotes || []).filter((n) => n.id !== e.target.dataset.delNote);
+        rememberFriendEdit(f2, { memoryNotes: f2.memoryNotes });
+        renderMemoryNotes(f2);
+      } else if (e.target.id === 'btnMemSave') {
+        saveMemorySheet();
+      }
+    });
+  }
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+}
+
+function renderMemoryNotes(f) {
+  const box = $('#memNoteList');
+  if (!box) return;
+  box.textContent = '';
+  const notes = (f && f.memoryNotes) || [];
+  if (!notes.length) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = '还没有。加一条她必须记住的（比如你的口味、生日、不能提的事）。';
+    box.append(p);
+    return;
+  }
+  for (const n of notes) {
+    const row = document.createElement('div');
+    row.className = 'note-row';
+    const inp = document.createElement('input');
+    inp.value = n.text || '';
+    inp.maxLength = 120;
+    inp.dataset.noteId = n.id || '';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'mini-btn';
+    del.textContent = '删';
+    del.dataset.delNote = n.id || '';
+    row.append(inp, del);
+    box.append(row);
+  }
+}
+
+function saveMemorySheet() {
+  const f = friendById(memoryFriendId);
+  if (!f) return;
+  const notes = [];
+  $$('#memNoteList input').forEach((inp) => {
+    const text = (inp.value || '').trim();
+    if (text) notes.push({ id: inp.dataset.noteId || uid('mn'), text: text.slice(0, 120) });
+  });
+  f.memoryNotes = notes;
+  f.memoryOff = $('#memOff').checked;
+  rememberFriendEdit(f, { memoryNotes: notes, memoryOff: f.memoryOff });
+  persist();
+  const el = document.getElementById('memorySheet');
+  if (el) { el.classList.remove('open'); el.setAttribute('aria-hidden', 'true'); }
+  toast('记住了');
+}
+
+/* ---------- 她的日记 ---------- */
+
+function openDiarySheet(f) {
+  if (!f) return;
+  const el = ensureSheet('diarySheet', `
+    <header class="sheet-nav">
+      <button class="text-btn" data-close="diarySheet">关闭</button>
+      <span class="sheet-title">她的日记</span>
+      <span class="text-btn" style="opacity:.4">·</span>
+    </header>
+    <div class="sheet-body"><div id="diaryList"></div></div>`);
+  if (!el.dataset.bound) {
+    el.dataset.bound = '1';
+    el.addEventListener('click', (e) => {
+      if (!e.target.closest('[data-close]')) return;
+      el.classList.remove('open');
+      el.setAttribute('aria-hidden', 'true');
+    });
+  }
+  renderDiaryList(f);
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+}
+
+function renderDiaryList(f) {
+  const box = $('#diaryList');
+  if (!box) return;
+  box.textContent = '';
+  const list = (f.diary || []).slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  if (!list.length) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = '她还没写过日记。夜里 20:00-23:00 她可能写一页，写完这里就能看到。';
+    box.append(p);
+    return;
+  }
+  for (const d of list) {
+    const wrap = document.createElement('div');
+    wrap.className = 'group diary-entry';
+    const date = document.createElement('div');
+    date.className = 'diary-date';
+    const t = new Date(d.ts || Date.now());
+    date.textContent = `${t.getFullYear()} 年 ${t.getMonth() + 1} 月 ${t.getDate()} 日`;
+    const body = document.createElement('div');
+    body.className = 'diary-text';
+    body.textContent = d.text || '';
+    wrap.append(date, body);
+    box.append(wrap);
+  }
+}
+
+/* ---------- 提醒 ---------- */
+
+function allReminders() {
+  const out = [];
+  for (const f of state.friends || []) {
+    for (const r of f.reminders || []) out.push({ f, r });
+  }
+  out.sort((a, b) => (a.r.dueAt || 0) - (b.r.dueAt || 0));
+  return out;
+}
+
+function openReminderSheet() {
+  const el = ensureSheet('reminderSheet', `
+    <header class="sheet-nav">
+      <button class="text-btn" data-close="reminderSheet">关闭</button>
+      <span class="sheet-title">提醒</span>
+      <span class="text-btn" style="opacity:.4">·</span>
+    </header>
+    <div class="sheet-body"><div id="reminderList"></div></div>`);
+  if (!el.dataset.bound) {
+    el.dataset.bound = '1';
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-close]')) {
+        el.classList.remove('open');
+        el.setAttribute('aria-hidden', 'true');
+        return;
+      }
+      const del = e.target.closest('[data-del-reminder]');
+      if (!del) return;
+      const [fid, rid] = String(del.dataset.delReminder).split('|');
+      const f = friendById(fid);
+      if (!f) return;
+      f.reminders = (f.reminders || []).filter((r) => r.id !== rid);
+      rememberFriendEdit(f, { reminders: f.reminders });
+      persist();
+      renderReminders();
+    });
+  }
+  renderReminders();
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+}
+
+function renderReminders() {
+  const box = $('#reminderList');
+  if (!box) return;
+  box.textContent = '';
+  const list = allReminders();
+  if (!list.length) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = '还没有提醒。在聊天里跟她说「明天早上八点提醒我吃药」，她会记下来，到点主动提醒你。';
+    box.append(p);
+    return;
+  }
+  for (const { f, r } of list) {
+    const row = document.createElement('div');
+    row.className = 'reminder-row';
+    const main = document.createElement('div');
+    main.className = 'reminder-main';
+    const when = document.createElement('div');
+    when.className = 'reminder-time';
+    const t = new Date(r.dueAt || Date.now());
+    when.textContent = `${t.getMonth() + 1} 月 ${t.getDate()} 日 ${pad(t.getHours())}:${pad(t.getMinutes())}`;
+    const what = document.createElement('div');
+    what.className = 'reminder-what';
+    what.textContent = `${f.note || f.name} · ${r.text || ''}`;
+    main.append(when, what);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'mini-btn';
+    del.textContent = '删';
+    del.dataset.delReminder = f.id + '|' + r.id;
+    row.append(main, del);
+    box.append(row);
+  }
+}
+
+/* ---------- 角色卡 ---------- */
+
+async function exportRoleCard(f) {
+  if (!f) return;
+  let avatar = f.avatar || '';
+  if (avatar.startsWith('@blob:')) {
+    try {
+      const res = await fetch(imgSrc(avatar));
+      if (res.ok) avatar = await blobToDataUrl(await res.blob());
+    } catch (_) {}
+  }
+  const card = {
+    format: 'qingliao-card',
+    version: 1,
+    name: f.name || '',
+    avatar,
+    persona: f.persona || '',
+    settings: f.settings || {},
+    memoryNotes: f.memoryNotes || [],
+    anniversaries: f.anniversaries || [],
+    createdAt: f.createdAt || Date.now(),
+    exportedAt: Date.now(),
+  };
+  const blob = new Blob([JSON.stringify(card, null, 2)], { type: 'application/json' });
+  await downloadBlob(blob, `轻聊角色卡-${String(f.name || '角色').replace(/[\\/:*?"<>|]/g, '_')}.json`);
+  toast('角色卡导出了，发给别人就能一键导入');
+}
+
+async function importRoleCard(file) {
+  if (!file) return;
+  try {
+    const card = JSON.parse(await file.text());
+    if (!card || !card.persona) throw new Error('这不是轻聊的角色卡');
+    if (card.format && card.format !== 'qingliao-card') throw new Error('格式不对');
+    const f = makeFriend({
+      name: card.name || '新朋友',
+      avatar: card.avatar || '',
+      persona: card.persona,
+      settings: card.settings || {},
+      memoryNotes: card.memoryNotes || [],
+      anniversaries: card.anniversaries || [],
+    });
+    f.createdAt = Number(card.createdAt) || Date.now();
+    state.friends.push(f);
+    persist();
+    renderContacts();
+    renderConversations();
+    openChat('friend', f.id);
+    toast('角色卡导入了');
+  } catch (e) {
+    toast('导入失败：' + ((e && e.message) || e));
+  }
+}
+
+/* ---------- 聊天书 ---------- */
+
+function openChatBookSheet() {
+  const el = ensureSheet('bookSheet', `
+    <header class="sheet-nav">
+      <button class="text-btn" data-close="bookSheet">关闭</button>
+      <span class="sheet-title">做一本聊天书</span>
+      <button class="text-btn primary" id="btnBookMake">生成</button>
+    </header>
+    <div class="sheet-body">
+      <div class="group">
+        <label class="field"><span>哪段聊天</span><select id="bookConv"></select></label>
+        <label class="field"><span>范围</span>
+          <select id="bookRange">
+            <option value="0">全部</option>
+            <option value="90">最近 90 天</option>
+            <option value="30">最近 30 天</option>
+            <option value="7">最近 7 天</option>
+          </select>
+        </label>
+        <div class="row-btns"><button type="button" class="ghost solid" id="btnBookMake2">生成 .docx</button></div>
+        <p class="hint">打开后是一本按天分节的 Word 文档：日期、时间、谁说的、说了什么。图片和文件用一行占位。聊天多的话生成要几秒。</p>
+      </div>
+    </div>`);
+  if (!el.dataset.bound) {
+    el.dataset.bound = '1';
+    el.addEventListener('click', async (e) => {
+      if (e.target.closest('[data-close]')) {
+        el.classList.remove('open');
+        el.setAttribute('aria-hidden', 'true');
+        return;
+      }
+      if (e.target.id === 'btnBookMake' || e.target.id === 'btnBookMake2') {
+        await makeChatBook();
+      }
+    });
+  }
+  const sel = $('#bookConv');
+  sel.textContent = '';
+  for (const f of state.friends || []) {
+    const o = document.createElement('option');
+    o.value = 'friend:' + f.id;
+    o.textContent = (f.note || f.name) + '（私聊）';
+    sel.append(o);
+  }
+  for (const g of state.groups || []) {
+    const o = document.createElement('option');
+    o.value = 'group:' + g.id;
+    o.textContent = (g.name || '群聊') + '（群）';
+    sel.append(o);
+  }
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+}
+
+async function makeChatBook() {
+  const sel = $('#bookConv');
+  if (!sel || !sel.value) return toast('还没有可选的聊天');
+  const [kind, id] = sel.value.split(':');
+  const conv = kind === 'group' ? groupById(id) : friendById(id);
+  if (!conv) return toast('这个聊天不见了');
+  const days = Number($('#bookRange').value) || 0;
+  const cutoff = days ? Date.now() - days * 86400000 : 0;
+  const msgs = (conv.messages || []).filter((m) => m.ts >= cutoff && !m.recalled && m.role !== 'system');
+  if (!msgs.length) return toast('这段聊天没有内容');
+  toast('正在排版…', 8000);
+  const lines = [];
+  const title = kind === 'group' ? (conv.name || '群聊') : (conv.note || conv.name);
+  lines.push('# ' + title + ' · 聊天书');
+  const first = new Date(msgs[0].ts);
+  const last = new Date(msgs[msgs.length - 1].ts);
+  const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  lines.push(`# ${fmt(first)} ~ ${fmt(last)} · 共 ${msgs.length} 条`);
+  let lastDay = '';
+  for (const m of msgs) {
+    const d = new Date(m.ts);
+    const day = fmt(d);
+    if (day !== lastDay) {
+      lines.push('# ' + day + ' ' + weekday(d));
+      lastDay = day;
+    }
+    const who = m.role === 'user' ? (state.me.name || '我') : nameOf(m.authorId || conv.id);
+    let body = m.text || '';
+    if (m.image) body = m.sticker ? '[表情包]' : '[图片]';
+    if (m.file && m.file.name) body = '[文件：' + m.file.name + ']';
+    if (splitSvg(m.text || '')) body = '[画了一张图]';
+    body = body.replace(/\s*\n+\s*/g, ' / ').slice(0, 1200);
+    if (!body) continue;
+    lines.push(`${timeOf(m.ts)} ${who}：${body}`);
+  }
+  lines.push('');
+  lines.push('# —— 由轻聊生成 ——');
+  if (lines.length < 4) return toast('这段聊天没有可排版的内容');
+  await saveGeneratedFile({
+    name: `聊天书-${String(title || '聊天').replace(/[\\/:*?"<>|]/g, '_')}-${fmt(last)}.docx`,
+    text: lines.join('\n'),
+  });
+}
+
+/* ---------- 备份 / 恢复（zip，带图片） ---------- */
+
+function collectBlobRefs(obj, out) {
+  if (!obj) return out;
+  if (typeof obj === 'string') {
+    if (obj.startsWith('@blob:')) out.add(obj.slice(6));
+    return out;
+  }
+  if (Array.isArray(obj)) { for (const x of obj) collectBlobRefs(x, out); return out; }
+  if (typeof obj === 'object') { for (const v of Object.values(obj)) collectBlobRefs(v, out); }
+  return out;
+}
+
+async function fetchBlobBytes(name) {
+  const res = await fetch(imgSrc('@blob:' + name));
+  if (!res.ok) throw new Error('图片取不到：' + name);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+/** 读自己写的 zip（只支持 store，不压缩）。 */
+function unzipStore(buffer) {
+  const u8 = new Uint8Array(buffer);
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let eocd = -1;
+  const stop = Math.max(0, u8.length - 22 - 65535);
+  for (let i = u8.length - 22; i >= stop; i -= 1) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('不是 zip 文件');
+  const count = dv.getUint16(eocd + 10, true);
+  const cdOff = dv.getUint32(eocd + 16, true);
+  const dec = new TextDecoder();
+  const out = {};
+  let p = cdOff;
+  for (let i = 0; i < count; i += 1) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true);
+    const csize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true);
+    const extraLen = dv.getUint16(p + 30, true);
+    const commentLen = dv.getUint16(p + 32, true);
+    const localOff = dv.getUint32(p + 42, true);
+    const name = dec.decode(u8.subarray(p + 46, p + 46 + nameLen));
+    if (method !== 0) throw new Error('不支持的压缩方式：' + name);
+    const lnameLen = dv.getUint16(localOff + 26, true);
+    const lextraLen = dv.getUint16(localOff + 28, true);
+    const start = localOff + 30 + lnameLen + lextraLen;
+    out[name] = u8.slice(start, start + csize);
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+
+function replaceBlobRefs(obj, map) {
+  if (typeof obj === 'string') return map.has(obj) ? map.get(obj) : obj;
+  if (Array.isArray(obj)) {
+    for (let i = 0; i < obj.length; i += 1) obj[i] = replaceBlobRefs(obj[i], map);
+    return obj;
+  }
+  if (obj && typeof obj === 'object') {
+    for (const k of Object.keys(obj)) obj[k] = replaceBlobRefs(obj[k], map);
+  }
+  return obj;
+}
+
+async function buildBackupZip() {
+  const snap = JSON.parse(JSON.stringify(state));
+  delete snap._diag;
+  const items = [];
+  if (isCloud()) {
+    const refs = [...collectBlobRefs(snap, new Set())];
+    let done = 0;
+    for (const name of refs) {
+      try {
+        items.push({ name: 'blobs/' + name, data: await fetchBlobBytes(name) });
+      } catch (_) { /* 丢一张图不算致命 */ }
+      done += 1;
+      if (done % 10 === 0) toast(`正在打包… ${done}/${refs.length} 张图`, 60000);
+    }
+  }
+  items.unshift({ name: 'state.json', data: JSON.stringify(snap) });
+  items.push({
+    name: '说明.txt',
+    data: '轻聊备份\n\n恢复：我的 → 从文件恢复，选这个 zip。\n'
+      + '里面 state.json 是聊天数据，blobs/ 是图片。\n'
+      + '注意：备份里含 API Key，别随便发给别人。\n',
+  });
+  return { zip: zipStore(items), count: items.length };
+}
+
+async function backupNow() {
+  toast('正在打包…', 60000);
+  const { zip, count } = await buildBackupZip();
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+  const ok = await downloadBlob(new Blob([zip], { type: 'application/zip' }),
+    `轻聊备份-${stamp}.zip`);
+  if (ok) toast(`备份好了：${count} 个文件`);
+}
+
+async function restoreFromZip(file) {
+  if (!file) return;
+  if (!confirm('用这个备份覆盖当前数据？现有的会被替换。')) return;
+  try {
+    toast('正在解包…', 60000);
+    const files = unzipStore(await file.arrayBuffer());
+    const raw = files['state.json'];
+    if (!raw) throw new Error('压缩包里没有 state.json');
+    const data = JSON.parse(new TextDecoder().decode(raw));
+    if (!data || !Array.isArray(data.friends)) throw new Error('不是轻聊的备份');
+
+    const refs = [...collectBlobRefs(data, new Set())];
+    const map = new Map();
+    let done = 0;
+    for (const name of refs) {
+      const entry = files['blobs/' + name] || files['blobs/' + encodeURIComponent(name)];
+      if (!entry) continue;
+      const dataUrl = await blobToDataUrl(new Blob([entry]));
+      if (!dataUrl) continue;
+      const ref = isCloud() ? await uploadImage(dataUrl) : dataUrl;
+      map.set('@blob:' + name, ref);
+      done += 1;
+      if (done % 10 === 0) toast(`正在恢复图片… ${done}/${refs.length}`, 60000);
+    }
+    replaceBlobRefs(data, map);
+    state = migrate(data);
+    pendingEdits = importEdits(state);
+    lastRev = -1;
+    persist();
+    if (state.conv && !currentConv()) closeChat();
+    renderMe();
+    renderConversations();
+    renderContacts();
+    renderMoments();
+    renderTabBadge();
+    if (pageChat.classList.contains('open') && currentConv()) renderChat();
+    syncWake('restore');
+    toast('恢复好了');
+  } catch (e) {
+    toast('恢复失败：' + ((e && e.message) || e));
+  }
+}
+
+/* ---------- 数据瘦身 ---------- */
+
+async function loadEarlier(conv, btn) {
+  if (!isCloud()) return toast('单机模式没有归档');
+  const first = (conv.messages || [])[0];
+  const before = first ? (first.ts || Date.now()) : Date.now();
+  btn.disabled = true;
+  btn.textContent = '正在加载…';
+  try {
+    const res = await apiFetch('/api/archive?fid=' + encodeURIComponent(conv.id) + '&before=' + before + '&limit=100');
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || ('HTTP ' + res.status));
+    const list = (j.messages || []).filter((m) => m && m.id);
+    if (!list.length) {
+      btn.textContent = '没有更早的消息了';
+      btn.disabled = true;
+      return;
+    }
+    const prevH = chatEl.scrollHeight;
+    const prevTop = chatEl.scrollTop;
+    conv.messages = [...list, ...conv.messages];
+    renderChat();
+    chatEl.scrollTop = prevTop + (chatEl.scrollHeight - prevH);
+    toast(`加载了 ${list.length} 条`);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '加载更早的消息';
+    toast('加载失败：' + ((e && e.message) || e));
+  }
+}
+
+async function archiveNow() {
+  if (!isCloud()) return toast('单机模式不支持归档');
+  const days = Math.max(1, Number(state.settings.archiveDays) || 0);
+  if (!days) return toast('先在设置里填「老消息归档（天）」');
+  if (!confirm(`把 ${days} 天前的消息挪到服务器归档？\n\n聊天里还能点「加载更早」翻出来；别的设备同步会变快。`)) return;
+  try {
+    toast('正在归档…', 30000);
+    const res = await apiFetch('/api/archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days }),
+      timeout: 120000,
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || ('HTTP ' + res.status));
+    const cutoff = Number(j.cutoff) || 0;
+    let moved = 0;
+    for (const f of state.friends) {
+      const before = (f.messages || []).length;
+      f.messages = (f.messages || []).filter((m) => (m.ts || 0) >= cutoff);
+      f.archivedBefore = cutoff;
+      f.archivedCount = Number(f.archivedCount) || 0;
+      moved += before - f.messages.length;
+    }
+    lastRev = -1;
+    persist();
+    renderConversations();
+    if (pageChat.classList.contains('open') && currentConv()) renderChat();
+    toast(`归档了 ${j.archived || moved} 条消息`);
+  } catch (e) {
+    toast('归档失败：' + ((e && e.message) || e));
+  }
+}
+
 /* ---------------- 导出 ---------------- */
 
 if (!document.getElementById('btnBackup')) {
   const wrap = document.createElement('div');
   wrap.className = 'menu-group';
-  wrap.innerHTML = '<button class="menu-item" id="btnBackup"><span>备份到文件</span><b>↓</b></button>'
-    + '<button class="menu-item" id="btnRestore"><span>从文件恢复</span><b>↑</b></button>'
-    + '<input type="file" id="restoreFile" accept="application/json,.json" hidden>';
+  wrap.innerHTML = '<button class="menu-item" id="btnBackup"><span>备份到文件（含图片）</span><b>↓</b></button>'
+    + '<button class="menu-item" id="btnRestore"><span>从备份恢复</span><b>↑</b></button>'
+    + '<button class="menu-item" id="btnChatBook"><span>做一本聊天书（.docx）</span><b>›</b></button>'
+    + '<button class="menu-item" id="btnReminders"><span>提醒</span><b>›</b></button>'
+    + '<button class="menu-item" id="btnImportCard"><span>导入角色卡</span><b>›</b></button>'
+    + '<input type="file" id="restoreFile" accept="application/zip,.zip,application/json,.json" hidden>'
+    + '<input type="file" id="roleCardFile" accept="application/json,.json" hidden>';
   const anchor = document.getElementById('btnExportAll').closest('.menu-group');
   anchor.parentNode.insertBefore(wrap, anchor.nextSibling);
 
-  document.getElementById('btnBackup').addEventListener('click', () => {
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'qingliao-backup-' + new Date().toISOString().slice(0, 10) + '.json';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-    toast('备份已下载');
-  });
+  document.getElementById('btnBackup').addEventListener('click', () => { backupNow(); });
 
   document.getElementById('btnRestore').addEventListener('click', () => {
     document.getElementById('restoreFile').click();
   });
 
+  document.getElementById('btnChatBook').addEventListener('click', openChatBookSheet);
+  document.getElementById('btnReminders').addEventListener('click', openReminderSheet);
+  document.getElementById('btnImportCard').addEventListener('click', () => {
+    document.getElementById('roleCardFile').click();
+  });
+
+  document.getElementById('roleCardFile').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    await importRoleCard(file);
+  });
+
   document.getElementById('restoreFile').addEventListener('change', async (e) => {
     const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    if (!confirm('用这个备份覆盖当前数据？现有的会被替换。')) { e.target.value = ''; return; }
-    try {
-      const data = JSON.parse(await file.text());
-      if (!data || !Array.isArray(data.friends)) throw new Error('不是轻聊的备份文件');
-      state = migrate(data);
-      pendingEdits = importEdits(state);
-      persist();
-      renderMe();
-      renderConversations();
-      renderContacts();
-      renderMoments();
-      toast('已恢复');
-    } catch (err) {
-      toast('恢复失败：' + ((err && err.message) || err));
-    }
     e.target.value = '';
+    if (!file) return;
+    if (/\.json$/i.test(file.name)) {
+      // 兼容老版 JSON 备份（没图）
+      try {
+        const data = JSON.parse(await file.text());
+        if (!data || !Array.isArray(data.friends)) throw new Error('不是轻聊的备份文件');
+        if (!confirm('用这个备份覆盖当前数据？现有的会被替换。')) return;
+        state = migrate(data);
+        pendingEdits = importEdits(state);
+        lastRev = -1;
+        persist();
+        renderMe(); renderConversations(); renderContacts(); renderMoments();
+        toast('已恢复');
+      } catch (err) {
+        toast('恢复失败：' + ((err && err.message) || err));
+      }
+      return;
+    }
+    await restoreFromZip(file);
   });
 }
 
@@ -4381,8 +5471,10 @@ $('#btnExportAll').addEventListener('click', async () => {
 
 function proactiveTick() {
   if (!state.settings.proactive) return;
+  if (quietNow()) return;                 // 免打扰：不主动冒泡
   const conv = currentConv();
   if (!conv || state.conv.kind !== 'friend') return;
+  if (friendAsleep(conv)) return;         // 她按作息睡了
   const r = rtOf(convKey('friend', conv.id));
   if (r.phase !== 'idle') return;
   const last = lastMessage(conv);
@@ -4517,11 +5609,74 @@ async function genEssayLocal(f) {
   return cleanBlock(text, 900);
 }
 
+/* 单机版：她的生活小事 / 纪念日 / 提醒 / 日记 */
+
+function anniversaryToday(f) {
+  const now = new Date();
+  const created = Number(f && f.createdAt) || 0;
+  if (created) {
+    const days = Math.floor((Date.now() - created) / 86400000) + 1;
+    if ([100, 200, 300, 365, 500, 730, 1000, 1460].includes(days)) return '认识第 ' + days + ' 天';
+  }
+  const md = pad(now.getMonth() + 1) + '-' + pad(now.getDate());
+  for (const a of (f && f.anniversaries) || []) {
+    const d = String((a && a.date) || '');
+    if (d.slice(5) === md || d === md) return (a && a.name) || '纪念日';
+  }
+  return '';
+}
+
+async function genLifeLocal(f) {
+  const sys = `${f.persona || ''}\n\n${memorySysFor(f)}\n现在是 ${timeOf(Date.now())}。`
+    + '写一句今天你生活里刚发生的小事，就一句，20~45 字，具体（什么声音、什么味道、谁说的话），'
+    + '不要感想、不要升华、不要跟他有关、不要提问、不加引号。只输出这一句。';
+  return cleanLine(await quickChat([{ role: 'system', content: sys }]), 80);
+}
+
+async function genAnnivLocal(f, occasion) {
+  const meName = state.me.name || '他';
+  const sys = `${f.persona || ''}\n\n${memorySysFor(f)}\n`
+    + `【身份】「我」是你自己，「${meName}」是他。\n`
+    + `今天是「${occasion}」。你想起来这件事，主动发一条消息给他。\n`
+    + '要求：1~3 句，短，口语；可以甜、可以嘴硬、可以假装不在意；说一件具体的旧事'
+    + '（第一次聊天的某个细节、他当时说的一句话），别写祝福语、别写排比句。只输出你要发的话。';
+  return cleanBlock(await quickChat([{ role: 'system', content: sys }]), 200);
+}
+
+async function genReminderLocal(f, what) {
+  const meName = state.me.name || '他';
+  const sys = `${f.persona || ''}\n\n现在是 ${timeOf(Date.now())}。\n`
+    + `【身份】「我」是你自己，「${meName}」是他。\n`
+    + `他之前让你到点提醒他一件事：「${what}」。现在时间到了。\n`
+    + '用你自己的语气提醒他，1~2 句，20~40 字，直接说事；不要写「提醒您」「温馨提示」，不要加引号。只输出这句话。';
+  return cleanLine(await quickChat([{ role: 'system', content: sys }]), 120);
+}
+
+async function genDiaryLocal(f) {
+  const meName = state.me.name || '他';
+  const lines = (f.messages || []).slice(-6)
+    .filter((m) => (m.text || '').trim())
+    .map((m) => `${m.role === 'user' ? meName : '我'}：${String(m.text).slice(0, 50)}`);
+  const sys = `${f.persona || ''}\n\n${memorySysFor(f)}\n`
+    + `现在是 ${weekday(new Date())} ${timeOf(Date.now())}。\n`
+    + `【身份】「我」是你自己，「${meName}」是他。你只写自己的日记，不要替他说话。\n`
+    + (lines.length ? `你们最近聊过这些（只当背景，别抄原话）：\n${lines.join('\n')}\n\n` : '')
+    + '给你自己的日记写今天这一页。要求：\n'
+    + '- 150~300 字，分 2~3 段\n'
+    + '- 写今天自己遇到的一件小事，和一件因为他而起的心思\n'
+    + '- 要具体：一个画面、一句话、一个时间；可以有点小心思、抱怨、嘴硬，但别写总结和道理\n'
+    + '- 第一人称，写给自己看，不用对他说话，也不要提问\n'
+    + '- 不要写日期标题，不要「亲爱的日记」，不要堆 emoji\n'
+    + '- 只输出日记正文';
+  return cleanBlock(await quickChat([{ role: 'system', content: sys }]), 520);
+}
+
 async function clientSocialTick(force) {
   if (isCloud() && !force) return;   // 云端模式这些活由服务器干
   if (!(state.settings.apiKey || '').trim()) return;
 
   const nowSec = Date.now() / 1000;
+  const quiet = quietNow();
   let changed = false;
 
   for (const p of [...state.pending]) {
@@ -4592,9 +5747,14 @@ async function clientSocialTick(force) {
     social.nextMomentAt = nxt;
     changed = true;
   }
-  if (!isCloud() && hour >= 8 && hour <= 23 && nowSec2 >= nxt && state.friends.length) {
-    const author = state.friends[Math.floor(Math.random() * state.friends.length)];
-    try {
+  if (!isCloud() && !quiet && hour >= 8 && hour <= 23 && nowSec2 >= nxt && state.friends.length) {
+    const awake = state.friends.filter((f) => !friendAsleep(f));
+    const author = awake.length ? awake[Math.floor(Math.random() * awake.length)] : null;
+    if (!author) {
+      // 都睡了：这一轮跳过，别把她半夜的朋友圈憋到白天一起发
+      social.nextMomentAt = nowSec2 + 3600;
+      changed = true;
+    } else try {
       const chatLines = (author.messages || []).slice(-8)
         .filter((m) => (m.text || '').trim())
         .map((m) => `${m.role === 'user' ? (state.me.name || '他') : '我'}：${String(m.text).slice(0, 50)}`);
@@ -4633,6 +5793,7 @@ async function clientSocialTick(force) {
     for (const f of state.friends) {
       const own = f.settings || {};
       if (!own.essay) continue;
+      if (quietFor(f)) continue;
       const ne = Number(f.nextEssayAt) || 0;
       if (!ne) {
         f.nextEssayAt = nowMs + (2 + Math.random() * 2) * 86400000;
@@ -4660,6 +5821,98 @@ async function clientSocialTick(force) {
         }
       } catch (_) {}
       break;
+    }
+  }
+
+  // 单机模式：提醒 / 生活事件 / 纪念日 / 日记（云端这些都由服务器做）
+  if (!isCloud()) {
+    const nowMs = Date.now();
+    const hourNow = new Date().getHours();
+
+    // 「提醒我」：到点由她开口。免打扰也照响——时间是你自己定的。
+    for (const f of state.friends) {
+      const due = (f.reminders || []).filter((r) => r && Number(r.dueAt) <= nowMs);
+      if (!due.length) continue;
+      const r = due.slice().sort((a, b) => (a.dueAt || 0) - (b.dueAt || 0))[0];
+      let txt = '';
+      try { txt = await genReminderLocal(f, r.text || ''); } catch (_) {}
+      txt = txt || ('该' + (r.text || '') + '了');
+      f.messages = f.messages || [];
+      f.messages.push({
+        id: uid('m'), role: 'peer', authorId: f.id, text: txt, ts: nowMs, reminder: true,
+      });
+      f.unread = (f.unread || 0) + 1;
+      f.reminders = (f.reminders || []).filter((x) => x.id !== r.id);
+      changed = true;
+      break;
+    }
+
+    // 她自己的生活事件
+    if (!quiet && state.settings.lifeOn !== false) {
+      for (const f of state.friends) {
+        if (friendAsleep(f)) continue;
+        const nxtLife = Number(f.nextLifeAt) || 0;
+        if (!nxtLife) {
+          f.nextLifeAt = nowMs + (3 + Math.random() * 4) * 3600000;
+          changed = true;
+          continue;
+        }
+        if (nowMs < nxtLife) continue;
+        if (!f.messages || !f.messages.length) {
+          f.nextLifeAt = nowMs + 6 * 3600000;
+          changed = true;
+          continue;
+        }
+        let ev = '';
+        try { ev = await genLifeLocal(f); } catch (_) {}
+        if (ev) {
+          f.events = [...(f.events || []), { ts: nowMs, text: ev }].slice(-12);
+          changed = true;
+        }
+        f.nextLifeAt = nowMs + (4 + Math.random() * 5) * 3600000;
+        changed = true;
+        break;
+      }
+    }
+
+    // 纪念日：一天最多一次
+    const todayKey = new Date().toISOString().slice(0, 10);
+    if (!quiet) {
+      for (const f of state.friends) {
+        if (quietFor(f) || (f.lastAnnivKey || '') === todayKey) continue;
+        const occasion = anniversaryToday(f);
+        if (!occasion) continue;
+        let txt = '';
+        try { txt = await genAnnivLocal(f, occasion); } catch (_) {}
+        if (txt) {
+          f.messages = f.messages || [];
+          f.messages.push({
+            id: uid('m'), role: 'peer', authorId: f.id, text: txt, ts: nowMs, anniversary: true,
+          });
+          f.unread = (f.unread || 0) + 1;
+          f.lastAnnivKey = todayKey;
+          changed = true;
+        }
+        break;
+      }
+    }
+
+    // 她的日记：20:00-23:00 之间随机一页，每人每天一页
+    if (!quiet && state.settings.diaryOn !== false && hourNow >= 20 && hourNow <= 22
+        && Math.random() < 0.25) {
+      for (const f of state.friends) {
+        if ((f.settings && f.settings.diary === false) || friendAsleep(f)) continue;
+        if ((f.diaryAt || '') === todayKey) continue;
+        if (!f.messages || !f.messages.length) { f.diaryAt = todayKey; changed = true; continue; }
+        let page = '';
+        try { page = await genDiaryLocal(f); } catch (_) {}
+        if (page) {
+          f.diary = [...(f.diary || []), { id: uid('d'), date: todayKey, ts: nowMs, text: page }].slice(-60);
+          f.diaryAt = todayKey;
+          changed = true;
+        }
+        break;
+      }
     }
   }
 
@@ -4741,6 +5994,10 @@ function mergeRemote(remote) {
     for (const m of list || []) {
       if (dead.has(m.id)) continue;
       const existing = byId.get(m.id);
+      if (existing && m.recalled && !existing.recalled) {
+        existing.recalled = true; existing.text = ''; existing.image = ''; existing.file = null;
+        changed = true; hit = true;
+      }
       if (existing && kind === 'group' && existing.ts !== m.ts) {
         existing.ts = m.ts; changed = true; hit = true;
       }
@@ -5353,7 +6610,12 @@ function normalizeFriend(raw) {
   for (const key of ['memory', 'memoryAt', 'lastGreet', 'lastNudgeAt',
     'lastFallbackAt', 'nextMomentAt', 'muted', 'proactiveUsedAt',
     'nextEssayAt', 'lastEssayAt',
-    'note', 'region', 'signature', 'personaChangedAt']) {
+    'note', 'region', 'signature', 'personaChangedAt',
+    // 她记得的事 / 纪念日 / 提醒 / 已读 / 日记 / 她的生活 / 归档水位线
+    'memoryNotes', 'memoryOff', 'anniversaries', 'reminders',
+    'peerReadAt', 'lateReplyAt',
+    'diary', 'diaryAt', 'events', 'lastLifeAt', 'nextLifeAt', 'lastAnnivKey',
+    'archivedBefore', 'archivedCount']) {
     if (raw && raw[key] !== undefined && raw[key] !== null) f[key] = raw[key];
   }
   f.messages = (f.messages || []).map((m) => ({
@@ -5488,6 +6750,8 @@ async function init() {
 
   setInterval(proactiveTick, 30000);
   setInterval(clientSocialTick, 30000);
+  // 「已读没回」的到点回复：15 秒看一次，别让她晾你太久也别太准
+  setInterval(lateReplyTick, 15000);
 
   document.documentElement.classList.toggle('native', NATIVE);
   if (!isCloud()) {

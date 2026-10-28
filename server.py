@@ -119,6 +119,17 @@ def default_state():
             "groupBursts": 3,
             "groupRoundMax": 10,
             "groupAutoTalk": True,
+            # 「她会活过来」：撤回 / 改口 / 偶尔看了不回
+            "alive": True,
+            # 免打扰时段（只挡她自己冒出来的消息；你发的消息照回、你定的提醒照响）
+            "quietOn": True,
+            "quietStart": 23,
+            "quietEnd": 8,
+            # 她的日记 / 她自己的生活事件
+            "diaryOn": True,
+            "lifeOn": True,
+            # 0 = 不自动归档；>0 = 把这么多天前的消息挪进归档文件
+            "archiveDays": 0,
         },
         "friends": [
             {
@@ -197,14 +208,23 @@ GROUP_RUNTIME = ("turnCounts", "lastSpurtAt", "lastChatAt")
 
 # 好友身上「用户能改」的字段；其余字段属于服务端/调度，客户端快照不得覆盖。
 FRIEND_FIELDS = ("name", "avatar", "persona", "relations", "dmMoment", "settings",
-                 "note", "region", "signature", "personaChangedAt")
+                 "note", "region", "signature", "personaChangedAt",
+                 # 「她记得的事 / 纪念日 / 提醒 / 已读」这些是客户端可编辑的数据。
+                 # 提醒虽然由服务端在到点时删掉，但添加/删除是用户动作，所以放在这里。
+                 "memoryNotes", "memoryOff", "anniversaries", "reminders",
+                 "peerReadAt", "lateReplyAt")
 # 后台任务写入的好友字段：只有后台合并才允许更新。
 FRIEND_SERVER_FIELDS = ("unread", "lastGreet", "lastNudgeAt", "lastFallbackAt",
                         "lastEssayAt", "nextEssayAt",
                         "memory", "memoryAt", "nextMomentAt", "muted", "createdAt",
                         # 服务端用掉「下一条主动消息」的指令后要能写回磁盘：
                         # settings 里清掉 nextProactive，并打 proactiveUsedAt 告诉客户端
-                        "settings", "proactiveUsedAt")
+                        "settings", "proactiveUsedAt",
+                        # 提醒由服务端在到点时删掉，所以后台合并也要能写回（客户端仍可增删）
+                        "reminders",
+                        # 她的日记 / 她的生活 / 纪念日 / 数据瘦身水位线
+                        "diary", "diaryAt", "events", "lastLifeAt", "nextLifeAt",
+                        "lastAnnivKey", "archivedBefore", "archivedCount")
 
 
 def _dict(x):
@@ -469,6 +489,7 @@ def merge_state(old, new, *, background=False):
     out["rev"] = int(old.get("rev") or 0)
 
     friend_edits = edits.get("friends") or {}
+    import_mode = bool(edits.get("importHistory"))   # 从备份恢复：整份替换，不和旧数据取并集
     old_friends = _by_id(old.get("friends"))
     friends = []
     for f in new.get("friends") or []:
@@ -477,19 +498,27 @@ def merge_state(old, new, *, background=False):
         base = old_friends.get(f.get("id")) or {}
         msgs = list(f.get("messages") or [])
         have = {m.get("id") for m in msgs}
-        for m in base.get("messages") or []:
-            if m.get("id") not in have:
-                msgs.append(m)
+        if not import_mode:
+            for m in base.get("messages") or []:
+                if m.get("id") not in have:
+                    msgs.append(m)
         merged = merge_friend(base, f, friend_edits.get(f.get("id")), background=background,
                               strict=("_edits" in new))
+        if import_mode:
+            # 备份里带了服务端写的字段（记忆/日记/事件/归档水位线），恢复时要一起回来
+            for field in FRIEND_SERVER_FIELDS:
+                if field in f and field != "settings":
+                    merged[field] = f[field]
+        cut = int(merged.get("archivedBefore") or 0)
         merged["messages"] = sorted(
-            [m for m in msgs if m.get("id") not in deleted],
+            [m for m in msgs if m.get("id") not in deleted
+             and (not cut or int(m.get("ts") or 0) >= cut)],
             key=lambda m: m.get("ts", 0),
         )
         friends.append(merged)
     kept = {f.get("id") for f in friends}
     for f in old.get("friends") or []:
-        if f.get("id") in kept or f.get("id") in deleted:
+        if f.get("id") in kept or f.get("id") in deleted or import_mode:
             continue
         ff = dict(f)
         ff["messages"] = [m for m in (ff.get("messages") or []) if m.get("id") not in deleted]
@@ -521,7 +550,8 @@ def merge_state(old, new, *, background=False):
             for field in GROUP_FIELDS:
                 if field in patch:
                     g[field] = patch[field]
-        msgs = {m.get("id"): m for m in base.get("messages") or [] if m.get("id") not in deleted}
+        msgs = ({} if import_mode else
+                {m.get("id"): m for m in base.get("messages") or [] if m.get("id") not in deleted})
         for m in sorted(incoming.get("messages") or [], key=lambda m: m.get("ts", 0)):
             mid = m.get("id")
             if not mid or mid in deleted:
@@ -551,7 +581,7 @@ def merge_state(old, new, *, background=False):
         groups.append(g)
     keptg = {g.get("id") for g in groups}
     for g in old.get("groups") or []:
-        if g.get("id") in keptg or g.get("id") in deleted:
+        if g.get("id") in keptg or g.get("id") in deleted or import_mode:
             continue
         gg = dict(g)
         gg["messages"] = [m for m in (gg.get("messages") or []) if m.get("id") not in deleted]
@@ -582,7 +612,7 @@ def merge_state(old, new, *, background=False):
         moments.append(mm)
         seen.add(mm.get("id"))
     for m in old.get("moments") or []:
-        if m.get("id") not in seen and m.get("id") not in deleted:
+        if m.get("id") not in seen and m.get("id") not in deleted and not import_mode:
             moments.append(m)
     out["moments"] = sorted(moments, key=lambda m: m.get("ts", 0), reverse=True)[:300]
 
@@ -649,6 +679,49 @@ def load_state(uid="local"):
         }]
     base["activeId"] = None
     return base
+
+
+# ---------- 数据瘦身：把老消息挪进归档文件 ----------
+
+def _archive_dir(uid):
+    d = os.path.join(USER_DIR, uid, "archive") if uid != "local" else os.path.join(DATA_DIR, "archive")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _archive_path(uid, fid):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(fid or "x"))[:80] or "x"
+    return os.path.join(_archive_dir(uid), safe + ".json")
+
+
+def read_archive(uid, fid):
+    path = _archive_path(uid, fid)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def append_archive(uid, fid, msgs):
+    """追加进归档文件，按 id 去重（同一批消息可能被重复提交）。"""
+    path = _archive_path(uid, fid)
+    old = read_archive(uid, fid)
+    seen = {m.get("id") for m in old if isinstance(m, dict)}
+    out = list(old)
+    for m in msgs:
+        if isinstance(m, dict) and m.get("id") not in seen:
+            out.append(m)
+            seen.add(m.get("id"))
+    out.sort(key=lambda m: int(m.get("ts") or 0))
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False)
+    os.replace(tmp, path)
+    return len(out) - len(old)
 
 
 class StateReadError(RuntimeError):
@@ -806,7 +879,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v33",
+                    "build": "v34",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -815,6 +888,24 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/rev":
                 st = load_state(uid)
                 return self._json(200, {"rev": int(st.get("rev") or 0)})
+            if path == "/api/archive":
+                qs = parse_qs(urlsplit(self.path).query)
+                fid = (qs.get("fid") or [""])[0]
+                if not fid:
+                    return self._json(400, {"error": "缺少 fid"})
+                try:
+                    before = int((qs.get("before") or ["0"])[0] or 0)
+                    limit = int((qs.get("limit") or ["200"])[0] or 200)
+                except Exception:
+                    before, limit = 0, 200
+                limit = max(1, min(500, limit))
+                msgs = read_archive(uid, fid)
+                if before:
+                    msgs = [m for m in msgs if int(m.get("ts") or 0) < before]
+                msgs.sort(key=lambda m: int(m.get("ts") or 0))
+                more = len(msgs) > limit
+                return self._json(200, {"messages": msgs[-limit:], "more": more,
+                                        "total": len(msgs)})
             if path == "/api/me":
                 data = load_users()
                 u = next((x for x in data.get("users") or [] if x.get("id") == uid), {})
@@ -864,6 +955,36 @@ class Handler(SimpleHTTPRequestHandler):
                 # 用户在群里刚说完话：不用等 20 秒的轮询，马上让她们接话。
                 threading.Thread(target=run_social_now, args=(uid,), daemon=True).start()
             return self._json(200, {"ok": True, "rev": merged["rev"], "moments": len(merged.get("moments") or [])})
+        if path == "/api/archive":
+            uid = self._uid()
+            payload = self._read_json() or {}
+            try:
+                days = int(payload.get("days") or 0)
+            except Exception:
+                days = 0
+            if days < 1:
+                return self._json(400, {"error": "天数至少 1"})
+            cutoff = int((time.time() - days * 86400) * 1000)
+            with STATE_LOCK:
+                st = load_state(uid)
+                total = 0
+                for f in st.get("friends") or []:
+                    msgs = f.get("messages") or []
+                    old = [m for m in msgs if int(m.get("ts") or 0) < cutoff]
+                    if not old:
+                        continue
+                    append_archive(uid, f.get("id"), old)
+                    f["messages"] = [m for m in msgs if int(m.get("ts") or 0) >= cutoff]
+                    f["archivedBefore"] = cutoff
+                    f["archivedCount"] = int(f.get("archivedCount") or 0) + len(old)
+                    total += len(old)
+                if total:
+                    save_state(st, uid)
+            # 归档文件按好友落盘，客户端要能知道每个好友还剩多少
+            counts = {f.get("id"): int(f.get("archivedCount") or 0) for f in st.get("friends") or []}
+            print("[ARCHIVE] uid=%s days=%s moved=%s" % (uid, days, total), flush=True)
+            return self._json(200, {"ok": True, "archived": total, "cutoff": cutoff,
+                                    "counts": counts, "rev": int(st.get("rev") or 0)})
         if path == "/api/blob":
             uid = self._uid()
             payload = self._read_json() or {}
@@ -1197,6 +1318,106 @@ def persona_fresh_note(friend, msgs=None, limit=30):
     return ""
 
 
+# ---------- 作息 / 免打扰 / 记忆 / 她的生活 ----------
+
+def _hour_in(hour, start, end):
+    """start <= hour < end，支持跨零点（23 → 8）。"""
+    try:
+        start, end = int(start) % 24, int(end) % 24
+    except Exception:
+        return False
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def quiet_now(settings):
+    """全局免打扰时段（默认 23:00-08:00）。
+
+    只挡「她自己冒出来」的消息（主动、朋友圈、评论、日记、事件、群聊接话）。
+    你发给她的消息照回，你让她记的提醒照响 —— 否则半夜聊天会变成她不理你。
+    """
+    s = settings or {}
+    # 老账号的 settings 里没有这个键：按「开」处理，跟客户端设置面板的默认勾选一致
+    if s.get("quietOn") is False:
+        return False
+    return _hour_in(datetime.datetime.now().hour,
+                    s.get("quietStart", 23), s.get("quietEnd", 8))
+
+
+def friend_asleep(friend):
+    """她的作息：settings.wake / settings.sleep 两个整点，没写就当她随时醒着。"""
+    own = (friend or {}).get("settings") or {}
+    wake, sleep = own.get("wake"), own.get("sleep")
+    if wake in (None, "") or sleep in (None, ""):
+        return False
+    return not _hour_in(datetime.datetime.now().hour, wake, sleep)
+
+
+def quiet_for(friend, settings):
+    return quiet_now(settings) or friend_asleep(friend)
+
+
+def memory_block(friend):
+    """长期记忆 + 用户手写的「必须记住」。手写的优先级更高，放前面。"""
+    f = friend or {}
+    out = []
+    notes = []
+    for x in (f.get("memoryNotes") or []):
+        if isinstance(x, dict):
+            t = str(x.get("text") or "").strip()
+        else:
+            t = str(x or "").strip()
+        if t:
+            notes.append(t)
+    if notes:
+        out.append("【他明确要求你记住的事（必须遵守，不要忘）】\n"
+                   + "\n".join("- " + n[:120] for n in notes[:30]))
+    if f.get("memory") and not f.get("memoryOff"):
+        out.append("【你记得的事】" + str(f.get("memory"))[:600])
+    return ("\n\n" + "\n\n".join(out)) if out else ""
+
+
+def life_block(friend, limit=4):
+    """她自己的生活事件：不进历史，只当背景，让聊天不只围着「你」转。"""
+    events = (friend or {}).get("events") or []
+    lines = [str(e.get("text") or "").strip() for e in events[-limit:] if e.get("text")]
+    if not lines:
+        return ""
+    return ("\n\n【你最近的生活（背景，不用主动汇报；聊到了可以自然带出来）】\n"
+            + "\n".join("- " + x[:80] for x in lines))
+
+
+def anniversary_today(friend):
+    """今天是不是某个纪念日 → 返回要说的由头（没有就返回空）。"""
+    try:
+        now = datetime.datetime.now()
+        created = int((friend or {}).get("createdAt") or 0) / 1000.0
+    except Exception:
+        return ""
+    if created > 0:
+        days = int((now.timestamp() - created) // 86400) + 1
+        if days in (100, 200, 300, 365, 500, 730, 1000, 1460):
+            return "认识第 %d 天" % days
+    md = now.strftime("%m-%d")
+    for a in (friend or {}).get("anniversaries") or []:
+        if not isinstance(a, dict):
+            continue
+        raw = str(a.get("date") or "").strip()
+        name = str(a.get("name") or "").strip()
+        if not raw or not name:
+            continue
+        if raw[5:] == md or raw == md:
+            return name
+    return ""
+
+
+def _notes_for_prompt(friend):
+    return memory_block(friend) + life_block(friend)
+
+
 def prompt_extra(settings, key):
     """用户在「设置 → 提示词」里写的那一段（没写返回空字符串）。
 
@@ -1230,6 +1451,7 @@ def gen_moment_text(friend, settings, key, chat_lines=None, recent_msgs=None):
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
         + persona_fresh_note(friend, recent_msgs)
+        + _notes_for_prompt(friend)
     )
     if chat_lines:
         sys += ("你和他的私聊最近是这样（可以拿它当素材，但不要写成流水账，"
@@ -1286,6 +1508,7 @@ def gen_comment_text(friend, author_name, moment_text, thread, settings, key, im
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
+        + _notes_for_prompt(friend) + "\n"
         + author_name + " 发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
     )
     custom = prompt_extra(settings, "comment")
@@ -1320,6 +1543,7 @@ def gen_reply_text(friend, commenter_name, moment_text, comment_text, thread, se
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
+        + _notes_for_prompt(friend) + "\n"
         + "你发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
     )
     if thread:
@@ -1347,6 +1571,7 @@ def gen_dm_text(friend, owner_name, moment_text, settings, key, image=""):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
+        + _notes_for_prompt(friend) + "\n"
         + owner_name + " 刚发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
     )
     if custom:
@@ -1374,6 +1599,7 @@ def gen_group_line(friend, author_name, moment_text, prev_lines, settings, key, 
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
+        + _notes_for_prompt(friend) + "\n"
         + "你们在一个群里聊天。" + author_name + " 刚发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
         + persona_fresh_note(friend, recent_msgs)
         + env_now_text() + "\n" + CONSISTENCY_RULE
@@ -1411,6 +1637,7 @@ def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_p
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
         + (friend.get("persona") or "") + "\n\n"
+        + _notes_for_prompt(friend) + "\n"
         "你们在一个叫「" + (group_name or "群") + "」的群里。\n"
         + persona_fresh_note(friend, recent_msgs)
         + env_now_text() + "\n" + CONSISTENCY_RULE
@@ -1466,6 +1693,7 @@ def gen_essay(friend, me_name, recent_lines, settings, key, recent_msgs=None):
     sys = (
         "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
         + persona_fresh_note(friend, recent_msgs)
+        + _notes_for_prompt(friend) + "\n"
         + "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n"
         + env_now_text() + "\n" + CONSISTENCY_RULE + "\n"
     )
@@ -1493,6 +1721,7 @@ def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", al
     sys = (
         "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
         + persona_fresh_note(friend, recent_msgs)
+        + _notes_for_prompt(friend) + "\n"
         + "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n"
         + env_now_text() + "\n" + CONSISTENCY_RULE + "\n"
     )
@@ -1529,11 +1758,88 @@ def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", al
     return _clean_multiline(text, 600 if custom else 300)
 
 
+def gen_diary(friend, me_name, recent_lines, settings, key, recent_msgs=None):
+    """她自己的一页日记：写给自己看的，不发给对方。"""
+    name = friend.get("name") or ""
+    sys = (
+        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        + _notes_for_prompt(friend) + "\n"
+        + persona_fresh_note(friend, recent_msgs)
+        + env_now_text() + "\n" + CONSISTENCY_RULE + "\n"
+        + "【身份】「我」是你自己，「" + (me_name or "他") + "」是他。你只写自己的日记，不要替他说话。\n"
+    )
+    if recent_lines:
+        sys += ("你们最近聊过这些（只当背景，别抄原话）：\n"
+                + "\n".join(recent_lines[-6:]) + "\n\n")
+    sys += (
+        "现在给你自己的日记写今天这一页。要求：\n"
+        "- 150~300 字，分 2~3 段\n"
+        "- 写今天自己遇到的一件小事（天气、店里、路上、吃的），和一件因为他而起的心思\n"
+        "- 要具体：一个画面、一句话、一个时间；可以有点小心思、抱怨、嘴硬，但别写总结和道理\n"
+        "- 第一人称，写给自己看，所以不用对他说话，也不要提问\n"
+        "- 不要写日期标题，不要「亲爱的日记」这种开头，不要用 emoji 堆砌\n"
+        "- 只输出日记正文"
+    )
+    text = call_llm(settings.get("baseUrl"), key, settings.get("model"),
+                    [{"role": "system", "content": sys}], max_tokens=520, temperature=0.95)
+    return _clean_multiline(text, 520)
+
+
+def gen_life_event(friend, settings, key):
+    """她生活里刚发生的一件小事，一句话。"""
+    name = friend.get("name") or ""
+    sys = (
+        "你就是" + name + "。\n" + (friend.get("persona") or "")[:800] + "\n\n"
+        + _notes_for_prompt(friend) + "\n"
+        + env_now_text() + "\n"
+        + "写一句今天你生活里刚发生的小事，就一句，20~45 字，具体（什么声音、什么味道、谁说的话），"
+          "不要感想、不要升华、不要跟他有关、不要提问、不加引号。只输出这一句。"
+    )
+    text = call_llm(settings.get("baseUrl"), key, settings.get("model"),
+                    [{"role": "system", "content": sys}], max_tokens=90, temperature=1.0)
+    return _clean(text, 80)
+
+
+def gen_anniversary(friend, me_name, occasion, settings, key):
+    """纪念日/认识第 N 天，主动说一句。"""
+    name = friend.get("name") or ""
+    sys = (
+        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        + _notes_for_prompt(friend) + "\n"
+        + env_now_text() + "\n" + CONSISTENCY_RULE + "\n"
+        + "【身份】「我」是你自己，「" + (me_name or "他") + "」是他。\n"
+        + "今天是「" + occasion + "」。你想起来这件事，主动发一条消息给他。\n"
+        + "要求：1~3 句，短，口语；可以甜、可以嘴硬、可以假装不在意；"
+          "说一件具体的旧事（第一次聊天的某个细节、他当时说的一句话），别写祝福语、别写排比句。"
+          "只输出你要发的话。"
+    )
+    text = call_llm(settings.get("baseUrl"), key, settings.get("model"),
+                    [{"role": "system", "content": sys}], max_tokens=220, temperature=1.0)
+    return _clean_multiline(text, 200)
+
+
+def gen_reminder(friend, me_name, what, settings, key):
+    """用户让她记着的事，到点了由她开口提醒。"""
+    name = friend.get("name") or ""
+    sys = (
+        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        + env_now_text() + "\n"
+        + "【身份】「我」是你自己，「" + (me_name or "他") + "」是他。\n"
+        + "他之前让你到点提醒他一件事：「" + (what or "") + "」。现在时间到了。\n"
+        + "用你自己的语气提醒他，1~2 句，20~40 字，直接说事，可以带一点你的口气；"
+          "不要写「提醒您」「温馨提示」，不要加引号。只输出这句话。"
+    )
+    text = call_llm(settings.get("baseUrl"), key, settings.get("model"),
+                    [{"role": "system", "content": sys}], max_tokens=120, temperature=0.95)
+    return _clean(text, 120)
+
+
 def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False,
                    reply_to="", group_prompt="", being_called=False, images=None,
                    recent_msgs=None):
     sys = ("你就是" + (friend.get("name") or "") + "。\n" + (friend.get("persona") or "") + "\n\n"
            + persona_fresh_note(friend, recent_msgs)
+           + _notes_for_prompt(friend)
            + env_now_text() + "\n" + CONSISTENCY_RULE)
     if in_group:
         sys += group_prompt_text(group_prompt)
@@ -1679,6 +1985,10 @@ def create_moment(st, key):
     friends = st.get("friends") or []
     if not friends:
         return False
+    # 睡着的、免打扰的，不排她的朋友圈
+    awake = [f for f in friends if not f.get("muted") and not friend_asleep(f)]
+    if awake:
+        friends = awake
     social = st.setdefault("social", {})
     last_author = social.get("lastMomentAuthor")
     pool = [f for f in friends if f.get("id") != last_author] or friends
@@ -1883,7 +2193,12 @@ def gen_memory(friend, history_lines, settings, key):
     return _clean(text, 500)
 
 
-def social_tick(uid="local"):
+def social_tick(uid="local", force=False):
+    """后台调度。
+
+    force=True：用户刚说完话（尤其群里），这一轮要立刻接话，
+    不受免打扰/作息限制 —— 否则半夜在群里 @ 人，谁都不理你。
+    """
     with STATE_LOCK:
         st = load_state(uid)
         s = st.get("settings") or {}
@@ -1894,6 +2209,8 @@ def social_tick(uid="local"):
         now = time.time()
         changed = False
         name_map = {x.get("id"): x.get("name") for x in st.get("friends") or []}
+        # 免打扰时段：只挡「她自己冒出来」的东西。回复你的消息、你定的提醒不受影响。
+        quiet = quiet_now(s) and not force
 
         keep = []
         for p in st.get("pending") or []:
@@ -1908,6 +2225,36 @@ def social_tick(uid="local"):
         if len(keep) != len(st.get("pending") or []):
             changed = True
         st["pending"] = keep
+
+        # 「提醒我」：用户让她记的事。到点就响，免打扰也照响——那是用户自己定的。
+        now_ms = int(now * 1000)
+        for f in st.get("friends") or []:
+            rs = [r for r in (f.get("reminders") or []) if isinstance(r, dict)]
+            if not rs:
+                continue
+            due = sorted([r for r in rs if not r.get("done") and float(r.get("dueAt") or 0) <= now_ms],
+                         key=lambda r: float(r.get("dueAt") or 0))
+            if not due:
+                continue
+            r0 = due[0]
+            me_name = (st.get("me") or {}).get("name") or "对方"
+            if me_name in ("我", "对方"):
+                me_name = "对方"
+            try:
+                txt = gen_reminder(f, me_name, r0.get("text") or "", s, key)
+            except Exception as e:
+                print("[social] 提醒生成失败：", e)
+                txt = ""
+            txt = txt or ("该" + str(r0.get("text") or "") + "了")
+            f.setdefault("messages", []).append({
+                "id": _nid("m"), "role": "peer", "authorId": f.get("id"),
+                "text": txt, "ts": now_ms, "reminder": True,
+            })
+            f["unread"] = int(f.get("unread") or 0) + 1
+            f["reminders"] = [x for x in rs if x.get("id") != r0.get("id")]
+            changed = True
+            print("[social] 提醒 -> %s「%s」" % (f.get("name"), (r0.get("text") or "")[:20]), flush=True)
+            break
 
         hour = datetime.datetime.now().hour
         social = st.setdefault("social", {})
@@ -1949,13 +2296,15 @@ def social_tick(uid="local"):
             })
             print("[MOMENT] dm queued by=%s moment=%s" % (who.get("id"), m.get("id")), flush=True)
 
-        # 每个人独立的朋友圈排期（没设就跟随全局）
-        if 8 <= hour <= 23:
+        # 每个人独立的朋友圈排期（没设就跟随全局）。免打扰/睡着时不发。
+        if 8 <= hour <= 23 and not quiet:
             for f in st.get("friends") or []:
                 own = f.get("settings") or {}
                 iv = own.get("momentInterval")
                 if iv is None:
                     continue          # 跟随全局窗口机制
+                if friend_asleep(f):
+                    continue
                 iv = max(300, float(iv))
                 fn = float(f.get("nextMomentAt") or 0)
                 if fn <= 0:
@@ -1970,7 +2319,7 @@ def social_tick(uid="local"):
                     f["nextMomentAt"] = now + iv * (0.7 + random.random() * 0.8)
                     changed = True
 
-        if 8 <= hour <= 23 and now >= nxt:
+        if 8 <= hour <= 23 and not quiet and now >= nxt:
             # 一个窗口里安排几个人发。
             # 窗口周期 interval 里会排 k 个人，所以「1 分钟一条」如果还排 3~5 个，
             # 实际就变成「1 分钟 3~5 条」。这里按间隔收一收：每 2 分钟最多排 1 个人。
@@ -1987,7 +2336,7 @@ def social_tick(uid="local"):
         # 窗口内的排期：到点了就让一个人发
         slot = float(social.get("nextSlotAt") or 0)
         left = int(social.get("momentQueue") or 0)
-        if left > 0 and now >= slot:
+        if left > 0 and now >= slot and not quiet:
             social["momentQueue"] = left - 1
             step = interval / max(1, int(social.get("momentQueue") or left) + 1)
             social["nextSlotAt"] = now + step * (0.4 + random.random() * 1.2)
@@ -2019,8 +2368,107 @@ def social_tick(uid="local"):
                 changed = True
             break
 
+        # 她自己的生活事件：几小时一条，喂给聊天/朋友圈/日记当背景。
+        if s.get("lifeOn", True) and not quiet:
+            for f in st.get("friends") or []:
+                if friend_asleep(f):
+                    continue
+                nxt_life = float(f.get("nextLifeAt") or 0)
+                if nxt_life <= 0:
+                    f["nextLifeAt"] = now + random.uniform(3, 7) * 3600
+                    changed = True
+                    continue
+                if now < nxt_life:
+                    continue
+                msgs = f.get("messages") or []
+                last_ms = float(msgs[-1].get("ts") or 0) if msgs else 0
+                if not msgs or (now * 1000 - last_ms) > 7 * 86400 * 1000:
+                    f["nextLifeAt"] = now + random.uniform(6, 12) * 3600
+                    changed = True
+                    continue
+                try:
+                    ev = gen_life_event(f, s, key)
+                except Exception as e:
+                    print("[social] 生活事件失败：", e)
+                    ev = ""
+                if ev:
+                    evs = [x for x in (f.get("events") or []) if isinstance(x, dict)]
+                    evs.append({"ts": int(now * 1000), "text": ev})
+                    f["events"] = evs[-12:]
+                    f["lastLifeAt"] = now
+                    changed = True
+                    print("[social] 生活事件 -> %s：%s" % (f.get("name"), ev[:30]), flush=True)
+                f["nextLifeAt"] = now + random.uniform(4, 9) * 3600
+                changed = True
+                break
+
+        # 纪念日 / 认识第 N 天：一天最多一次
+        today_key = datetime.date.today().isoformat()
+        for f in st.get("friends") or []:
+            if quiet_for(f, s):
+                continue
+            if (f.get("lastAnnivKey") or "") == today_key:
+                continue
+            occasion = anniversary_today(f)
+            if not occasion:
+                continue
+            me_name = (st.get("me") or {}).get("name") or "对方"
+            if me_name in ("我", "对方"):
+                me_name = "对方"
+            try:
+                txt = gen_anniversary(f, me_name, occasion, s, key)
+            except Exception as e:
+                print("[social] 纪念日失败：", e)
+                txt = ""
+            if txt:
+                f.setdefault("messages", []).append({
+                    "id": _nid("m"), "role": "peer", "authorId": f.get("id"),
+                    "text": txt, "ts": int(time.time() * 1000), "anniversary": True,
+                })
+                f["unread"] = int(f.get("unread") or 0) + 1
+                f["lastAnnivKey"] = today_key
+                changed = True
+                print("[social] 纪念日 -> %s（%s）" % (f.get("name"), occasion), flush=True)
+            break
+
+        # 她的日记：20:00-23:00 之间随机写一页，每人每天一页
+        if s.get("diaryOn", True) and not quiet:
+            dnow = datetime.datetime.now()
+            if 20 <= dnow.hour <= 22 and random.random() < 0.2:
+                for f in st.get("friends") or []:
+                    own = f.get("settings") or {}
+                    if own.get("diary") is False:
+                        continue
+                    if friend_asleep(f):
+                        continue
+                    if (f.get("diaryAt") or "") == today_key:
+                        continue
+                    msgs = f.get("messages") or []
+                    if not msgs or (now * 1000 - float(msgs[-1].get("ts") or 0)) > 7 * 86400 * 1000:
+                        f["diaryAt"] = today_key
+                        changed = True
+                        continue
+                    me_name = (st.get("me") or {}).get("name") or "他"
+                    if me_name in ("我",):
+                        me_name = "他"
+                    hist = dm_history(f, me_name, msgs, 6)
+                    try:
+                        page = gen_diary(f, me_name, hist, s, key, recent_msgs=msgs)
+                    except Exception as e:
+                        print("[social] 日记失败：", e)
+                        page = ""
+                    if page:
+                        diary = [x for x in (f.get("diary") or []) if isinstance(x, dict)]
+                        diary.append({"id": _nid("d"), "date": today_key,
+                                      "ts": int(now * 1000), "text": page})
+                        f["diary"] = diary[-60:]
+                        f["diaryAt"] = today_key
+                        changed = True
+                        print("[social] 日记 -> %s (%d 字)" % (f.get("name"), len(page)), flush=True)
+                    break
+
         # 早晚安
-        if s.get("proactive"):
+        if s.get("proactive") and not quiet:
             import datetime as _dt
             today = _dt.date.today().isoformat()
             hour = _dt.datetime.now().hour
@@ -2029,6 +2477,8 @@ def social_tick(uid="local"):
             if slot and (st.get("social", {}).get("lastGreet") or "") != stamp:
                 for f in st.get("friends") or []:
                     if (f.get("settings") or {}).get("greet") is False:
+                        continue
+                    if friend_asleep(f):
                         continue
                     if (f.get("lastGreet") or "") == today + slot:
                         continue
@@ -2089,12 +2539,14 @@ def social_tick(uid="local"):
                 changed = True
             break
 
-        # 主动找人说话：安静够久就冒个泡
-        if s.get("proactive"):
+        # 主动找人说话：安静够久就冒个泡（免打扰时段不冒）
+        if s.get("proactive") and not quiet:
             quiet_min = float(s.get("idleMin") or 30) * 2
             for f in st.get("friends") or []:
                 own = f.get("settings") or {}
                 if own.get("proactive") is False:
+                    continue
+                if friend_asleep(f):
                     continue
                 msgs = f.get("messages") or []
                 if not msgs:
@@ -2140,6 +2592,8 @@ def social_tick(uid="local"):
             own = f.get("settings") or {}
             if not own.get("essay"):
                 continue
+            if quiet_for(f, s) and not force:
+                continue
             ne = float(f.get("nextEssayAt") or 0)
             if ne <= 0:
                 f["nextEssayAt"] = now + random.uniform(2, 4) * 86400
@@ -2182,6 +2636,8 @@ def social_tick(uid="local"):
         # 群里她们互相接话：轮流传，每人每轮不超过设置里的「群聊最多几条」
         me_name = (st.get("me") or {}).get("name") or "我"
         for g in st.get("groups") or []:
+            if quiet and not force:
+                break
             members = [m for m in (g.get("members") or []) if m in name_map]
             if len(members) < 2:
                 continue
@@ -2257,6 +2713,8 @@ def social_tick(uid="local"):
 
         # 群里自己聊两句（免打扰的群不再主动开话题）
         for g in st.get("groups") or []:
+            if quiet:
+                break
             if g.get("muted"):
                 continue
             members = [m for m in (g.get("members") or []) if m in name_map]
@@ -2338,7 +2796,7 @@ def run_social_now(uid):
     """
     try:
         for attempt in range(3):
-            social_tick(uid)
+            social_tick(uid, force=True)
             if not mention_pending(load_state(uid)):
                 return
             if attempt < 2:
