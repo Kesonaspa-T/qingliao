@@ -127,34 +127,26 @@ try {
       return f.messages.filter(m => m.role === 'peer').length === 1 && r.phase === 'idle' && !chatEl.querySelector('.dots');
     `);
   }
-  await check('到点先冒「正在输入」，整条消息一次性出现（不逐字蹦）', `
+  await check('到点直接整条出现：没有三个点的加载气泡，也不逐字', `
     await resetCase({ delayMin: 10, delayMax: 10 });
     await send('在吗'); await advance(3000);
     jobs[0].emit('我在呢');                                   // 模型在假等待里就生成好了
     await complete(0, '我在呢');                              // 流结束
-    await advance(7000);                                      // 到点：冒气泡
-    if (r.phase !== 'streaming' || !chatEl.querySelector('.dots')) return false;
-    const holder = r.holder;
-    if (!holder || !holder.bubble.isConnected) return false;
-    // 停一小会儿期间，气泡里绝对不能出现半个字（那就是又在「打」了）
-    let leaked = '';
-    for (let i = 0; i < 12; i += 1) {
-      await advance(60);
-      const t = holder && holder.bubble ? String(holder.bubble.textContent || '').trim() : '';
-      if (t) leaked = t;
-    }
-    if (leaked) return false;
-    await advance(6000);
-    const replies = f.messages.filter(m => m.role === 'peer').map(m => m.text);
-    if (replies.length !== 1 || replies[0] !== '我在呢') return false;
+    // 到点之前：聊天里既没有气泡也没有文字
     if (chatEl.querySelector('.dots')) return false;
-    // 整条只出现一次、没有中间态：消息条数=1，内容完整
-    return true;
+    await advance(6999);
+    if (chatEl.querySelector('.dots')) return false;
+    if (f.messages.some(m => m.role === 'peer')) return false;
+    await advance(1);                                         // 到点
+    await advance(2000);
+    if (chatEl.querySelector('.dots')) return false;           // 永远不出现三个点
+    const replies = f.messages.filter(m => m.role === 'peer').map(m => m.text);
+    return replies.length === 1 && replies[0] === '我在呢' && r.phase === 'idle';
   `);
   await check('生成中点发送会合并新消息，取消旧结果且不再等完整延迟', `
     await resetCase({ delayMin: 5, delayMax: 5 }); await send('第一句');
     await advance(8000);
-    if (r.phase !== 'streaming' || !chatEl.querySelector('.dots')) return false;
+    if (r.phase !== 'streaming' || chatEl.querySelector('.dots')) return false;
     inputEl.value = '第二句'; inputEl.dispatchEvent(new Event('input'));
     if (sendBtn.textContent !== '发送') return false;
     sendBtn.click(); await flush(); await advance(0);
@@ -162,17 +154,20 @@ try {
     await complete(0, '不该发出的旧回复'); await complete(1, '两句一起回答'); await advance(20000);
     return f.messages.filter(m => m.role === 'peer').map(m => m.text).join() === '两句一起回答' && jobs.length === 2;
   `);
-  await check('同步重绘、切换会话后正在输入仍存在，完成后移除', `
+  await check('生成中不冒气泡；同步重绘/切聊天再回来也不会多一条', `
     await resetCase({ delayOn: false }); await send('同步测试'); await advance(400);
+    if (r.phase !== 'streaming') return false;
+    if (chatEl.querySelector('.dots')) return false;                 // 不要加载的三个点
+    if (statusEl.textContent !== '对方正在输入…') return false;       // 只在状态栏写
     const originalApi = apiFetch;
     const remote = JSON.parse(JSON.stringify(state)); remote.rev = 3; remote.friends[0].name = '远端修改';
     apiFetch = async () => ({ ok: true, json: async () => remote });
     await syncTick(null, true); apiFetch = originalApi;
-    if (chatEl.querySelectorAll('.dots').length !== 1 || !r.holder.bubble.isConnected) return false;
+    if (chatEl.querySelector('.dots')) return false;
     closeChat(); openChat('friend', f.id);
-    if (chatEl.querySelectorAll('.dots').length !== 1) return false;
+    if (chatEl.querySelector('.dots')) return false;
     await complete(); await advance(20000);
-    return !chatEl.querySelector('.dots') && f.messages.length === 2;
+    return f.messages.filter(m => m.role === 'peer').length === 1 && f.messages.length === 2;
   `);
   await check('空结果和接口错误不会静默消失，重绘后错误仍显示', `
     await resetCase({ delayOn: false }); await send('空回复'); await advance(400);

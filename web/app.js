@@ -2791,8 +2791,8 @@ function rtOf(key) {
   if (!rt.has(key)) {
     rt.set(key, { phase: 'idle', timer: null, abort: null, queued: false, since: 0,
       deadline: 0, stopped: false, late: false, job: null, holder: null, error: '', delivering: false,
-      // 提前生成：painted 是模型已经给出的字；typingAt 是气泡冒出来的时刻
-      painted: '', typingAt: 0 });
+      // 提前生成：painted 是模型已经给出的字（只用来判断「生成好了没」）
+      painted: '' });
   }
   return rt.get(key);
 }
@@ -2808,13 +2808,12 @@ function renderReplyState(kind, conv) {
   const r = rtOf(convKey(kind, conv.id));
   if (r.holder) r.holder.row.remove();
   r.holder = null;
-  // 假等待期间不显示「正在输入」：那是她还没开始打字。
-  // 只有真正开始生成（streaming）才冒气泡，避免「刚发出去她就在回」的错觉。
-  const typing = !r.delivering && r.phase === 'streaming';
-  if (typing || r.error) {
-    r.holder = renderMessage({ role: 'peer', authorId: conv.id, text: r.error || '' },
-      { conv, kind, typing: !r.error, animate: false });
-    if (r.error) r.holder.bubble.classList.add('error');
+  // 气泡里不放「三个点」的加载框：她正在输入只体现在顶部那行状态文字上，
+  // 消息是整条直接出现的。只有出错时才在聊天里留一个红字气泡。
+  if (r.error) {
+    r.holder = renderMessage({ role: 'peer', authorId: conv.id, text: r.error },
+      { conv, kind, typing: false, animate: false });
+    r.holder.bubble.classList.add('error');
   }
   setStatus(r.error ? '回复失败，请重试' : r.phase === 'streaming' ? '对方正在输入…'
     : conv.lateReplyAt ? '已读，等会儿回' : '在线');
@@ -2832,7 +2831,6 @@ function stopReply(kind, conv) {
   else if (r.abort) r.abort();
   if (r.phase === 'waiting') { r.phase = 'idle'; r.job = null; r.abort = null; }
   r.painted = '';
-  r.typingAt = 0;
   renderReplyState(kind, conv);
 }
 
@@ -2954,39 +2952,11 @@ function delayFor(friend) {
   return Math.max(0, min + Math.random() * (max - min)) * 1000;
 }
 
-/* ---------- 提前生成 + 「正在输入」停一下再整条到 ---------- */
-
-/**
- * 「正在输入」要停多久才整条发出来。
- * 真人不会一个字一个字地蹦出来：先看到她在输入，然后一条消息啪地到。
- * 停顿时长跟着字数走，再加一点随机，别每次都一样。
- */
-function typingDwell(len) {
-  const n = Math.max(0, Math.min(600, Number(len) || 0));
-  const base = 480 + Math.min(1600, n * 16);
-  return Math.round(base * (0.8 + Math.random() * 0.4));
-}
-
-/** 等到「气泡至少停了这么久」再落地；模型自己慢就等模型，不额外拖。 */
-function waitTyping(rt, len) {
-  const until = (Number(rt.typingAt) || 0) + typingDwell(len);
-  const left = until - Date.now();
-  if (left <= 0) return Promise.resolve();
-  return new Promise((resolve) => {
-    const started = Date.now();
-    const tick = () => {
-      const job = rt.job;
-      if ((job && job.cancelled) || rt.delivering || rt.stopped) { resolve(); return; }
-      if (Date.now() - started >= left) { resolve(); return; }
-      setTimeout(tick, Math.min(120, Math.max(20, left)));
-    };
-    setTimeout(tick, Math.min(120, left));
-  });
-}
+/* ---------- 提前生成：到点直接整条到 ---------- */
 
 /**
  * 开一轮生成：job 里带取消开关和结果 promise。
- * 等待期就开始跑（prefetch），到点再把字打出来 —— 首字延迟基本就没了。
+ * 等待期就开始跑（prefetch），到点直接把整条消息发出来 —— 不逐字、也不冒加载气泡。
  */
 function beginGeneration(kind, conv, r) {
   const job = { inputId: lastUserId(conv), cancelled: false, abort: null,
@@ -3049,7 +3019,6 @@ function scheduleReply(kind, conv, isNew, immediate = false) {
   r.error = '';
   r.queued = false;
   r.painted = '';
-  r.typingAt = 0;
   const delay = immediate ? 0 : delayFor(kind === 'friend' ? conv : null);
   r.deadline = r.since + delay;
   clearTimeout(r.timer);
@@ -3095,9 +3064,8 @@ async function startReply(kind, conv) {
     r.job = job;
     r.abort = () => job.cancel('stopped');
   }
-  // 到点：冒「正在输入」。回复其实在等待期就生成好了，这里只停一小会儿，
-  // 然后把整条消息一次性发出来（不逐字蹦）。
-  r.typingAt = Date.now();
+  // 到点：不冒加载气泡，直接等这一轮结果。回复通常在等待期就生成好了，
+  // 所以这里基本是立刻把整条消息发出来。
   renderReplyState(kind, conv);
 
   try {
@@ -3109,8 +3077,6 @@ async function startReply(kind, conv) {
     if (r.late && Math.random() < 0.75) text = '刚在忙，才看到。\n' + text;
     r.late = false;
     if (!r.painted) r.painted = text;
-    // 气泡至少停这么久（跟字数走、带抖动），再整条落地；模型自己慢就按模型的时间。
-    await waitTyping(r, text.length);
     if (job.cancelled || rt.get(key) !== r) return;
     r.delivering = true;
     clearTimeout(job.watchdog);
@@ -3135,7 +3101,6 @@ async function startReply(kind, conv) {
     r.delivering = false;
     r.phase = 'idle';
     r.painted = '';
-    r.typingAt = 0;
     const queued = r.queued && !r.stopped && (job.cancelled === 'superseded'
       || job.inputId !== lastUserId(conv));
     r.queued = false;
@@ -3191,16 +3156,13 @@ async function groupTurn(group) {
       await sleep(delayFor(f));
       if (r.stopped) break;
 
+      // 群里也只写状态文字，不冒三个点的气泡
       if (isActive('group', group.id)) setStatus(f.name + ' 正在输入…');
-      const holder = isActive('group', group.id)
-        ? renderMessage({ role: 'peer', authorId: f.id, text: '' }, { conv: group, kind: 'group', typing: true })
-        : null;
 
       try {
         const k = (state.settings.apiKey || '').trim();
         if (!k) throw new Error('还没填 API Key，点「我的」→ 设置');
         const text = await runChat(f, group, r, null);
-        if (holder) holder.row.remove();
         if (text.trim()) {
           const left = cap - Number(group.turnCounts[fid] || 0);
           await deliver('group', group, text, f.id, left);
@@ -3230,16 +3192,13 @@ async function groupTurn(group) {
         const f2 = friendById(second);
         await sleep(delayFor(f2));
         if (!r.stopped && f2) {
+          // 同样只写状态文字，不冒三个点的气泡
           if (isActive('group', group.id)) setStatus(f2.name + ' 正在输入…');
-          const h2 = isActive('group', group.id)
-            ? renderMessage({ role: 'peer', authorId: f2.id, text: '' }, { conv: group, kind: 'group', typing: true })
-            : null;
           try {
             const t2 = await runChat(f2, group, r, null);
-            if (h2) h2.row.remove();
             if (t2 && t2.trim()) await deliver('group', group, t2, f2.id);
           } catch (e) {
-            if (h2) h2.row.remove();
+            // 接话失败就算了，别把整轮群聊带崩
           }
         }
       }
