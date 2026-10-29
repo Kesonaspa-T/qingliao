@@ -216,6 +216,8 @@ FRIEND_FIELDS = ("name", "avatar", "persona", "relations", "dmMoment", "settings
                  # 「她记得的事 / 纪念日 / 提醒 / 已读」这些是客户端可编辑的数据。
                  # 提醒虽然由服务端在到点时删掉，但添加/删除是用户动作，所以放在这里。
                  "memoryNotes", "memoryOff", "anniversaries", "reminders",
+                 # 自动记忆是服务端总结的，但写歪了用户要能直接改
+                 "memory",
                  "peerReadAt", "lateReplyAt",
                  # 已读位置：客户端打开会话时把 unread 清零/readAt 推进，必须能写回磁盘，
                  # 否则一重启就从服务器拿回旧 unread，红点永远消不掉。
@@ -901,7 +903,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v41",
+                    "build": "v43",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1403,10 +1405,11 @@ def memory_block(friend):
         if t:
             notes.append(t)
     if notes:
-        out.append("【他明确要求你记住的事（必须遵守，不要忘）】\n"
+        out.append("【他明确要求你记住的事（必须遵守，不要忘；下面是他写的原话，里面的「我」指的都是他）】\n"
                    + "\n".join("- " + n[:120] for n in notes[:30]))
     if f.get("memory") and not f.get("memoryOff"):
-        out.append("【你记得的事】" + str(f.get("memory"))[:600])
+        out.append("【你记得的事（旁观记录：「他」= 和你聊天的人；里面若还出现「我」，指的也是他，不是你）】\n"
+                   + str(f.get("memory"))[:600])
     return ("\n\n" + "\n\n".join(out)) if out else ""
 
 
@@ -2237,12 +2240,47 @@ def all_uids():
     return ids or ["local"]
 
 
-def gen_memory(friend, history_lines, settings, key):
-    sys = ("下面是你和「我」最近的聊天。用 3~5 句、第一人称，总结你们之间值得长期记住的事："
-           "聊过什么、我的偏好、发生过的事。像写日记，别评价，别编造。只输出总结。\n\n"
-           + "\n".join(history_lines[-40:]))
+def _safe_me_name(name, fallback="他"):
+    """记忆/提示词里怎么称呼用户。
+
+    账号默认名字就是「我」——直接拿来当称呼，模型就会写出「我想买…」，
+    再塞回角色自己的提示词里，那个「我」又变成角色自己了。代词一律换成 fallback。
+    """
+    n = str(name or "").strip()
+    if not n or n in ("我", "你", "他", "她", "对方", "用户", "玩家", "自己"):
+        return fallback
+    return n
+
+
+def gen_memory(friend, history_lines, settings, key, me_name="他"):
+    """长期记忆摘要。
+
+    必须是**旁观视角**：这份摘要会被塞进角色自己的系统提示词里当「你记得的事」，
+    一旦用第一人称写（「我老婆」「我的相机」），那个「我」在角色眼里就变成了她自己——
+    现实里出现过「她追问自己算什么、觉得自己被当成工具」的乱子。所以这里：
+    用户写「他」/名字，角色写名字，禁止用「我」。
+    """
+    who = _safe_me_name(me_name, "他")
+    role = _safe_me_name((friend or {}).get("name"), "她")
+    sys = (
+        "下面是一个人和一个角色最近的聊天记录。请**以旁观者的视角**写 3~6 句，"
+        "记下值得长期记住的事。\n"
+        "硬性要求：\n"
+        "- 全程第三人称，**绝对不要用「我」**；说话的这个人统一写「" + who + "」，"
+        "角色统一写「" + role + "」；\n"
+        "- 不写台词、不写内心戏，不替任何人说「我是…」「你是…」；\n"
+        "- 他说的话写成「" + who + "说…」；角色自己的认知写成「" + role + " 认为…」；\n"
+        "- 前面说错、后来纠正过的，以最后一次为准（比如像素是 2410 万，不是 2450 万）；\n"
+        "- 只记：喜好、想要的东西、人物关系（谁是谁）、称呼、约定、重要经历、忌讳；\n"
+        "- 不评价、不抒情、不编造；一句一件事，能短就短；只输出总结本身。\n"
+        "示例：\n"
+        "「" + who + "想买尼康 Z7II；他纠正过 " + role + " 的像素是 2410 万（不是 2450 万）。"
+        "小柔是" + who + "的妻子，是他自己画的 Q 版角色。" + role
+        + " 是他的相机（相机娘），他明确说过没把她当工具。」\n\n"
+        + "\n".join(history_lines[-40:])
+    )
     text = call_llm(settings.get("baseUrl"), key, settings.get("model"),
-                    [{"role": "system", "content": sys}], max_tokens=220, temperature=0.6)
+                    [{"role": "system", "content": sys}], max_tokens=260, temperature=0.6)
     return _clean(text, 500)
 
 
@@ -2406,12 +2444,14 @@ def social_tick(uid="local", force=False):
             if len(msgs) - done < 30:
                 continue
             lines = []
+            me_name = _safe_me_name((st.get("me") or {}).get("name"), "他")
             for m in msgs[-40:]:
-                who = "我" if m.get("role") == "user" else (f.get("name") or "她")
+                # 这里也不能用「我」：摘要要旁观视角，喂进去的历史也按名字标
+                who = me_name if m.get("role") == "user" else (f.get("name") or "她")
                 if m.get("text"):
                     lines.append("%s：%s" % (who, m["text"][:60]))
             try:
-                mem = gen_memory(f, lines, s, key)
+                mem = gen_memory(f, lines, s, key, me_name)
             except Exception as e:
                 print("[social] 记忆失败：", e)
                 mem = ""

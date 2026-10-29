@@ -58,6 +58,31 @@ mb = srv.memory_block(f_mem)
 ok("记忆块含手写和自动", "我生日是 3 月 8 号" in mb and "他讨厌香菜" in mb, mb)
 ok("关掉自动记忆只剩手写",
    "他讨厌香菜" not in srv.memory_block(dict(f_mem, memoryOff=True)))
+# 记忆必须是旁观视角：她自己的提示词里，「我」不能指她自己
+ok("记忆块标注了旁观视角", "旁观记录" in mb and "不是你" in mb, mb)
+ok("手写笔记也说明了「我」指他", "里面的「我」指的都是他" in mb, mb)
+# 自动记忆写歪了，客户端可以改（_edits.friends 里点名 memory）
+_mf = srv.merge_friend({"id": "f1", "memory": "旧的：我老婆"}, {"id": "f1"}, {"memory": "新的：小柔是他的妻子"})
+ok("客户端能改自动记忆", _mf.get("memory") == "新的：小柔是他的妻子", _mf.get("memory"))
+# 总结提示词本身必须是旁观视角（防止以后又被改回「第一人称」）
+_cap = {}
+_orig_call = srv.call_llm
+def _fake_call(base, key, model, messages, **kw):
+    _cap["sys"] = messages[0]["content"]
+    return "他喜欢 Z7II"
+srv.call_llm = _fake_call
+srv.gen_memory({"name": "R6II"}, ["浩辰：想买 Z7II"], {}, "k", "浩辰")
+_gsys = _cap.get("sys", "")
+ok("记忆提示词要求旁观视角", "旁观者" in _gsys and "绝对不要用「我」" in _gsys, _gsys[:80])
+ok("记忆提示词用真名而不是「我」", "浩辰" in _gsys and "R6II" in _gsys, _gsys[:80])
+# 账号默认名字就是「我」：不能把代词当称呼，否则等于没修
+ok("代词名字会被换成「他」", srv._safe_me_name("我") == "他" and srv._safe_me_name("") == "他"
+   and srv._safe_me_name("你") == "他" and srv._safe_me_name("小满") == "小满")
+_cap.clear()
+srv.gen_memory({"name": "R6II"}, ["我：想买 Z7II"], {}, "k", "我")
+_gsys2 = _cap.get("sys", "")
+ok("名字是「我」时提示词也不写「我」", "统一写「我」" not in _gsys2 and "统一写「他」" in _gsys2, _gsys2[:80])
+srv.call_llm = _orig_call
 ok("生活事件进背景块", "三花猫" in srv.life_block(f_mem))
 
 f_ann = {"createdAt": int((time.time() - 99 * 86400) * 1000)}

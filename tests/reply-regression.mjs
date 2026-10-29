@@ -303,6 +303,17 @@ try {
     if (api.content.includes('你刚发')) return false;
     return true;
   `);
+  await check('记忆按旁观视角注入：不能让她把「我」当成自己', `
+    await resetCase();
+    f.memory = '小柔是我老婆，R6II 是我的相机';
+    f.memoryNotes = [{ id: 'n1', text: '小柔是我老婆' }];
+    const sys = memorySysFor(f);
+    if (!sys.includes('旁观记录')) return false;
+    if (!sys.includes('指的也是他，不是你')) return false;
+    if (!sys.includes('里面的「我」指的都是他')) return false;
+    // 记忆内容本身不能丢
+    return sys.includes('小柔是我老婆，R6II 是我的相机');
+  `);
   await check('分段回复第一段及时保存，停止后后续分段不再出现', `
     await resetCase({ delayOn: false, bursts: 2 }); await send('分两句说'); await advance(400);
     await complete(0, '第一段\\n第二段'); await advance(1500);

@@ -286,7 +286,7 @@ const GROUP_FIELDS = ['name', 'avatar', 'members', 'prompt', 'muted'];
 const FRIEND_FIELDS = ['name', 'avatar', 'persona', 'relations', 'dmMoment',
   'note', 'region', 'signature', 'personaChangedAt',
   'unread', 'readAt',
-  'memoryNotes', 'memoryOff', 'anniversaries', 'reminders', 'peerReadAt', 'lateReplyAt',
+  'memory', 'memoryNotes', 'memoryOff', 'anniversaries', 'reminders', 'peerReadAt', 'lateReplyAt',
   'diary', 'diaryAt', 'events', 'lastLifeAt', 'nextLifeAt', 'lastAnnivKey',
   'archivedBefore', 'archivedCount'];
 
@@ -2905,10 +2905,13 @@ function memorySysFor(f) {
   let out = '';
   const notes = memoryNotesOf(f);
   if (notes.length) {
-    out += '\n\n【他明确要求你记住的事（必须遵守，不要忘）】\n'
+    out += '\n\n【他明确要求你记住的事（必须遵守，不要忘；下面是他写的原话，里面的「我」指的都是他）】\n'
       + notes.slice(0, 30).map((n) => '- ' + n.slice(0, 120)).join('\n');
   }
-  if (f && f.memory && !f.memoryOff) out += `\n\n【你记得的事】${String(f.memory).slice(0, 600)}`;
+  if (f && f.memory && !f.memoryOff) {
+    out += '\n\n【你记得的事（旁观记录：「他」= 和你聊天的人；里面若还出现「我」，指的也是他，不是你）】\n'
+      + String(f.memory).slice(0, 600);
+  }
   const evs = ((f && f.events) || []).slice(-4)
     .map((e) => String((e && e.text) || '').trim()).filter(Boolean);
   if (evs.length) {
@@ -5491,9 +5494,11 @@ function openMemorySheet(f) {
     <div class="sheet-body">
       <div class="group">
         <div class="group-title">自动记忆</div>
-        <div class="kv" id="memAuto"></div>
+        <textarea id="memAutoText" class="memory-edit" rows="5" maxlength="600"
+          placeholder="还没有自动记忆（聊到 30 条她才会开始总结）"></textarea>
         <label class="field row-inline"><span>不再自动更新记忆</span><input id="memOff" type="checkbox" class="switch"></label>
-        <p class="hint">她每 30 条消息自己总结一次。关掉后只用下面你手写的。</p>
+        <p class="hint">她每 30 条消息自己总结一次，<b>用旁观视角写</b>（「他」= 你；不会用「我」指她自己）。
+          总结写歪了可以直接改上面这段，点「完成」就生效。</p>
       </div>
       <div class="group">
         <div class="group-title">你必须记住的事</div>
@@ -5505,9 +5510,8 @@ function openMemorySheet(f) {
         <p class="hint">这些会直接进她的提示词，优先级比自动记忆高。她记错了就加一条纠正她。</p>
       </div>
     </div>`);
-  $('#memAuto').textContent = f.memory
-    ? String(f.memory)
-    : '还没有自动记忆（聊到 30 条她才会开始总结）。';
+  const autoEl = $('#memAutoText');
+  if (autoEl) autoEl.value = f.memory ? String(f.memory) : '';
   $('#memOff').checked = !!f.memoryOff;
   renderMemoryNotes(f);
   if (!el.dataset.bound) {
@@ -5583,7 +5587,15 @@ function saveMemorySheet() {
   });
   f.memoryNotes = notes;
   f.memoryOff = $('#memOff').checked;
-  rememberFriendEdit(f, { memoryNotes: notes, memoryOff: f.memoryOff });
+  // 自动记忆也能手改：写歪了（比如把「我」写成她自己）直接在这里修
+  const patch = { memoryNotes: notes, memoryOff: f.memoryOff };
+  const autoEl = $('#memAutoText');
+  if (autoEl) {
+    const auto = String(autoEl.value || '').trim().slice(0, 600);
+    if (auto !== (f.memory || '')) patch.memory = auto;
+    f.memory = auto;
+  }
+  rememberFriendEdit(f, patch);
   persist();
   const el = document.getElementById('memorySheet');
   if (el) { el.classList.remove('open'); el.setAttribute('aria-hidden', 'true'); }
