@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f7f8fa">
 <title>轻聊</title>
-<link rel="stylesheet" href="style.css?v=31">
+<link rel="stylesheet" href="style.css?v=32">
 <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
@@ -35,6 +35,9 @@
         <svg viewBox="0 0 24 12" class="sb-icon"><rect x=".8" y="1" width="19" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="2.6" y="2.8" width="13" height="6.4" rx="1.6"/><path d="M21.4 4.2v3.6a2 2 0 0 0 0-3.6z"/></svg>
       </span>
     </div>
+
+    <!-- 网络抖一下（手机换网最常见）时的提示：自己会重连，不用重开 App -->
+    <div class="net-banner" id="netBanner" hidden></div>
 
     <div class="pages">
 
@@ -213,7 +216,8 @@
           <label class="field row-inline"><span>随机延迟</span><input id="fDelayOn" type="checkbox" class="switch"></label>
           <label class="field"><span>最短（秒）</span><input id="fDelayMin" type="number" min="0" max="600" step="1"></label>
           <label class="field"><span>最长（秒）</span><input id="fDelayMax" type="number" min="0" max="600" step="1"></label>
-          <p class="hint">这是开始生成前的等待时间，模型生成和联网读取还需要时间。好友资料里填写的节奏优先；留空才跟随这里。</p>
+          <p class="hint" id="delayHint">这是她「看到消息 → 开始打字」的等待时间；真正的回复在等待期就已经生成好了，到点会像真人一样一个字一个字打出来。</p>
+          <p class="hint" id="delayLive"></p>
           <label class="field row-inline"><span>正在输入特效</span><input id="fTypingFx" type="checkbox" class="switch"></label>
           <label class="field"><span>私聊最多几条</span><input id="fBursts" type="number" min="1" max="5" step="1"></label>
           <label class="field"><span>群聊每人最多几条</span><input id="fGroupBursts" type="number" min="1" max="10" step="1"></label>
@@ -534,6 +538,6 @@
   </div>
 </div>
 
-<script src="app.js?v=78"></script>
+<script src="app.js?v=79"></script>
 </body>
 </html>

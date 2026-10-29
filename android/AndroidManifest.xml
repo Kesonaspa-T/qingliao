@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.qingliao.app"
-    android:versionCode="56"
-    android:versionName="1.4.57">
+    android:versionCode="57"
+    android:versionName="1.4.58">
 
     <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="34" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 换网时通知网页立刻重连（MainActivity.registerNetWatcher） -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:label="@string/app_name"

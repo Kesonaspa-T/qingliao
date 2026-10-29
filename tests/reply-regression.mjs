@@ -25,6 +25,9 @@ const site = `http://127.0.0.1:${server.address().port}`;
 const chrome = spawn(process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', [
   '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
   '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
+  // 在已经套了一层沙箱的环境里（DeepSeek Harness 等）Chrome 自己的沙箱起不来，
+  // 加 CHROME_NO_SANDBOX=1 就能跑；默认还是开着沙箱。
+  ...(process.env.CHROME_NO_SANDBOX ? ['--no-sandbox'] : []),
 ], { stdio: 'ignore' });
 let ws;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -81,8 +84,10 @@ try {
     window.jobs = []; window.saved = [];
     Store.save = async s => saved.push(JSON.parse(JSON.stringify(s)));
     streamOnce = opts => {
-      const j = { body: opts.body, cancelled: false };
+      const j = { body: opts.body, cancelled: false, text: '' };
       j.promise = new Promise((resolve, reject) => { j.resolve = resolve; j.reject = reject; });
+      // 模拟流式：emit 就是模型一段一段地吐字
+      j.emit = t => { j.text += t; if (opts.onDelta) opts.onDelta({ content: t }); };
       j.cancel = () => { j.cancelled = true; }; // 模拟原生取消后不回调，旧结果仍可能迟到
       jobs.push(j); return j;
     };
@@ -107,19 +112,37 @@ try {
     console.log('PASS ' + name); count++;
   }
   for (const gap of [1000, 3000, 8000]) {
-    await check(`连发间隔 ${gap / 1000} 秒只生成一轮，等待小幅后移`, `
+    await check(`连发间隔 ${gap / 1000} 秒：等待期就开始生成，补充一句停 1 秒再推 1 秒`, `
       await resetCase(); await send('今天下雨了'); const due = r.deadline;
+      if (jobs.length !== 1) return false;                       // 假等待里就把模型请求发出去了
       await advance(${gap}); await send('出门记得带伞');
-      // 连发只生成一轮；等待时间允许小幅后移（模拟多想一会儿），但不超过 45 秒上限
-      if (!(r.deadline > due && r.deadline <= r.since + 45000) || chatEl.querySelector('.dots')) return false;
+      // 补充消息：按合并后的内容重新生成，等待时间 +2 秒（停 1 秒 + 再推 1 秒）
+      if (jobs.length !== 2 || !jobs[0].cancelled) return false;
+      if (!(r.deadline === due + 2000 || r.deadline === r.since + 45000)) return false;
+      if (chatEl.querySelector('.dots')) return false;            // 还没到点，不许冒气泡
       await advance(20000);
-      if (jobs.length !== 1 || !JSON.stringify(jobs[0].body).includes('今天下雨了') || !JSON.stringify(jobs[0].body).includes('出门记得带伞')) return false;
+      if (!JSON.stringify(jobs[1].body).includes('今天下雨了')) return false;
+      if (!JSON.stringify(jobs[1].body).includes('出门记得带伞')) return false;
       await complete(); await advance(20000);
-      return f.messages.filter(m => m.role === 'peer').length === 1 && jobs.length === 1 && r.phase === 'idle' && !chatEl.querySelector('.dots');
+      return f.messages.filter(m => m.role === 'peer').length === 1 && r.phase === 'idle' && !chatEl.querySelector('.dots');
     `);
   }
+  await check('到点后首字不用再等模型（等待期已经生成好了）', `
+    await resetCase({ delayMin: 10, delayMax: 10 });
+    await send('在吗'); await advance(3000);
+    jobs[0].emit('我在');                                     // 模型在假等待里就把字吐出来了
+    await advance(7000);                                      // 到点：先冒气泡
+    if (r.phase !== 'streaming' || !chatEl.querySelector('.dots')) return false;
+    await advance(1200);                                      // 气泡停一下，再按人的速度打出来
+    const bubble = r.holder && r.holder.bubble;
+    if (!bubble || !String(bubble.textContent || '').includes('我')) return false;
+    await complete(0, '我在'); await advance(20000);
+    return f.messages.filter(m => m.role === 'peer').map(m => m.text).join() === '我在';
+  `);
   await check('生成中点发送会合并新消息，取消旧结果且不再等完整延迟', `
-    await resetCase({ delayMin: 5, delayMax: 5 }); await send('第一句'); await advance(8000);
+    await resetCase({ delayMin: 5, delayMax: 5 }); await send('第一句');
+    await advance(8000);
+    if (r.phase !== 'streaming' || !chatEl.querySelector('.dots')) return false;
     inputEl.value = '第二句'; inputEl.dispatchEvent(new Event('input'));
     if (sendBtn.textContent !== '发送') return false;
     sendBtn.click(); await flush(); await advance(0);
@@ -136,18 +159,35 @@ try {
     if (chatEl.querySelectorAll('.dots').length !== 1 || !r.holder.bubble.isConnected) return false;
     closeChat(); openChat('friend', f.id);
     if (chatEl.querySelectorAll('.dots').length !== 1) return false;
-    await complete(); return !chatEl.querySelector('.dots') && f.messages.length === 2;
+    await complete(); await advance(20000);
+    return !chatEl.querySelector('.dots') && f.messages.length === 2;
   `);
   await check('空结果和接口错误不会静默消失，重绘后错误仍显示', `
-    await resetCase({ delayOn: false }); await send('空回复'); await advance(400); await complete(0, ''); renderChat();
+    await resetCase({ delayOn: false }); await send('空回复'); await advance(400);
+    await complete(0, ''); await advance(2000); renderChat();
     if (!r.error || !chatEl.querySelector('.error') || r.phase !== 'idle') return false;
-    await send('重试'); await advance(400); jobs[1].reject(new Error('模拟网络失败')); await flush(); renderChat();
+    await send('重试'); await advance(400); jobs[1].reject(new Error('模拟网络失败')); await advance(2000); renderChat();
     return r.error === '模拟网络失败' && chatEl.textContent.includes('模拟网络失败') && !chatEl.querySelector('.dots');
+  `);
+  await check('手机断流：还没出字就自动重连，不把人晾着', `
+    await resetCase({ delayOn: false }); await send('断流'); await advance(400);
+    jobs[0].reject(new TypeError('Failed to fetch')); await flush(); await advance(1500);
+    if (jobs.length !== 2) return false;                       // 自动重连了一次
+    jobs[1].emit('重连上了'); await complete(1, '重连上了'); await advance(20000);
+    return f.messages.filter(m => m.role === 'peer').map(m => m.text).join() === '重连上了';
+  `);
+  await check('手机断流：已经打出来的半截不丢，别的也不重发', `
+    await resetCase({ delayOn: false }); await send('半截'); await advance(400);
+    jobs[0].emit('我今天有点累，'); jobs[0].reject(new TypeError('Failed to fetch'));
+    await advance(20000);
+    const replies = f.messages.filter(m => m.role === 'peer').map(m => m.text);
+    return replies.length === 1 && replies[0].includes('我今天有点累') && jobs.length === 1;
   `);
   await check('90 秒总超时取消任务；迟到响应不会落地', `
     await resetCase({ delayOn: false }); await send('超时'); await advance(400); await advance(90000);
     if (!jobs[0].cancelled || r.phase !== 'idle' || !r.error.includes('超时')) return false;
-    await complete(0, '迟到消息'); return f.messages.length === 1 && !!chatEl.querySelector('.error');
+    await complete(0, '迟到消息'); await advance(20000);
+    return f.messages.length === 1 && !!chatEl.querySelector('.error');
   `);
   await check('准备链接期间停止，后续不会偷偷发起模型请求', `
     await resetCase({ delayOn: false }); const original = prepareLinkDoc; let finish;
@@ -159,7 +199,8 @@ try {
     await resetCase(); await send('后台测试'); testClock.now += 30000;
     document.dispatchEvent(new Event('visibilitychange')); await flush();
     if (jobs.length !== 1 || r.phase !== 'streaming') return false;
-    await advance(0); await complete(); return jobs.length === 1 && f.messages.length === 2;
+    await advance(0); await complete(); await advance(20000);
+    return jobs.length === 1 && f.messages.length === 2;
   `);
   await check('已读等待明确显示；再次发言取消等待且不重新抽签', `
     await resetCase({ lateOn: true, lateChance: 30 });
@@ -168,39 +209,78 @@ try {
     await send('第一句'); renderChat();
     if (!f.lateReplyAt || statusEl.textContent !== '已读，等会儿回' || !chatEl.querySelector('.read-tag')) { Math.random = random; return false; }
     await send('第二句'); Math.random = random; await advance(0); await complete();
+    await advance(20000);
     return !f.lateReplyAt && jobs.length === 1 && r.phase === 'idle';
   `);
   await check('已读等待到期/关闭时直接生成，不再追加随机等待', `
     await resetCase({ lateOn: true }); await send('稍后回'); stopReply('friend', f); await flush();
-    f.lateReplyAt = Date.now() + 60000; testClock.now += 60000; lateReplyTick(); await advance(0); await complete();
-    if (jobs.length !== 1 || f.lateReplyAt) return false;
+    const before = jobs.length;
+    f.lateReplyAt = Date.now() + 60000; testClock.now += 60000; lateReplyTick(); await advance(0);
+    if (jobs.length !== before + 1) return false;              // 到点直接生成，不再抽等待
+    await complete(); await advance(20000);
+    if (f.lateReplyAt || !f.messages.some(m => m.role === 'peer')) return false;
     await send('又一句'); stopReply('friend', f); await flush(); f.lateReplyAt = Date.now() + 60000;
-    state.settings.lateOn = false; lateReplyTick(); await advance(0); return jobs.length === 2 && !f.lateReplyAt;
+    state.settings.lateOn = false; lateReplyTick(); await advance(0);
+    return !f.lateReplyAt && jobs.length > before + 1;
   `);
   await check('缺少 Key 的错误、发送按钮、好友覆盖值与零秒上限', `
     await resetCase({ apiKey: '' }); f.settings = { delayMax: 0, delayMin: 20 };
     if (delayFor(f) !== 0) return false;
     f.settings = { delayMin: 12, delayMax: 12 }; if (delayFor(f) !== 12000) return false;
-    f.settings = {}; await send('没填 Key'); await advance(10000); renderChat();
+    f.settings = {}; await send('没填 Key');
+    if (jobs.length !== 0) return false;                       // 没 Key 不提前发请求
+    await advance(10000); renderChat();
     return r.phase === 'idle' && sendBtn.textContent === '发送' && !!chatEl.querySelector('.error');
   `);
+  await check('延迟真的是区间内随机，不是固定一个数', `
+    await resetCase({ delayMin: 3, delayMax: 10, delayOn: true }); f.settings = {};
+    const seen = new Set(); let lo = 1e9, hi = -1;
+    for (let i = 0; i < 60; i += 1) { const v = delayFor(f); seen.add(Math.round(v)); lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    if (lo < 3000 || hi > 10000 || seen.size < 8) return false;
+    // 好友自己的节奏优先，界面上要能算出「现在到底几秒」
+    state.settings.delayMin = 3; state.settings.delayMax = 10;
+    const g = delayRange(f); if (g.min !== 3 || g.max !== 10) return false;
+    f.settings = { delayMin: 5, delayMax: 5 };
+    const own = delayRange(f);
+    return own.min === 5 && own.max === 5;
+  `);
+  await check('手机看大图：@blob: 要换成服务器地址，不再是裂图', `
+    await resetCase();
+    const wasLocal = LOCAL_MODE; LOCAL_MODE = false; SERVER = 'http://example.test'; TOKEN = 'tk';
+    f.messages.push({ id: 'img1', role: 'peer', authorId: f.id, image: '@blob:abc.jpg',
+      thumb: 'data:image/png;base64,AAAA', ts: Date.now() });
+    renderChat();
+    const im = chatEl.querySelector('.bubble.pic img');
+    // 缩略图还是本地 data URL（秒出），点开的大图必须是服务器地址
+    if (!im || !im.src.startsWith('data:image/')) { LOCAL_MODE = wasLocal; return false; }
+    im.click(); await flush();
+    const lb = document.getElementById('lightboxImg');
+    const ok = !!lb && lb.src.includes('/api/blob/abc.jpg') && !lb.src.includes('@blob:');
+    const box = document.getElementById('lightbox'); if (box) box.classList.remove('open');
+    LOCAL_MODE = wasLocal; SERVER = ''; TOKEN = '';
+    return ok;
+  `);
   await check('分段回复第一段及时保存，停止后后续分段不再出现', `
-    await resetCase({ delayOn: false, bursts: 2 }); await send('分两句说'); await advance(400); await complete(0, '第一段\\n第二段');
-    await advance(250);
+    await resetCase({ delayOn: false, bursts: 2 }); await send('分两句说'); await advance(400);
+    await complete(0, '第一段\\n第二段'); await advance(1500);
     if (!saved.some(s => s.friends[0].messages.some(m => m.text === '第一段'))) return false;
-    stopReply('friend', f); await advance(2000);
-    return f.messages.filter(m => m.role === 'peer').length === 1 && r.phase === 'idle';
+    const before = f.messages.filter(m => m.role === 'peer').length;
+    stopReply('friend', f); await advance(3000);
+    const after = f.messages.filter(m => m.role === 'peer').length;
+    return after === before && r.phase === 'idle';
   `);
   await check('分段发送时的新消息只追加一轮，已回答的消息不重排', `
-    await resetCase({ delayOn: false, bursts: 2 }); await send('第一个问题'); await advance(400); await complete(0, '第一段\\n第二段');
-    await send('新问题'); await advance(1100);
+    await resetCase({ delayOn: false, bursts: 2 }); await send('第一个问题'); await advance(400);
+    await complete(0, '第一段\\n第二段'); await advance(1500);
+    await send('新问题'); await advance(2000);
     if (jobs.length !== 2) return false;
-    await complete(1, '新问题的回答'); await advance(2000); return jobs.length === 2 && r.phase === 'idle';
+    await complete(1, '新问题的回答'); await advance(20000);
+    return jobs.length === 2 && r.phase === 'idle';
   `);
   await check('同步收到服务器兜底后取消本机未发送回复', `
     await resetCase({ delayOn: false }); await send('等待兜底'); await advance(400);
     const remote = JSON.parse(JSON.stringify(state)); remote.friends[0].messages.push({ id: 'fallback', role: 'peer', text: '服务器回复', ts: Date.now(), source: 'fallback', replyTo: f.messages[0].id });
-    mergeRemote(remote); await flush(); renderChat(); await complete(0, '不应出现');
+    mergeRemote(remote); await flush(); renderChat(); await complete(0, '不应出现'); await advance(2000);
     return jobs[0].cancelled && f.messages.filter(m => m.role === 'peer').length === 1 && r.phase === 'idle';
   `);
   await check('真实流式入口不会使用普通接口 25 秒超时', `

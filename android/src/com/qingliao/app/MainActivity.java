@@ -2,8 +2,13 @@ package com.qingliao.app;
 
 import android.app.Activity;
 import android.content.ClipData;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -91,6 +96,10 @@ public class MainActivity extends Activity {
         // 登录态另存一份原生文件：WebView 清 localStorage 也不会掉登录
         web.addJavascriptInterface(new SessionBridge(this), "QingliaoSession");
 
+        // 换网（Wi-Fi ↔ 流量）时 WebView 有时压根不派发 online 事件：原生盯一层，
+        // 网络一变就让网页立刻去重连，别等下一轮 30 秒退避。
+        registerNetWatcher();
+
         // Android 13+ 的手势返回 / 三键返回都走这里
         if (Build.VERSION.SDK_INT >= 33) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -105,6 +114,37 @@ public class MainActivity extends Activity {
 
         setContentView(web);
         web.loadUrl("file:///android_asset/www/index.html");
+    }
+
+    /** 网络通了/断了都喊网页一声（网页里是 window.qingliaoNetChanged）。 */
+    private void registerNetWatcher() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return;
+            NetworkRequest req = new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build();
+            cm.registerNetworkCallback(req, new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) { pingPage(); }
+
+                @Override
+                public void onLost(Network network) { pingPage(); }
+            });
+        } catch (Exception ignored) {
+            // 拿不到网络状态就算了，网页自己的 online 事件还能兜一层
+        }
+    }
+
+    private void pingPage() {
+        if (web == null) return;
+        web.post(new Runnable() {
+            @Override
+            public void run() {
+                if (web == null) return;
+                web.evaluateJavascript(
+                        "window.qingliaoNetChanged && window.qingliaoNetChanged();", null);
+            }
+        });
     }
 
     @Override

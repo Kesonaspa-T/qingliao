@@ -117,6 +117,21 @@ html[data-theme="dark"] body {
 .sb-right { display: flex; align-items: center; gap: 5px; }
 .sb-icon { width: 16px; height: 11px; fill: currentColor; opacity: .85; }
 
+/* 断网/换网时的重连提示条：不挡操作，恢复后自己消失 */
+.net-banner {
+  flex: 0 0 auto;
+  margin: 6px 10px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #fff4d6;
+  color: #8a6a20;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+}
+.net-banner[hidden] { display: none; }
+[data-theme="dark"] .net-banner { background: #3a3324; color: #e7c98b; }
+
 /* 导航栏 */
 .nav {
   flex: 0 0 auto;
@@ -694,6 +709,8 @@ html[data-theme="dark"] .switch { background: #3a3d44; }
   line-height: 1.6;
   color: var(--sub);
 }
+/* 「现在生效：几秒」那行要换行显示好友覆盖情况 */
+#delayLive { white-space: pre-line; }
 .hint code, .footnote code {
   background: var(--field-bg);
   border-radius: 4px;
@@ -1347,8 +1364,17 @@ html[data-theme="dark"] .login { background: #0b0d10; }
   background: rgba(0, 0, 0, .82);
   cursor: zoom-out;
 }
-#lightbox.open { display: flex; }
-#lightbox img { max-width: 92vw; max-height: 92vh; border-radius: 8px; }
+#lightbox.open { display: flex; flex-direction: column; gap: 12px; }
+#lightbox img { max-width: 92vw; max-height: 88vh; border-radius: 8px; }
+#lightbox .lightbox-hint {
+  max-width: 80vw;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
+  opacity: .9;
+}
+#lightbox .lightbox-hint:empty { display: none; }
 
 /* 搜索框 */
 #searchBox {

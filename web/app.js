@@ -1114,16 +1114,16 @@ function renderMoments() {
       grid.className = 'moment-grid' + (pics.length === 2 ? ' two' : '') + (pics.length === 3 ? ' three' : '');
       for (const src of pics.slice(0, 9)) {
         const im = document.createElement('img');
-        im.src = imgSrc(src);
+        setImgRef(im, src);
         im.alt = '';
-        im.addEventListener('click', () => openLightbox(imgSrc(src)));
+        im.addEventListener('click', () => openLightbox(src));
         grid.append(im);
       }
       card.append(grid);
     } else if (m.image) {
       const im = document.createElement('img');
       im.className = 'moment-img';
-      im.src = imgSrc(m.image);
+      setImgRef(im, m.image);
       im.alt = '';
       im.loading = 'lazy';
       im.addEventListener('click', () => openLightbox(m.image));
@@ -1197,19 +1197,74 @@ function renderMoments() {
   }
 }
 
-function openLightbox(src) {
+/** 重试时给 URL 加个缓存串：手机换网后第一次请求经常是坏的，隔一会儿再来一次就好。 */
+function cacheBust(url, n) {
+  if (!url) return url;
+  return url + (url.indexOf('?') === -1 ? '?' : '&') + 'r=' + n;
+}
+
+/**
+ * 看大图。ref 可能是 @blob:（服务器上的文件）/ data: / http(s)。
+ * 以前这里直接把 ref 塞进 <img src>，@blob: 的图在手机上就是一张裂图的小图标；
+ * 现在统一过 imgSrc()，失败先退回缩略图、再带缓存串重试，实在不行给一句人话。
+ */
+function openLightbox(ref, fallbackRef) {
   let box = document.getElementById('lightbox');
   if (!box) {
     box = document.createElement('div');
     box.id = 'lightbox';
     const img = document.createElement('img');
     img.id = 'lightboxImg';
-    box.append(img);
+    img.alt = '';
+    const hint = document.createElement('div');
+    hint.className = 'lightbox-hint';
+    box.append(img, hint);
     document.body.append(box);
     box.addEventListener('click', () => { box.classList.remove('open'); });
   }
-  document.getElementById('lightboxImg').src = src;
+  const img = document.getElementById('lightboxImg');
+  const hint = box.querySelector('.lightbox-hint');
+  const full = imgSrc(ref) || imgSrc(fallbackRef);
+  const small = imgSrc(fallbackRef) || imgSrc(ref);
+  const say = (t) => { if (hint) hint.textContent = t || ''; };
+  say('');
+  if (!full && !small) {
+    // 单机模式下 @blob: 没有服务器可取；老数据里不该有，但别让人对着裂图发愣
+    img.removeAttribute('src');
+    img.hidden = true;
+    say(isCloud() ? '这张图没取到地址，回聊天里重新点一次试试' : '单机模式看不到这张图（图存在服务器上）');
+    box.classList.add('open');
+    return;
+  }
+  let step = 0;
+  const show = (url) => { img.hidden = false; img.src = url; };
+  img.onload = () => say('');
+  img.onerror = () => {
+    step += 1;
+    if (step === 1 && small && small !== full) { show(small); return; }
+    if (step === 2 && full) { say('正在重试…'); setTimeout(() => show(cacheBust(full, 2)), 600); return; }
+    if (step === 3 && small && small !== full) { setTimeout(() => show(cacheBust(small, 3)), 900); return; }
+    img.hidden = true;
+    say('图片没加载出来：网络断了一下。点屏幕关掉，再点一次图就好了');
+  };
+  show(full || small);
   box.classList.add('open');
+}
+
+/** 聊天里的缩略图：加载失败先退到另一张、再带缓存串重试，别一直空着。 */
+function setImgRef(img, ref, fallbackRef) {
+  const primary = imgSrc(ref) || imgSrc(fallbackRef);
+  const spare = imgSrc(fallbackRef) || '';
+  if (!primary) { img.removeAttribute('src'); return; }
+  let tries = 0;
+  img.addEventListener('error', () => {
+    tries += 1;
+    if (tries === 1 && spare && spare !== primary) { img.src = spare; return; }
+    if (tries <= 3) {
+      setTimeout(() => { img.src = cacheBust(tries === 2 ? primary : (spare || primary), tries); }, 500 * tries);
+    }
+  });
+  img.src = primary;
 }
 
 function deleteMoment(id) {
@@ -1848,10 +1903,14 @@ function renderMessage(msg, opts = {}) {
       bubble.classList.add('pic');
       img.className = 'pic';
     }
-    img.src = imgSrc(msg.thumb || msg.image);
+    setImgRef(img, msg.thumb || msg.image, msg.image);
     img.alt = '';
     img.loading = 'lazy';
-    img.addEventListener('click', () => openLightbox(msg.image));
+    img.addEventListener('click', (e) => {
+      // 别让「点图看大图」顺手把消息菜单也打开（桌面上两个都会触发）
+      e.stopPropagation();
+      openLightbox(msg.image, msg.thumb);
+    });
     bubble.append(img);
   } else if (msg.file && msg.file.name) {
     bubble.classList.add('file-bubble');
@@ -1983,11 +2042,32 @@ window.QingliaoNative = {
   },
 };
 
+/** 浏览器的「网断了」各种说法，统一认出来：换网、信号抖动、DNS 断掉都算。 */
+function isNetError(e) {
+  const raw = String((e && e.message) || e || '');
+  if (/Failed to fetch|NetworkError|Load failed|network error|network changed|ERR_NETWORK|ERR_INTERNET|ERR_CONNECTION|net::/i.test(raw)) {
+    return true;
+  }
+  return !!(e && (e.name === 'TypeError' || e.name === 'NetworkError')
+    && /fetch|network/i.test(raw));
+}
+
+/** 断流时已经打出来的半截：尽量切在句子边界，别把「我今」这种残句发出去。 */
+function trimPartial(text) {
+  const t = String(text || '').trim();
+  if (!t) return '';
+  const marks = ['。', '！', '？', '…', '\n', '!', '?', '.', '~'];
+  let cut = -1;
+  for (const m of marks) cut = Math.max(cut, t.lastIndexOf(m));
+  if (cut >= Math.max(0, t.length * 0.5)) return t.slice(0, cut + 1).trim();
+  return t;
+}
+
 /** 把浏览器的原始报错翻译成人话，别再直接把 "Failed to fetch" 甩给用户。 */
 function friendlyError(e) {
   const raw = String((e && e.message) || e || '');
-  if (/Failed to fetch|NetworkError|Load failed|network error/i.test(raw)) {
-    return '网络不通（检查 Base URL、API Key 和网络）';
+  if (isNetError(e)) {
+    return '网络断了一下，这条没发出去（换个网再试，或者直接再发一次）';
   }
   if (/abort/i.test(raw)) return '请求超时';
   return raw || '未知错误';
@@ -2028,6 +2108,11 @@ const SEARCH_TOOL = {
 };
 
 function searchEnabled() { return !!state.settings.webSearch; }
+
+/** 有没有配好模型接口：没配就别在等待期偷偷发请求。 */
+function canGenerate() {
+  return !!String(state.settings.apiKey || '').trim() && !!String(state.settings.model || '').trim();
+}
 
 function toolsUrl(path) {
   const base = (state.settings.baseUrl || '').trim().replace(/\/+$/, '');
@@ -2222,7 +2307,9 @@ function buildMessages(friend, conv, nudge, imgMap) {
   let sys = (friend.persona || DEFAULT_PERSONA).trim();
   sys += memorySysFor(friend);
   const meName = state.me.name || '我';
-  sys += `\n\n【环境】现在是 ${timeOf(now.getTime())}，${weekday(now)}。你在和「${meName}」聊天，用手机。`;
+  // 「现在几点」每分钟都在变，不能放在系统提示词开头：那样后面几千字的前缀缓存
+  // 全部失效，每次都要重新预填充，首字自然就慢。这里先记下来，放到系统提示词最后。
+  const envBlock = `\n\n【环境】现在是 ${timeOf(now.getTime())}，${weekday(now)}。你在和「${meName}」聊天，用手机。`;
   // 小模型最容易犯的错：时间对不上、一句话塞好几件事、说错了硬编。
   sys += '\n【说话要讲道理】'
     + '\n- 时间、地点、正在做的事，要和【环境】以及前面说过的话对得上；拿不准就别提具体时间'
@@ -2404,6 +2491,9 @@ function buildMessages(friend, conv, nudge, imgMap) {
   if (bursts > 1) {
     sys += `\n\n【发送方式】多数时候发 2 条：第一句先接话，第二句补一句自己的反应或小事，用换行分开，每条不超过 20 字；偶尔只发 1 条，最多 ${bursts} 条。`;
   }
+
+  // 易变的内容（时间）放最后：前面的人设/规则/历史不变，前缀缓存就能一直命中。
+  sys += envBlock;
 
   const out = [{ role: 'system', content: sys }];
   const limit = Math.max(6, Number(s.contextLimit) || 60);
@@ -2633,19 +2723,42 @@ async function runChat(friend, conv, r, nudge) {
   const paint = (piece) => {
     if (!piece) return;
     painted += piece;
-    const h = r.holder;
+    const holder = r.rt;                 // 私聊：job.rt 是会话运行状态，打字节奏归它管
+    if (holder) {
+      holder.painted = painted;
+      revealStep(holder);
+      return;
+    }
+    const h = r.holder;                  // 群聊还是老样子：直接写进临时气泡
     if (!h || !h.bubble || !h.bubble.isConnected) return;
     h.bubble.textContent = painted.slice(-6000);
     if (isActive('friend', conv.id)) scrollBottom();
   };
 
+  let netTries = 0;
   for (let round = 0; round < 3; round += 1) {
     check();
     painted = '';
     const job = streamOnce({ url: chatUrl(), key, body: buildBody(convo, useTools),
       onDelta: (d) => { if (d && d.content) paint(d.content); } });
     r.abort = job.cancel;
-    const res = await job.promise;
+    let res;
+    try {
+      res = await job.promise;
+    } catch (e) {
+      // 手机换个网 / 信号抖一下：还没出字就自己重连试两次（不白瞎这一轮），
+      // 已经出了字就把打出来的半截收下——总比整条回复丢掉、让人重发强。
+      if (isNetError(e) && !painted && netTries < 2) {
+        netTries += 1;
+        if (r.rt && isActive('friend', conv.id)) setStatus('网络断了一下，正在重连…');
+        await sleep(600 * netTries);
+        check();
+        round -= 1;
+        continue;
+      }
+      if (isNetError(e) && painted) { text = trimPartial(painted); break; }
+      throw e;
+    }
     check();
 
     if (res.toolCalls && res.toolCalls.length) {
@@ -2681,7 +2794,9 @@ async function runChat(friend, conv, r, nudge) {
 function rtOf(key) {
   if (!rt.has(key)) {
     rt.set(key, { phase: 'idle', timer: null, abort: null, queued: false, since: 0,
-      deadline: 0, stopped: false, late: false, job: null, holder: null, error: '', delivering: false });
+      deadline: 0, stopped: false, late: false, job: null, holder: null, error: '', delivering: false,
+      // 提前生成 + 人味打字：painted 是模型已经给出的字，shown 是屏幕上已经打出来的字
+      painted: '', shown: '', revealAt: 0, revealTimer: null });
   }
   return rt.get(key);
 }
@@ -2703,8 +2818,15 @@ function renderReplyState(kind, conv) {
   if (typing || r.error) {
     r.holder = renderMessage({ role: 'peer', authorId: conv.id, text: r.error || '' },
       { conv, kind, typing: !r.error, animate: false });
-    if (r.error) r.holder.bubble.classList.add('error');
+    if (r.error) {
+      r.holder.bubble.classList.add('error');
+    } else if (r.shown) {
+      // 重绘/切回聊天时别退回三个点：把已经打出来的字补回去，接着往下打
+      r.holder.bubble.textContent = r.shown.slice(-6000);
+      revealStep(r);
+    }
   }
+  if (!r.holder && r.revealTimer) { clearTimeout(r.revealTimer); r.revealTimer = null; }
   setStatus(r.error ? '回复失败，请重试' : r.phase === 'streaming' ? '对方正在输入…'
     : conv.lateReplyAt ? '已读，等会儿回' : '在线');
   updateSendBtn();
@@ -2716,9 +2838,13 @@ function stopReply(kind, conv) {
   r.queued = false;
   clearTimeout(r.timer);
   r.deadline = 0;
-  if (r.job) r.job.cancel('stopped');
+  if (r.revealTimer) { clearTimeout(r.revealTimer); r.revealTimer = null; }
+  // 等待期就提前跑了的生成任务也要掐掉，否则停下来了它还会在后台烧 token
+  if (r.job) { clearTimeout(r.job.watchdog); r.job.cancel('stopped'); }
   else if (r.abort) r.abort();
-  if (r.phase === 'waiting') r.phase = 'idle';
+  if (r.phase === 'waiting') { r.phase = 'idle'; r.job = null; r.abort = null; }
+  r.painted = '';
+  r.shown = '';
   renderReplyState(kind, conv);
 }
 
@@ -2806,11 +2932,126 @@ function memorySysFor(f) {
   return out;
 }
 
+/** 连发时：先「停一下」1 秒看她补充了什么，再往后推 1 秒她才开始打。 */
+const FOLLOWUP_PAUSE_MS = 1000;
+const FOLLOWUP_PUSH_MS = 1000;
+/** 打字节奏：每 55~90ms 出一小截，积压越多出得越快（追上来就恢复常速）。 */
+const REVEAL_TICK_MS = 55;
+
+/**
+ * 等待区间。好友自己的节奏优先，留空跟随全局；delayMax=0 = 不装忙，立刻回。
+ * 抽成函数是为了设置页能显示「现在到底生效几秒」——以前好友的值压住全局，
+ * 界面上却还写着全局的 3~10，怎么调都像是没生效。
+ */
+function delayRange(friend) {
+  const on = !!fs(friend, 'delayOn', true);
+  const rawMin = Number(fs(friend, 'delayMin', 5));
+  const rawMax = Number(fs(friend, 'delayMax', 30));
+  let min = Number.isFinite(rawMin) ? rawMin : 5;
+  let max = Number.isFinite(rawMax) ? rawMax : 30;
+  min = Math.max(0, Math.min(600, min));
+  max = Math.max(0, Math.min(600, max));
+  if (min > max) min = max;              // 和以前一样：最长是硬上限
+  return { on, min, max };
+}
+
+/**
+ * 假等待：在区间内偏向「回得快」，偶尔才拖到最长。
+ * 均匀随机每次都平均用力，看着就像定时器；这里做一点偏置，才有等人的感觉。
+ */
 function delayFor(friend) {
-  if (!fs(friend, 'delayOn', true)) return 400;
-  const max = Math.max(0, Math.min(600, Number(fs(friend, 'delayMax', 30)) || 0));
-  const min = Math.min(max, Math.max(0, Number(fs(friend, 'delayMin', 5)) || 0));
-  return (min + Math.random() * (max - min)) * 1000;
+  const { on, min, max } = delayRange(friend);
+  if (!on) return 400;
+  if (max <= 0) return 0;
+  const span = max - min;
+  const u = Math.pow(Math.random(), 1.35);
+  return Math.max(0, min + span * u) * 1000;
+}
+
+/* ---------- 提前生成 + 像人一样打字 ---------- */
+
+/**
+ * 把模型已经给出来的字一点点打进气泡。还没到点（没有气泡）就只攒着，
+ * 所以等待期间的那几秒模型其实已经在生成了，到点不用再等「首字」。
+ */
+function revealStep(r) {
+  if (!r || r.revealTimer) return;
+  const h = r.holder;
+  if (!h || !h.bubble || !h.bubble.isConnected || r.delivering) return;
+  const wait = (Number(r.revealAt) || 0) - Date.now();
+  if (wait > 0) {
+    r.revealTimer = setTimeout(() => { r.revealTimer = null; revealStep(r); }, wait);
+    return;
+  }
+  const target = r.painted || '';
+  const shown = r.shown || '';
+  if (shown.length >= target.length) return;
+  const backlog = target.length - shown.length;
+  const take = Math.max(1, Math.ceil(backlog / 9));
+  r.shown = target.slice(0, shown.length + take);
+  h.bubble.textContent = r.shown.slice(-6000);
+  try { if (pageChat.classList.contains('open')) scrollBottom(); } catch (_) {}
+  r.revealTimer = setTimeout(() => { r.revealTimer = null; revealStep(r); }, REVEAL_TICK_MS + Math.random() * 35);
+}
+
+/** 等她把已经生成好的这段打完再落地成正式消息，避免文字跳一下。 */
+function drainReveal(r) {
+  const done = () => !r.painted || !r.holder || r.delivering
+    || (r.shown || '').length >= (r.painted || '').length;
+  if (done()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const tick = () => {
+      if (done() || Date.now() - started > 6000) {
+        if (r.painted && r.holder && !r.delivering) {
+          r.shown = r.painted;
+          try { r.holder.bubble.textContent = r.painted.slice(-6000); } catch (_) {}
+        }
+        resolve();
+        return;
+      }
+      setTimeout(tick, 70);
+    };
+    setTimeout(tick, 70);
+  });
+}
+
+/**
+ * 开一轮生成：job 里带取消开关和结果 promise。
+ * 等待期就开始跑（prefetch），到点再把字打出来 —— 首字延迟基本就没了。
+ */
+function beginGeneration(kind, conv, r) {
+  const job = { inputId: lastUserId(conv), cancelled: false, abort: null,
+    expiresAt: Date.now() + 90000, painted: '', rt: r };
+  const cancelled = new Promise((_, reject) => {
+    job.cancel = (reason) => {
+      if (job.cancelled) return;
+      job.cancelled = reason;
+      reject(new Error(reason === 'timeout'
+        ? '回复超时了，请检查网络或模型接口后重试。'
+        : reason === 'offline' ? '网络断了，这条没发出去，再发一次？' : '回复已取消'));
+      if (job.abort) { try { job.abort(); } catch (_) {} }
+    };
+  });
+  job.cancelledPromise = cancelled;
+  const friend = kind === 'friend' ? conv : null;
+  job.result = Promise.race([runChat(friend, conv, job, r.nudge || null), cancelled]);
+  job.result.catch(() => {});            // 出错有人接；这里只是别留下未处理的 rejection
+  job.watchdog = setTimeout(() => { if (r.job === job) job.cancel('timeout'); }, 90000);
+  return job;
+}
+
+/** 等待期先跑一遍；连发时按合并后的内容重来（她不能只回第一句）。 */
+function prefetchReply(kind, conv, r) {
+  if (r.job) { clearTimeout(r.job.watchdog); r.job.cancel('superseded'); }
+  if (r.revealTimer) { clearTimeout(r.revealTimer); r.revealTimer = null; }
+  r.painted = '';
+  r.shown = '';
+  r.revealAt = 0;
+  const job = beginGeneration(kind, conv, r);
+  r.job = job;
+  r.abort = () => job.cancel('stopped');
+  return job;
 }
 
 function scheduleReply(kind, conv, isNew, immediate = false) {
@@ -2822,16 +3063,18 @@ function scheduleReply(kind, conv, isNew, immediate = false) {
     if (kind === 'friend' && r.job && !r.delivering) r.job.cancel('superseded');
     return;
   }
-  // 连发：共用这一次生成，但每多一句「多想一会儿」，截止时间小幅后移（最多 45 秒）。
+  // 连发：先停 1 秒「看她补充了什么」，再往后推 1 秒（总共 +2 秒），
+  // 同时按合并后的内容重新生成。上限还是 45 秒，别真的晾着人。
   if (r.phase === 'waiting') {
     const cap = Math.max(Number(state.settings.delayMax) || 30, 45) * 1000;
-    const extra = 700 + Math.random() * 1100;
-    const next = Math.min(r.since + cap, (r.deadline || Date.now()) + extra);
+    const next = Math.min(r.since + cap,
+      (r.deadline || Date.now()) + FOLLOWUP_PAUSE_MS + FOLLOWUP_PUSH_MS);
     if (next > (r.deadline || 0)) {
       r.deadline = next;
       clearTimeout(r.timer);
       r.timer = setTimeout(() => startReply(kind, conv), Math.max(0, next - Date.now()));
     }
+    if (kind === 'friend' && canGenerate()) prefetchReply(kind, conv, r);
     renderReplyState(kind, conv);
     return;
   }
@@ -2840,10 +3083,16 @@ function scheduleReply(kind, conv, isNew, immediate = false) {
   r.stopped = false;
   r.error = '';
   r.queued = false;
+  r.painted = '';
+  r.shown = '';
+  r.revealAt = 0;
   const delay = immediate ? 0 : delayFor(kind === 'friend' ? conv : null);
   r.deadline = r.since + delay;
   clearTimeout(r.timer);
   r.timer = setTimeout(() => startReply(kind, conv), delay);
+  // 等待期就把模型请求发出去：这几秒是白等的，正好拿来生成。
+  // 没填 Key / 模型名就先别发，到点由 startReply 给一句人话。
+  if (!immediate && kind === 'friend' && canGenerate()) prefetchReply(kind, conv, r);
   renderReplyState(kind, conv);
 }
 
@@ -2863,6 +3112,9 @@ async function startReply(kind, conv) {
     ? '还没填 API Key，点「我的」→ 设置'
     : (!state.settings.model ? '还没填模型名，试试 deepseek-flash' : '');
   if (precheck) {
+    if (r.job) { clearTimeout(r.job.watchdog); r.job.cancel('stopped'); }
+    r.job = null;
+    r.abort = null;
     r.phase = 'idle';
     r.error = precheck;
     renderReplyState(kind, conv);
@@ -2872,30 +3124,34 @@ async function startReply(kind, conv) {
   r.phase = 'streaming';
   r.stopped = false;
   r.delivering = false;
-  const job = { inputId: lastUserId(conv), abort: null, cancelled: false, expiresAt: Date.now() + 90000 };
-  const cancelled = new Promise((_, reject) => {
-    job.cancel = (reason) => {
-      if (job.cancelled) return;
-      job.cancelled = reason;
-      reject(new Error(reason === 'timeout' ? '回复超时了，请检查网络或模型接口后重试。' : '回复已取消'));
-      if (job.abort) job.abort();
-    };
-  });
-  r.job = job;
-  r.abort = () => job.cancel('stopped');
+  let job = r.job;
+  if (!job || job.cancelled || job.inputId !== lastUserId(conv)) {
+    if (job) { clearTimeout(job.watchdog); job.cancel('superseded'); }
+    job = beginGeneration(kind, conv, r);
+    r.job = job;
+    r.abort = () => job.cancel('stopped');
+  }
+  // 到点：先冒气泡（她开始打字了）。提前生成好的字已经攒着了，
+  // 再等一小会儿就往外打——所以「首字」不用再等模型两三秒。
+  const ready = (r.painted || '').length;
+  r.revealAt = Date.now() + Math.round(240 + Math.random() * 300 + Math.min(480, ready) * 2);
   renderReplyState(kind, conv);
-  const watchdog = setTimeout(() => job.cancel('timeout'), 90000);
+  revealStep(r);
 
   try {
-    let text = await Promise.race([runChat(friend, conv, job, r.nudge || null), cancelled]);
+    let text = await job.result;
     if (job.cancelled || rt.get(key) !== r || convById(kind, conv.id) !== conv) return;
     // 同步也可能带来新的用户消息；不能把过期答案发在新问题后面。
     if (kind === 'friend' && job.inputId !== lastUserId(conv)) { r.queued = true; return; }
     if (!text.trim()) throw new Error('这次没收到内容，再试一次？');
     if (r.late && Math.random() < 0.75) text = '刚在忙，才看到。\n' + text;
     r.late = false;
+    // 有的接口不走流式（一口气返回）：也让她「打」一遍，别瞬间砸一整段。
+    if (!r.painted) { r.painted = text; revealStep(r); }
+    await drainReveal(r);
+    if (job.cancelled || rt.get(key) !== r) return;
     r.delivering = true;
-    clearTimeout(watchdog);
+    clearTimeout(job.watchdog);
     renderReplyState(kind, conv);
     await deliver(kind, conv, text, authorId, undefined,
       () => !job.cancelled && rt.get(key) === r && convById(kind, conv.id) === conv);
@@ -2907,16 +3163,19 @@ async function startReply(kind, conv) {
     }
   } catch (err) {
     if (job.cancelled !== 'superseded' && job.cancelled !== 'stopped') {
-      r.error = err && err.message ? err.message : '出错了';
+      r.error = friendlyError(err);
     }
   } finally {
-    clearTimeout(watchdog);
-    r.job = null;
-    r.abort = null;
+    clearTimeout(job.watchdog);
+    if (r.revealTimer) { clearTimeout(r.revealTimer); r.revealTimer = null; }
+    if (r.job === job) { r.job = null; r.abort = null; }
     r.nudge = null;
     r.proactive = false;
     r.delivering = false;
     r.phase = 'idle';
+    r.painted = '';
+    r.shown = '';
+    r.revealAt = 0;
     const queued = r.queued && !r.stopped && (job.cancelled === 'superseded'
       || job.inputId !== lastUserId(conv));
     r.queued = false;
@@ -3923,6 +4182,7 @@ function fillForm() {
   $('#fDelayOn').checked = !!s.delayOn;
   $('#fDelayMin').value = s.delayMin ?? 5;
   $('#fDelayMax').value = s.delayMax ?? 30;
+  renderDelayLive();
   $('#fTypingFx').checked = !!s.typingFx;
   $('#fBursts').value = s.bursts || 5;
   $('#fGroupBursts').value = s.groupBursts || 3;
@@ -3987,7 +4247,13 @@ function saveForm() {
   s.webSearch = $('#fSearch').checked;
   s.delayOn = $('#fDelayOn').checked;
   s.delayMin = Math.max(0, Math.min(600, Number($('#fDelayMin').value) || 0));
-  s.delayMax = Math.max(s.delayMin, Math.min(600, Number($('#fDelayMax').value) || s.delayMin));
+  // 最长留空时「沿用原来的最长」，不要再把它压成最短：
+  // 以前这么写，最短填 3、最长空着，就会变成固定 3 秒——看着就像延迟设置根本没生效。
+  const maxRaw = String($('#fDelayMax').value || '').trim();
+  const maxNum = Number(maxRaw);
+  s.delayMax = (maxRaw === '' || !Number.isFinite(maxNum))
+    ? Math.max(s.delayMin, Number(state.settings.delayMax) || 30)
+    : Math.max(s.delayMin, Math.min(600, maxNum));
   s.typingFx = $('#fTypingFx').checked;
   s.bursts = Math.max(1, Math.min(5, Number($('#fBursts').value) || 5));
   s.groupBursts = Math.max(1, Math.min(10, Number($('#fGroupBursts').value) || 3));
@@ -4028,6 +4294,43 @@ $('#btnSettings').addEventListener('click', openSheet);
 //（「表情包概率改了不生效」有一半是这个原因）。
 $('#btnSheetClose').addEventListener('click', saveForm);
 $('#btnSheetSave').addEventListener('click', saveForm);
+// 改延迟的时候把「现在到底几秒」实时算出来：不用保存才知道生效没生效
+['#fDelayMin', '#fDelayMax', '#fDelayOn'].forEach((sel) => {
+  const el = $(sel);
+  if (el) el.addEventListener('input', renderDelayLive);
+});
+
+/**
+ * 设置页里的小字：现在这条到底等几秒、是全局还是这个好友自己的节奏。
+ * 以前好友的节奏会盖住全局，界面却只写全局的数字，看着就像「设了没用」。
+ */
+function renderDelayLive() {
+  const el = document.getElementById('delayLive');
+  if (!el) return;
+  const num = (id, dflt) => {
+    const node = document.getElementById(id);
+    const v = node ? Number(node.value) : NaN;
+    return Number.isFinite(v) ? v : dflt;
+  };
+  if (!($('#fDelayOn') && $('#fDelayOn').checked)) {
+    el.textContent = '现在：随机延迟关着，发出去 0.4 秒她就开始打字。';
+    return;
+  }
+  const min = Math.max(0, Math.min(600, num('fDelayMin', 5)));
+  const max = Math.max(min, Math.min(600, num('fDelayMax', 30)));
+  let tail = '';
+  const conv = (state.conv && state.conv.kind === 'friend') ? currentConv() : null;
+  if (conv) {
+    const own = conv.settings || {};
+    if (own.delayMin !== undefined || own.delayMax !== undefined) {
+      const eff = delayRange(conv);
+      tail = '\n「' + conv.name + '」自己在资料里设了 ' + eff.min + '~' + eff.max + ' 秒，会盖过这里。';
+    } else {
+      tail = '\n当前聊天「' + conv.name + '」跟随这里。';
+    }
+  }
+  el.textContent = '现在生效：' + min + '~' + max + ' 秒里随机（多数靠前，偶尔拖到最后）' + tail;
+}
 $('#fTemp').addEventListener('input', (e) => { $('#fTempOut').textContent = Number(e.target.value).toFixed(1); });
 $('#fModel').addEventListener('input', syncChips);
 $('#modelChips').addEventListener('click', (e) => {
@@ -4609,8 +4912,15 @@ function renderFriendRhythm(target, isMe) {
   set('rDelayMax', own.delayMax);
   $('#rDelayMin').placeholder = '跟随全局 ' + state.settings.delayMin + ' 秒';
   $('#rDelayMax').placeholder = '跟随全局 ' + state.settings.delayMax + ' 秒';
-  $('#rDelayHint').textContent = '此处填写的秒数优先于全局；留空才跟随全局。随机延迟'
-    + (fs(target, 'delayOn', true) ? '已开启' : '已关闭') + '，模型生成和联网读取还需要时间。';
+  {
+    const eff = delayRange(target);
+    const ownSet = own.delayMin !== undefined || own.delayMax !== undefined;
+    $('#rDelayHint').textContent = '现在生效：'
+      + (eff.on ? eff.min + '~' + eff.max + ' 秒随机' : '随机延迟关着')
+      + '（' + (ownSet ? '这个好友自己设的'
+        : '跟随全局 ' + state.settings.delayMin + '~' + state.settings.delayMax + ' 秒') + '）。'
+      + '这里填了就用这里的；清空=跟随全局。等待期她其实已经在生成了，到点像真人一样打出来。';
+  }
   set('rNudge', own.nudgeAfter);
   set('rMomentIv', own.momentInterval ? (own.momentInterval / 3600) : undefined);
   set('rWake', own.wake);
@@ -6805,6 +7115,8 @@ function syncSchedule(ms) {
 
 function syncWake(reason) {
   if (!isCloud() || !TOKEN) return;
+  // 网络回来了/刚回到前台：把退避清零，这一拍就去重连，不用再等十几秒
+  if (reason === 'online' || reason === 'visible') syncFailures = 0;
   if (syncRunning && Date.now() - syncStartedAt < SYNC_STALE_MS) { syncSchedule(200); return; }
   syncSchedule(0);
   if (reason) syncLastError = '';
@@ -6847,12 +7159,28 @@ async function syncStep() {
     if (gen === syncGeneration) {
       if (syncAborter === ctrl) syncAborter = null;
       syncRunning = false;
+      // 手机换网时第一两次失败几乎都是瞬时的：先快点重试，别一上来就退避到 30 秒。
+      const waits = [1200, 2500, 5000, 9000, 16000, 30000];
       const wait = syncFailures
-        ? Math.min(30000, SYNC_INTERVAL * Math.min(8, 2 ** (syncFailures - 1)))
+        ? waits[Math.min(waits.length, syncFailures) - 1]
         : SYNC_INTERVAL;
       syncSchedule(wait);
+      updateNetBanner();
     }
   }
+}
+
+/** 断网/重连提示：不挡操作，恢复后自己消失；也让人知道 App 在自救而不是死了。 */
+function updateNetBanner() {
+  const el = document.getElementById('netBanner');
+  if (!el) return;
+  const stalled = syncLastOkAt && Date.now() - syncLastOkAt > 20000;
+  const bad = isCloud() && !!TOKEN && (syncFailures >= 2 || (!syncRunning && stalled));
+  el.hidden = !bad;
+  if (!bad) return;
+  el.textContent = navigator.onLine === false
+    ? '没网了。网络回来会自动接着同步，不用重开 App'
+    : '网络不太稳，正在重连…（消息还在这台手机上，不会丢）';
 }
 
 function startSync() {
@@ -7549,8 +7877,11 @@ document.addEventListener('wheel', wheelFallback, { passive: true });
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { resumeReplies(); syncWake('visible'); }
 });
-window.addEventListener('online', () => syncWake('online'));
+window.addEventListener('online', () => { syncFailures = 0; syncWake('online'); updateNetBanner(); });
+window.addEventListener('offline', () => { updateNetBanner(); });
 window.addEventListener('pageshow', () => { resumeReplies(); syncWake('pageshow'); });
+// 安卓 WebView 换网（Wi-Fi ↔ 流量）有时不派发 online，原生壳会主动喊一声
+window.qingliaoNetChanged = () => { syncFailures = 0; syncWake('online'); updateNetBanner(); };
 // 别让某个漏网的 promise 把同步循环带走。
 window.addEventListener('unhandledrejection', (e) => {
   syncLastError = String((e && e.reason && e.reason.message) || (e && e.reason) || 'unhandledrejection').slice(0, 120);
