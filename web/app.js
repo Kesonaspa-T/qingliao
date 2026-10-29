@@ -4828,6 +4828,7 @@ function renderFriendRhythm(target, isMe) {
       + '<p class="hint" id="rDelayHint"></p>'
       + '<label class="field"><span>静默多久主动找你（分钟）</span><input id="rNudge" type="number" min="10" max="1440" placeholder="跟随全局"></label>'
       + '<label class="field"><span>多久发一条朋友圈（小时）</span><input id="rMomentIv" type="number" min="0.2" max="72" step="0.5" placeholder="跟随全局"></label>'
+      + '<p class="hint">填了就按这个时间自己发，不再受全局「朋友圈频率」影响；留空=跟随全局。</p>'
       + '<label class="field row-inline"><span>会主动找我</span><input id="rProactive" type="checkbox" class="switch"></label>'
       + '<label class="field row-inline"><span>每天早晚问候</span><input id="rGreet" type="checkbox" class="switch"></label>'
       + '<label class="field row-inline"><span>她会画图</span><input id="rDoodle" type="checkbox" class="switch"></label>'
@@ -6581,6 +6582,39 @@ async function writeEssayNow(f) {
   toast('写好了，去聊天里看');
 }
 
+/** 单机模式：让某个好友发一条朋友圈（自动生成正文 + 排互动）。 */
+async function autoMomentBy(author) {
+  if (!author) return false;
+  const chatLines = (author.messages || []).slice(-8)
+    .filter((m) => (m.text || '').trim())
+    .map((m) => `${m.role === 'user' ? (state.me.name || '他') : '我'}：${String(m.text).slice(0, 50)}`);
+  // 设置里 ④ 写了就整段替换内置要求（APK 单机版的朋友圈就是这里长出来的）。
+  const customMoment = promptExtra('moment');
+  const momentReq = customMoment
+    ? `现在要发一条朋友圈。要求：\n${customMoment}\n`
+    : '现在要发一条朋友圈。要求：长度不限，一两句也行、多写几句也行，'
+      + '别为了凑字数写成小作文；至少有一个具体到能看见的东西（味道、声音、价钱、天气、别人的一句话）；'
+      + '可以短、可以没头没尾，像随手发的；别升华、别讲道理、别总结；'
+      + '不写配图说明，不加引号，不提“朋友圈”三个字，不提问；最多一个 emoji；直接输出正文，最多两段。';
+  try {
+    const text = cleanBlock(await quickChat([
+      { role: 'system', content: `${author.persona}\n\n`
+        + (chatLines.length
+          ? `你和他的私聊最近是这样（可以当素材，但不要写成流水账，也别提“他跟我说”“刚才聊到”）：\n${chatLines.join('\n')}\n\n`
+          : '')
+        + momentReq },
+      { role: 'user', content: `现在是${timeOf(Date.now())}。` },
+    ]), 600);
+    if (!text) return false;
+    const m = { id: uid('mo'), authorId: author.id, text, ts: Date.now(), likes: [], comments: [] };
+    state.moments.unshift(m);
+    enqueueReactions(m);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 async function clientSocialTick(force) {
   if (isCloud() && !force) return;   // 云端模式这些活由服务器干
   if (!(state.settings.apiKey || '').trim()) return;
@@ -6657,43 +6691,46 @@ async function clientSocialTick(force) {
     social.nextMomentAt = nxt;
     changed = true;
   }
-  if (!isCloud() && !quiet && hour >= 8 && hour <= 23 && nowSec2 >= nxt && state.friends.length) {
-    const awake = state.friends.filter((f) => !friendAsleep(f));
-    const author = awake.length ? awake[Math.floor(Math.random() * awake.length)] : null;
-    if (!author) {
-      // 都睡了：这一轮跳过，别把她半夜的朋友圈憋到白天一起发
-      social.nextMomentAt = nowSec2 + 3600;
-      changed = true;
-    } else try {
-      const chatLines = (author.messages || []).slice(-8)
-        .filter((m) => (m.text || '').trim())
-        .map((m) => `${m.role === 'user' ? (state.me.name || '他') : '我'}：${String(m.text).slice(0, 50)}`);
-      // 设置里 ④ 写了就整段替换内置要求（APK 单机版的朋友圈就是这里长出来的）。
-      const customMoment = promptExtra('moment');
-      const momentReq = customMoment
-        ? `现在要发一条朋友圈。要求：\n${customMoment}\n`
-        : '现在要发一条朋友圈。要求：长度不限，一两句也行、多写几句也行，'
-          + '别为了凑字数写成小作文；至少有一个具体到能看见的东西（味道、声音、价钱、天气、别人的一句话）；'
-          + '可以短、可以没头没尾，像随手发的；别升华、别讲道理、别总结；'
-          + '不写配图说明，不加引号，不提“朋友圈”三个字，不提问；最多一个 emoji；直接输出正文，最多两段。';
-      const text = cleanBlock(await quickChat([
-        { role: 'system', content: `${author.persona}\n\n`
-          + (chatLines.length
-            ? `你和他的私聊最近是这样（可以当素材，但不要写成流水账，也别提“他跟我说”“刚才聊到”）：\n${chatLines.join('\n')}\n\n`
-            : '')
-          + momentReq },
-        { role: 'user', content: `现在是${timeOf(Date.now())}。` },
-      ]), 600);
-      if (text) {
-        const m = { id: uid('mo'), authorId: author.id, text, ts: Date.now(), likes: [], comments: [] };
-        state.moments.unshift(m);
-        enqueueReactions(m);
+  // 单独设了朋友圈节奏的好友：按他自己的时间发，不参与全局窗口
+  if (!isCloud() && !quiet && hour >= 8 && hour <= 23) {
+    let posted = false;
+    for (const f of state.friends) {
+      const own = Number((f.settings || {}).momentInterval) || 0;
+      if (!own) continue;
+      const iv = Math.max(120, own);
+      let fn = Number(f.nextMomentAt) || 0;
+      if (fn > 1e12) fn = fn / 1000;
+      if (!fn) {
+        f.nextMomentAt = nowSec2 + iv * (0.5 + Math.random());
+        changed = true;
+        continue;
+      }
+      if (friendAsleep(f) || f.muted) continue;
+      if (nowSec2 >= fn) {
+        if (posted) continue;            // 每轮最多发一个，别一起刷屏
+        posted = true;
+        if (await autoMomentBy(f)) changed = true;
+        f.nextMomentAt = nowSec2 + iv * (0.7 + Math.random() * 0.8);
         changed = true;
       }
-    } catch (_) {}
-    social.lastMomentAt = nowSec2;
-    social.nextMomentAt = nowSec2 + interval * (0.8 + Math.random() * 0.7);
-    changed = true;
+    }
+  }
+
+  // 全局窗口：每 interval 一条，只从「跟随全局」的好友里挑一个
+  if (!isCloud() && !quiet && hour >= 8 && hour <= 23 && nowSec2 >= nxt) {
+    const pool = state.friends.filter((f) => !f.muted && !friendAsleep(f)
+      && !(Number((f.settings || {}).momentInterval) || 0));
+    if (!pool.length) {
+      // 没人跟随全局（或都睡了）：往后挪一小时再试，别半夜一起补发
+      social.nextMomentAt = nowSec2 + 3600;
+      changed = true;
+    } else {
+      const author = pool[Math.floor(Math.random() * pool.length)];
+      if (await autoMomentBy(author)) changed = true;
+      social.lastMomentAt = nowSec2;
+      social.nextMomentAt = nowSec2 + interval * (0.8 + Math.random() * 0.7);
+      changed = true;
+    }
   }
 
   // 小作文（单机模式）：每天 9:00-22:00 按概率掷一次，每人每天最多一篇

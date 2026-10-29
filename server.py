@@ -903,7 +903,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v43",
+                    "build": "v44",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -2037,8 +2037,22 @@ def create_moment_for(st, key, author):
     return True
 
 
+def _moment_iv_own(friend):
+    """这个好友自己设了朋友圈节奏吗（秒）。设了就不走全局窗口，只按他自己的时间发。"""
+    iv = (friend or {}).get("settings", {}).get("momentInterval")
+    if iv is None or iv == "":
+        return 0
+    try:
+        iv = float(iv)
+    except Exception:
+        return 0
+    return max(120.0, iv) if iv > 0 else 0
+
+
 def create_moment(st, key):
     friends = st.get("friends") or []
+    # 单独设了节奏的人由他自己的排期负责；全局窗口只挑「跟随全局」的人
+    friends = [f for f in friends if not _moment_iv_own(f)]
     if not friends:
         return False
     # 睡着的、免打扰的，不排她的朋友圈
@@ -2388,21 +2402,25 @@ def social_tick(uid="local", force=False):
             print("[MOMENT] dm queued by=%s moment=%s" % (who.get("id"), m.get("id")), flush=True)
 
         # 每个人独立的朋友圈排期（没设就跟随全局）。免打扰/睡着时不发。
+        # 每轮最多发一个：升级/改设置后一堆人的时间可能同时过期，
+        # 否则会同一分钟刷出好几条。
         if 8 <= hour <= 23 and not quiet:
+            posted_one = False
             for f in st.get("friends") or []:
-                own = f.get("settings") or {}
-                iv = own.get("momentInterval")
-                if iv is None:
+                iv = _moment_iv_own(f)
+                if not iv:
                     continue          # 跟随全局窗口机制
-                if friend_asleep(f):
+                if f.get("muted") or friend_asleep(f):
                     continue
-                iv = max(300, float(iv))
                 fn = float(f.get("nextMomentAt") or 0)
                 if fn <= 0:
                     f["nextMomentAt"] = now + iv * (0.5 + random.random())
                     changed = True
                     continue
                 if now >= fn:
+                    if posted_one:
+                        continue          # 还有人也到期了：留到下一轮，别一起刷屏
+                    posted_one = True
                     try:
                         create_moment_for(st, key, f)
                     except Exception as e:
@@ -2411,26 +2429,13 @@ def social_tick(uid="local", force=False):
                     changed = True
 
         if 8 <= hour <= 23 and not quiet and now >= nxt:
-            # 一个窗口里安排几个人发。
-            # 窗口周期 interval 里会排 k 个人，所以「1 分钟一条」如果还排 3~5 个，
-            # 实际就变成「1 分钟 3~5 条」。这里按间隔收一收：每 2 分钟最多排 1 个人。
-            friends_now = [f for f in (st.get("friends") or []) if not f.get("muted")]
-            per_window = max(1, int(interval // 120))
-            k = min(len(friends_now), random.randint(3, 5), per_window) if friends_now else 0
+            # 「朋友圈频率：X 分钟一条」就是每 X 分钟一条（从跟随全局的好友里挑一个）。
+            # 以前是一个窗口里排 3~5 个人，实际频率是设定的 1.5~3 倍；
+            # 单独设了节奏的人也照样被抽中——两处都改掉了。
             social["lastMomentAt"] = now
-            social["momentQueue"] = k
+            social["momentQueue"] = 0          # 老数据里的排队数作废
+            social.pop("nextSlotAt", None)
             social["nextMomentAt"] = now + interval * (0.8 + random.random() * 0.7)
-            step = interval / max(1, k) if k else interval
-            social["nextSlotAt"] = now + step * (0.3 + random.random() * 0.8)
-            changed = True
-
-        # 窗口内的排期：到点了就让一个人发
-        slot = float(social.get("nextSlotAt") or 0)
-        left = int(social.get("momentQueue") or 0)
-        if left > 0 and now >= slot and not quiet:
-            social["momentQueue"] = left - 1
-            step = interval / max(1, int(social.get("momentQueue") or left) + 1)
-            social["nextSlotAt"] = now + step * (0.4 + random.random() * 1.2)
             changed = True
             try:
                 create_moment(st, key)

@@ -271,6 +271,7 @@
             <span>朋友圈频率</span>
             <input id="fMomentFreq" type="number" min="1" max="1440" step="1"> <span style="color:var(--sub);font-size:13px">分钟一条</span>
           </label>
+          <p class="hint" id="momentHint">每隔这么久，从「跟随全局」的好友里挑一个人发一条。好友资料里单独填了「多久发一条朋友圈」的，按他自己的时间来，不受这里影响。</p>
           <label class="field row-inline"><span>她主动找你</span><input id="fProactive" type="checkbox" class="switch"></label>
           <label class="field"><span>空闲多少分钟后</span><input id="fIdle" type="number" min="3" max="180" step="1"></label>
           <label class="field"><span>老消息归档（天）</span><input id="fArchiveDays" type="number" min="0" max="3650" step="30"></label>
@@ -548,6 +549,6 @@
   </div>
 </div>
 
-<script src="app.js?v=83"></script>
+<script src="app.js?v=84"></script>
 </body>
 </html>
