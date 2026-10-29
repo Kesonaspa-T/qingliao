@@ -127,17 +127,29 @@ try {
       return f.messages.filter(m => m.role === 'peer').length === 1 && r.phase === 'idle' && !chatEl.querySelector('.dots');
     `);
   }
-  await check('到点后首字不用再等模型（等待期已经生成好了）', `
+  await check('到点先冒「正在输入」，整条消息一次性出现（不逐字蹦）', `
     await resetCase({ delayMin: 10, delayMax: 10 });
     await send('在吗'); await advance(3000);
-    jobs[0].emit('我在');                                     // 模型在假等待里就把字吐出来了
-    await advance(7000);                                      // 到点：先冒气泡
+    jobs[0].emit('我在呢');                                   // 模型在假等待里就生成好了
+    await complete(0, '我在呢');                              // 流结束
+    await advance(7000);                                      // 到点：冒气泡
     if (r.phase !== 'streaming' || !chatEl.querySelector('.dots')) return false;
-    await advance(1200);                                      // 气泡停一下，再按人的速度打出来
-    const bubble = r.holder && r.holder.bubble;
-    if (!bubble || !String(bubble.textContent || '').includes('我')) return false;
-    await complete(0, '我在'); await advance(20000);
-    return f.messages.filter(m => m.role === 'peer').map(m => m.text).join() === '我在';
+    const holder = r.holder;
+    if (!holder || !holder.bubble.isConnected) return false;
+    // 停一小会儿期间，气泡里绝对不能出现半个字（那就是又在「打」了）
+    let leaked = '';
+    for (let i = 0; i < 12; i += 1) {
+      await advance(60);
+      const t = holder && holder.bubble ? String(holder.bubble.textContent || '').trim() : '';
+      if (t) leaked = t;
+    }
+    if (leaked) return false;
+    await advance(6000);
+    const replies = f.messages.filter(m => m.role === 'peer').map(m => m.text);
+    if (replies.length !== 1 || replies[0] !== '我在呢') return false;
+    if (chatEl.querySelector('.dots')) return false;
+    // 整条只出现一次、没有中间态：消息条数=1，内容完整
+    return true;
   `);
   await check('生成中点发送会合并新消息，取消旧结果且不再等完整延迟', `
     await resetCase({ delayMin: 5, delayMax: 5 }); await send('第一句');
@@ -232,11 +244,23 @@ try {
     await advance(10000); renderChat();
     return r.phase === 'idle' && sendBtn.textContent === '发送' && !!chatEl.querySelector('.error');
   `);
-  await check('延迟真的是区间内随机，不是固定一个数', `
+  await check('延迟是 3~10 秒里均匀随机（不是老往 3 秒挤）', `
     await resetCase({ delayMin: 3, delayMax: 10, delayOn: true }); f.settings = {};
-    const seen = new Set(); let lo = 1e9, hi = -1;
-    for (let i = 0; i < 60; i += 1) { const v = delayFor(f); seen.add(Math.round(v)); lo = Math.min(lo, v); hi = Math.max(hi, v); }
-    if (lo < 3000 || hi > 10000 || seen.size < 8) return false;
+    // 固定随机数验证映射：均匀 → 3 + u*7；以前那种 pow(u,1.35) 偏置会被这里抓住
+    const rnd = Math.random;
+    Math.random = () => 0.5; const mid = delayFor(f);
+    Math.random = () => 0.25; const q1 = delayFor(f);
+    Math.random = () => 0.75; const q3 = delayFor(f);
+    Math.random = rnd;
+    if (mid !== 6500 || q1 !== 4750 || q3 !== 8250) return false;
+    const seen = new Set(); let lo = 1e9, hi = -1, sum = 0; const N = 200;
+    for (let i = 0; i < N; i += 1) {
+      const v = delayFor(f); seen.add(Math.round(v));
+      lo = Math.min(lo, v); hi = Math.max(hi, v); sum += v;
+    }
+    if (lo < 3000 || hi > 10000 || seen.size < 30) return false;
+    const mean = sum / N / 1000;
+    if (mean < 6.2 || mean > 6.8) return false;          // 均匀的均值应贴着 6.5
     // 好友自己的节奏优先，界面上要能算出「现在到底几秒」
     state.settings.delayMin = 3; state.settings.delayMax = 10;
     const g = delayRange(f); if (g.min !== 3 || g.max !== 10) return false;

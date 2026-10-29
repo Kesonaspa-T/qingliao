@@ -2723,16 +2723,10 @@ async function runChat(friend, conv, r, nudge) {
   const paint = (piece) => {
     if (!piece) return;
     painted += piece;
-    const holder = r.rt;                 // 私聊：job.rt 是会话运行状态，打字节奏归它管
-    if (holder) {
-      holder.painted = painted;
-      revealStep(holder);
-      return;
-    }
-    const h = r.holder;                  // 群聊还是老样子：直接写进临时气泡
-    if (!h || !h.bubble || !h.bubble.isConnected) return;
-    h.bubble.textContent = painted.slice(-6000);
-    if (isActive('friend', conv.id)) scrollBottom();
+    // 只攒着，不往气泡里逐字画：真人是一条消息整条到的，
+    // 一个字一个字往外蹦反而像 AI。到点/生成完由 deliver() 整条落地。
+    r.painted = painted;
+    if (r.rt) r.rt.painted = painted;
   };
 
   let netTries = 0;
@@ -2795,8 +2789,8 @@ function rtOf(key) {
   if (!rt.has(key)) {
     rt.set(key, { phase: 'idle', timer: null, abort: null, queued: false, since: 0,
       deadline: 0, stopped: false, late: false, job: null, holder: null, error: '', delivering: false,
-      // 提前生成 + 人味打字：painted 是模型已经给出的字，shown 是屏幕上已经打出来的字
-      painted: '', shown: '', revealAt: 0, revealTimer: null });
+      // 提前生成：painted 是模型已经给出的字；typingAt 是气泡冒出来的时刻
+      painted: '', typingAt: 0 });
   }
   return rt.get(key);
 }
@@ -2818,15 +2812,8 @@ function renderReplyState(kind, conv) {
   if (typing || r.error) {
     r.holder = renderMessage({ role: 'peer', authorId: conv.id, text: r.error || '' },
       { conv, kind, typing: !r.error, animate: false });
-    if (r.error) {
-      r.holder.bubble.classList.add('error');
-    } else if (r.shown) {
-      // 重绘/切回聊天时别退回三个点：把已经打出来的字补回去，接着往下打
-      r.holder.bubble.textContent = r.shown.slice(-6000);
-      revealStep(r);
-    }
+    if (r.error) r.holder.bubble.classList.add('error');
   }
-  if (!r.holder && r.revealTimer) { clearTimeout(r.revealTimer); r.revealTimer = null; }
   setStatus(r.error ? '回复失败，请重试' : r.phase === 'streaming' ? '对方正在输入…'
     : conv.lateReplyAt ? '已读，等会儿回' : '在线');
   updateSendBtn();
@@ -2838,13 +2825,12 @@ function stopReply(kind, conv) {
   r.queued = false;
   clearTimeout(r.timer);
   r.deadline = 0;
-  if (r.revealTimer) { clearTimeout(r.revealTimer); r.revealTimer = null; }
   // 等待期就提前跑了的生成任务也要掐掉，否则停下来了它还会在后台烧 token
   if (r.job) { clearTimeout(r.job.watchdog); r.job.cancel('stopped'); }
   else if (r.abort) r.abort();
   if (r.phase === 'waiting') { r.phase = 'idle'; r.job = null; r.abort = null; }
   r.painted = '';
-  r.shown = '';
+  r.typingAt = 0;
   renderReplyState(kind, conv);
 }
 
@@ -2935,8 +2921,6 @@ function memorySysFor(f) {
 /** 连发时：先「停一下」1 秒看她补充了什么，再往后推 1 秒她才开始打。 */
 const FOLLOWUP_PAUSE_MS = 1000;
 const FOLLOWUP_PUSH_MS = 1000;
-/** 打字节奏：每 55~90ms 出一小截，积压越多出得越快（追上来就恢复常速）。 */
-const REVEAL_TICK_MS = 55;
 
 /**
  * 等待区间。好友自己的节奏优先，留空跟随全局；delayMax=0 = 不装忙，立刻回。
@@ -2956,63 +2940,45 @@ function delayRange(friend) {
 }
 
 /**
- * 假等待：在区间内偏向「回得快」，偶尔才拖到最长。
- * 均匀随机每次都平均用力，看着就像定时器；这里做一点偏置，才有等人的感觉。
+ * 假等待：在 [最短, 最长] 里均匀随机。
+ * 用户设 3~10 秒，就是每一秒机会一样——不能老往 3 秒那一头挤。
  */
 function delayFor(friend) {
   const { on, min, max } = delayRange(friend);
   if (!on) return 400;
   if (max <= 0) return 0;
-  const span = max - min;
-  const u = Math.pow(Math.random(), 1.35);
-  return Math.max(0, min + span * u) * 1000;
+  // 整个区间里均匀随机：设成 3~10 秒，就是 3~10 秒里的每一秒机会一样，
+  // 不是老往 3 秒那一头挤。
+  return Math.max(0, min + Math.random() * (max - min)) * 1000;
 }
 
-/* ---------- 提前生成 + 像人一样打字 ---------- */
+/* ---------- 提前生成 + 「正在输入」停一下再整条到 ---------- */
 
 /**
- * 把模型已经给出来的字一点点打进气泡。还没到点（没有气泡）就只攒着，
- * 所以等待期间的那几秒模型其实已经在生成了，到点不用再等「首字」。
+ * 「正在输入」要停多久才整条发出来。
+ * 真人不会一个字一个字地蹦出来：先看到她在输入，然后一条消息啪地到。
+ * 停顿时长跟着字数走，再加一点随机，别每次都一样。
  */
-function revealStep(r) {
-  if (!r || r.revealTimer) return;
-  const h = r.holder;
-  if (!h || !h.bubble || !h.bubble.isConnected || r.delivering) return;
-  const wait = (Number(r.revealAt) || 0) - Date.now();
-  if (wait > 0) {
-    r.revealTimer = setTimeout(() => { r.revealTimer = null; revealStep(r); }, wait);
-    return;
-  }
-  const target = r.painted || '';
-  const shown = r.shown || '';
-  if (shown.length >= target.length) return;
-  const backlog = target.length - shown.length;
-  const take = Math.max(1, Math.ceil(backlog / 9));
-  r.shown = target.slice(0, shown.length + take);
-  h.bubble.textContent = r.shown.slice(-6000);
-  try { if (pageChat.classList.contains('open')) scrollBottom(); } catch (_) {}
-  r.revealTimer = setTimeout(() => { r.revealTimer = null; revealStep(r); }, REVEAL_TICK_MS + Math.random() * 35);
+function typingDwell(len) {
+  const n = Math.max(0, Math.min(600, Number(len) || 0));
+  const base = 480 + Math.min(1600, n * 16);
+  return Math.round(base * (0.8 + Math.random() * 0.4));
 }
 
-/** 等她把已经生成好的这段打完再落地成正式消息，避免文字跳一下。 */
-function drainReveal(r) {
-  const done = () => !r.painted || !r.holder || r.delivering
-    || (r.shown || '').length >= (r.painted || '').length;
-  if (done()) return Promise.resolve();
+/** 等到「气泡至少停了这么久」再落地；模型自己慢就等模型，不额外拖。 */
+function waitTyping(rt, len) {
+  const until = (Number(rt.typingAt) || 0) + typingDwell(len);
+  const left = until - Date.now();
+  if (left <= 0) return Promise.resolve();
   return new Promise((resolve) => {
     const started = Date.now();
     const tick = () => {
-      if (done() || Date.now() - started > 6000) {
-        if (r.painted && r.holder && !r.delivering) {
-          r.shown = r.painted;
-          try { r.holder.bubble.textContent = r.painted.slice(-6000); } catch (_) {}
-        }
-        resolve();
-        return;
-      }
-      setTimeout(tick, 70);
+      const job = rt.job;
+      if ((job && job.cancelled) || rt.delivering || rt.stopped) { resolve(); return; }
+      if (Date.now() - started >= left) { resolve(); return; }
+      setTimeout(tick, Math.min(120, Math.max(20, left)));
     };
-    setTimeout(tick, 70);
+    setTimeout(tick, Math.min(120, left));
   });
 }
 
@@ -3044,10 +3010,7 @@ function beginGeneration(kind, conv, r) {
 /** 等待期先跑一遍；连发时按合并后的内容重来（她不能只回第一句）。 */
 function prefetchReply(kind, conv, r) {
   if (r.job) { clearTimeout(r.job.watchdog); r.job.cancel('superseded'); }
-  if (r.revealTimer) { clearTimeout(r.revealTimer); r.revealTimer = null; }
   r.painted = '';
-  r.shown = '';
-  r.revealAt = 0;
   const job = beginGeneration(kind, conv, r);
   r.job = job;
   r.abort = () => job.cancel('stopped');
@@ -3084,8 +3047,7 @@ function scheduleReply(kind, conv, isNew, immediate = false) {
   r.error = '';
   r.queued = false;
   r.painted = '';
-  r.shown = '';
-  r.revealAt = 0;
+  r.typingAt = 0;
   const delay = immediate ? 0 : delayFor(kind === 'friend' ? conv : null);
   r.deadline = r.since + delay;
   clearTimeout(r.timer);
@@ -3131,12 +3093,10 @@ async function startReply(kind, conv) {
     r.job = job;
     r.abort = () => job.cancel('stopped');
   }
-  // 到点：先冒气泡（她开始打字了）。提前生成好的字已经攒着了，
-  // 再等一小会儿就往外打——所以「首字」不用再等模型两三秒。
-  const ready = (r.painted || '').length;
-  r.revealAt = Date.now() + Math.round(240 + Math.random() * 300 + Math.min(480, ready) * 2);
+  // 到点：冒「正在输入」。回复其实在等待期就生成好了，这里只停一小会儿，
+  // 然后把整条消息一次性发出来（不逐字蹦）。
+  r.typingAt = Date.now();
   renderReplyState(kind, conv);
-  revealStep(r);
 
   try {
     let text = await job.result;
@@ -3146,9 +3106,9 @@ async function startReply(kind, conv) {
     if (!text.trim()) throw new Error('这次没收到内容，再试一次？');
     if (r.late && Math.random() < 0.75) text = '刚在忙，才看到。\n' + text;
     r.late = false;
-    // 有的接口不走流式（一口气返回）：也让她「打」一遍，别瞬间砸一整段。
-    if (!r.painted) { r.painted = text; revealStep(r); }
-    await drainReveal(r);
+    if (!r.painted) r.painted = text;
+    // 气泡至少停这么久（跟字数走、带抖动），再整条落地；模型自己慢就按模型的时间。
+    await waitTyping(r, text.length);
     if (job.cancelled || rt.get(key) !== r) return;
     r.delivering = true;
     clearTimeout(job.watchdog);
@@ -3167,15 +3127,13 @@ async function startReply(kind, conv) {
     }
   } finally {
     clearTimeout(job.watchdog);
-    if (r.revealTimer) { clearTimeout(r.revealTimer); r.revealTimer = null; }
     if (r.job === job) { r.job = null; r.abort = null; }
     r.nudge = null;
     r.proactive = false;
     r.delivering = false;
     r.phase = 'idle';
     r.painted = '';
-    r.shown = '';
-    r.revealAt = 0;
+    r.typingAt = 0;
     const queued = r.queued && !r.stopped && (job.cancelled === 'superseded'
       || job.inputId !== lastUserId(conv));
     r.queued = false;
@@ -4329,7 +4287,7 @@ function renderDelayLive() {
       tail = '\n当前聊天「' + conv.name + '」跟随这里。';
     }
   }
-  el.textContent = '现在生效：' + min + '~' + max + ' 秒里随机（多数靠前，偶尔拖到最后）' + tail;
+  el.textContent = '现在生效：' + min + '~' + max + ' 秒里均匀随机（每一秒机会一样）' + tail;
 }
 $('#fTemp').addEventListener('input', (e) => { $('#fTempOut').textContent = Number(e.target.value).toFixed(1); });
 $('#fModel').addEventListener('input', syncChips);
@@ -4916,10 +4874,10 @@ function renderFriendRhythm(target, isMe) {
     const eff = delayRange(target);
     const ownSet = own.delayMin !== undefined || own.delayMax !== undefined;
     $('#rDelayHint').textContent = '现在生效：'
-      + (eff.on ? eff.min + '~' + eff.max + ' 秒随机' : '随机延迟关着')
+      + (eff.on ? eff.min + '~' + eff.max + ' 秒均匀随机' : '随机延迟关着')
       + '（' + (ownSet ? '这个好友自己设的'
         : '跟随全局 ' + state.settings.delayMin + '~' + state.settings.delayMax + ' 秒') + '）。'
-      + '这里填了就用这里的；清空=跟随全局。等待期她其实已经在生成了，到点像真人一样打出来。';
+      + '这里填了就用这里的；清空=跟随全局。回复在等待期就已经生成好，到点先「正在输入」再整条发出来。';
   }
   set('rNudge', own.nudgeAfter);
   set('rMomentIv', own.momentInterval ? (own.momentInterval / 3600) : undefined);
