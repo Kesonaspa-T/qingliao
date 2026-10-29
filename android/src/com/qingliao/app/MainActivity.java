@@ -31,6 +31,7 @@ public class MainActivity extends Activity {
     private static final int REQ_FILE = 1001;
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
+    private ConnectivityManager.NetworkCallback netCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -123,13 +124,14 @@ public class MainActivity extends Activity {
             if (cm == null) return;
             NetworkRequest req = new NetworkRequest.Builder()
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build();
-            cm.registerNetworkCallback(req, new ConnectivityManager.NetworkCallback() {
+            netCallback = new ConnectivityManager.NetworkCallback() {
                 @Override
                 public void onAvailable(Network network) { pingPage(); }
 
                 @Override
                 public void onLost(Network network) { pingPage(); }
-            });
+            };
+            cm.registerNetworkCallback(req, netCallback);
         } catch (Exception ignored) {
             // 拿不到网络状态就算了，网页自己的 online 事件还能兜一层
         }
@@ -252,6 +254,13 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (netCallback != null) {
+            try {
+                ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) cm.unregisterNetworkCallback(netCallback);
+            } catch (Exception ignored) {}
+            netCallback = null;
+        }
         if (web != null) {
             web.destroy();
             web = null;
