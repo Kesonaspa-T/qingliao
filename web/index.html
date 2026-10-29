@@ -115,7 +115,17 @@
           <i id="fabBadge" hidden>1</i>
         </button>
 
-        <div class="emoji-panel" id="emojiPanel" hidden></div>
+        <div class="emoji-panel" id="emojiPanel" hidden>
+          <!-- 自己也能发表情包：这里列的是「我的 → 表情包」里上传的那些 -->
+          <div class="stk-sec" id="stkSec" hidden>
+            <div class="stk-head">
+              <span>我的表情包</span>
+              <button type="button" id="stkMore">管理</button>
+            </div>
+            <div class="stk-strip" id="stkStrip"></div>
+          </div>
+          <div class="emoji-grid" id="emojiGrid"></div>
+        </div>
 
         <footer class="composer">
           <div class="mention-pop" id="mentionPop" hidden></div>
@@ -538,6 +548,6 @@
   </div>
 </div>
 
-<script src="app.js?v=80"></script>
+<script src="app.js?v=81"></script>
 </body>
 </html>

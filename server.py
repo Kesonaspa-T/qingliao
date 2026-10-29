@@ -901,7 +901,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v40",
+                    "build": "v41",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1714,6 +1714,12 @@ def dm_history(friend, me_name, msgs, n=6):
     for m in msgs[-n:]:
         t = (m.get("text") or "").strip()
         if not t:
+            # 用户也能发表情包：光有图、没文字，但这是他说的话，不能当没看见。
+            if m.get("sticker"):
+                tags = [str(x) for x in (m.get("stickerTags") or []) if x]
+                what = m.get("stickerDesc") or "、".join(tags[:3])
+                who = "我" if m.get("role") != "user" else you
+                out.append("%s：［表情包%s］" % (who, ("：" + what[:20]) if what else ""))
             continue
         if "<svg" in t.lower():
             t = re.sub(r"(?is)<svg[\s\S]*?</svg>", "", t).strip() + "［画了一张图］"

@@ -2256,7 +2256,7 @@ async function resolveImagesForModel(conv, budget = 2) {
   let left = budget;
   for (let i = list.length - 1; i >= 0 && left > 0; i -= 1) {
     const m = list[i];
-    if (!m.image || m.role !== 'user') continue;   // 她自己发的图不带（接口不收）
+    if (!m.image || m.role !== 'user' || m.sticker) continue;   // 她发的图、双方的表情包都不占额度
     left -= 1;
     // 刚发出去的这一张：第一次给模型看原图（仅存在内存里，不落盘／不上传），
     // 之后同一张就只用服务端存的 1568 副本，原图在第一次请求后丢掉。
@@ -2275,6 +2275,15 @@ function toApiMessage(m, allowImage, imgMap) {
   const isUser = m.role === 'user';
   const role = isUser ? 'user' : 'assistant';
   if (m.image) {
+    // 表情包一律用文字标注，不占「看图」的额度：标签/描述本来就是模型自己认的，
+    // 而且这样「你发的」和「她发的」不会搅在一起。
+    if (m.sticker) {
+      const tags = Array.isArray(m.stickerTags) ? m.stickerTags.filter(Boolean) : [];
+      const what = m.stickerDesc || (tags.length ? tags.join('、') : '');
+      const label = (isUser ? '（他发了一个表情包' : '（你刚发了一个表情包')
+        + (what ? '：' + what : '') + '）';
+      return { role, content: (m.text ? m.text + ' ' : '') + label };
+    }
     // 只有用户消息能带图：接口明确不支持 assistant 里的 image_url
     //（报错：Image in assistant message is not supported）
     const url = (isUser && allowImage && imgMap) ? (imgMap.get(m.id) || '') : '';
@@ -2284,14 +2293,7 @@ function toApiMessage(m, allowImage, imgMap) {
         { type: 'image_url', image_url: { url } },
       ] };
     }
-    // 她自己发的图/表情包：用文字让她记得发过什么
-    let label = '（发了一张图片）';
-    if (m.sticker) {
-      const tags = Array.isArray(m.stickerTags) ? m.stickerTags.filter(Boolean) : [];
-      const what = m.stickerDesc || (tags.length ? tags.join('、') : '');
-      label = '（你刚发了一个表情包' + (what ? '：' + what : '') + '）';
-    }
-    return { role, content: (m.text ? m.text + ' ' : '') + label };
+    return { role, content: (m.text ? m.text + ' ' : '') + '（发了一张图片）' };
   }
   if (m.file && m.file.name) {
     return { role, content: (m.text ? m.text + ' ' : '') + '（你发给他一个文件：' + m.file.name + '）' };
@@ -3740,6 +3742,33 @@ async function sendImage(dataUrl) {
   afterUserMessage(kind, conv);
 }
 
+/**
+ * 你也能发表情包：和「她」的表情包共用同一个库（我的 → 表情包 里上传的那些），
+ * 发出去就是一条表情消息；她也看得见你发了什么（见 toApiMessage 的「他发了一个表情包」）。
+ */
+function sendSticker(item) {
+  const conv = currentConv();
+  if (!conv || !item || !item.url) return;
+  const kind = state.conv.kind;
+  const msg = {
+    id: uid('m'), role: 'user', text: '', image: item.url,
+    sticker: true,
+    stickerTags: Array.isArray(item.tags) ? item.tags.slice(0, 8) : [],
+    stickerDesc: item.desc || '',
+    ts: Date.now(),
+  };
+  conv.messages.push(msg);
+  clearReadMark();
+  renderMessage(msg, { conv, kind });
+  scrollBottom(true);
+  lastActivity = Date.now();
+  if (kind === 'group' && isCloud()) saveHint = 'social';
+  persist();
+  renderConversations();
+  closeEmoji();
+  afterUserMessage(kind, conv);
+}
+
 /* ---------------- 输入框 ---------------- */
 
 function autosize() {
@@ -3922,6 +3951,7 @@ sendBtn.addEventListener('click', () => {
 
 /* ---------------- 表情 / 图片 ---------------- */
 
+const emojiGrid = $('#emojiGrid') || emojiPanel;
 for (const emo of EMOJIS) {
   const b = document.createElement('button');
   b.type = 'button';
@@ -3935,15 +3965,46 @@ for (const emo of EMOJIS) {
     autosize();
     if (!COARSE) inputEl.focus();
   });
-  emojiPanel.append(b);
+  emojiGrid.append(b);
 }
 
-function openEmoji() { closeMention(); emojiPanel.hidden = false; scrollBottom(true); }
+/** 面板顶上的「我的表情包」：把自己的库列成一条，点一下直接发出去。 */
+function renderEmojiStickers() {
+  const sec = document.getElementById('stkSec');
+  const strip = document.getElementById('stkStrip');
+  if (!sec || !strip) return;
+  const list = stickers();
+  sec.hidden = !list.length;
+  strip.textContent = '';
+  for (const it of list) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.title = (it.tags || []).join('、') || '表情包';
+    const img = document.createElement('img');
+    setImgRef(img, it.url);
+    img.alt = '';
+    b.append(img);
+    b.addEventListener('click', () => sendSticker(it));
+    strip.append(b);
+  }
+}
+
+function openEmoji() {
+  closeMention();
+  renderEmojiStickers();
+  emojiPanel.hidden = false;
+  scrollBottom(true);
+}
 function closeEmoji() { emojiPanel.hidden = true; }
 
 $('#btnEmoji').addEventListener('click', () => {
   if (emojiPanel.hidden) openEmoji(); else closeEmoji();
 });
+
+const stkMoreBtn = $('#stkMore');
+if (stkMoreBtn) {
+  stkMoreBtn.addEventListener('click', () => { closeEmoji(); openStickerSheet(); });
+}
 
 $('#btnImage').addEventListener('click', async () => {
   const data = await pickImage({ max: 1024, quality: 0.8 });
@@ -4492,6 +4553,7 @@ function closeStickerSheet() {
 }
 
 function renderStickers() {
+  renderEmojiStickers();          // 输入框上面的「我的表情包」跟着一起变
   const grid = $('#stickerGrid');
   const list = stickers();
   grid.textContent = '';

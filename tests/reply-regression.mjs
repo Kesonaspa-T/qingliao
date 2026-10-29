@@ -284,6 +284,30 @@ try {
     LOCAL_MODE = wasLocal; SERVER = ''; TOKEN = '';
     return ok;
   `);
+  await check('自己也能发表情包：点一下就发，她也看得懂', `
+    await resetCase({ delayOn: false });
+    state.stickers = [{ id: 'st1', url: '@blob:stk.png', tags: ['开心', '笑脸'],
+      desc: '一个笑着的小人', ts: Date.now() }];
+    openEmoji();
+    const sec = document.getElementById('stkSec');
+    const strip = document.getElementById('stkStrip');
+    if (!sec || sec.hidden || !strip || strip.querySelectorAll('button').length !== 1) return false;
+    strip.querySelector('button').click();
+    await advance(0);
+    const mine = f.messages.filter(m => m.role === 'user');
+    if (mine.length !== 1) return false;
+    const msg = mine[0];
+    if (!msg.sticker || msg.image !== '@blob:stk.png') return false;
+    if (!Array.isArray(msg.stickerTags) || msg.stickerTags[0] !== '开心') return false;
+    if (!chatEl.querySelector('.bubble.sticker .sticker-img')) return false;
+    // 给模型看的必须是「他发了一个表情包」，不能写成「你发的」；也不能占看图额度
+    const api = toApiMessage(msg, true, new Map());
+    if (typeof api.content !== 'string') return false;
+    if (!api.content.includes('他发了一个表情包')) return false;
+    if (!api.content.includes('一个笑着的小人')) return false;
+    if (api.content.includes('你刚发')) return false;
+    return true;
+  `);
   await check('分段回复第一段及时保存，停止后后续分段不再出现', `
     await resetCase({ delayOn: false, bursts: 2 }); await send('分两句说'); await advance(400);
     await complete(0, '第一段\\n第二段'); await advance(1500);

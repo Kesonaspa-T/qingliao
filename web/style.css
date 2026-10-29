@@ -423,13 +423,41 @@ html[data-theme="dark"] .bubble.error { background: #3a2224; color: #ff9b93; bor
   height: 196px;
   overflow-y: auto;
   padding: 10px 12px;
-  display: grid;
-  grid-template-columns: repeat(8, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 6px;
   background: var(--nav);
   border-top: .5px solid var(--line);
 }
 .emoji-panel[hidden] { display: none; }
+
+/* 自己的表情包：横向一条，点一下就发出去 */
+.stk-sec { flex: 0 0 auto; }
+.stk-sec[hidden] { display: none; }
+.stk-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11.5px; color: var(--sub); padding: 0 2px 4px;
+}
+.stk-head button {
+  border: 0; background: none; color: var(--accent);
+  font-size: 11.5px; padding: 0 2px; cursor: pointer;
+}
+.stk-strip {
+  display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
+}
+.stk-strip button {
+  flex: 0 0 auto; width: 56px; height: 56px; padding: 0;
+  border: 0; border-radius: 12px; background: var(--field-bg);
+  cursor: pointer; overflow: hidden;
+}
+.stk-strip button:active { opacity: .7; }
+.stk-strip img { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 6px;
+}
 
 /* @ 提及：输入 @ 后自动弹出的群成员选择 */
 .mention-pop {
@@ -466,14 +494,14 @@ html[data-theme="dark"] .bubble.error { background: #3a2224; color: #ff9b93; bor
 .mention-item .avatar { width: 26px; height: 26px; border-radius: 8px; font-size: 12px; }
 .mention-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mention-hint { padding: 6px 10px 2px; color: var(--sub); font-size: 12px; }
-.emoji-panel button {
+.emoji-grid button {
   height: 38px;
   border: 0; border-radius: 10px;
   background: transparent;
   font-size: 21px;
   cursor: pointer;
 }
-.emoji-panel button:active { background: var(--line); }
+.emoji-grid button:active { background: var(--line); }
 
 /* 会话列表抽屉 */
 .drawer {
