@@ -903,7 +903,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v44",
+                    "build": "v45",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1025,6 +1025,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._handle_ping()
         if path == "/api/search":
             return self._handle_proxy_json()
+        if path == "/api/image":
+            return self._handle_image()
         if path == "/api/read-link":
             payload = self._read_json() or {}
             link = (payload.get("url") or "").strip()
@@ -1188,6 +1190,85 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, json.loads(raw.decode("utf-8")))
         except Exception:
             return self._json(502, {"error": "返回的不是 JSON"})
+
+    # ---------- 生图（OpenAI 兼容的 /v1/images/generations） ----------
+    def _handle_image(self):
+        """把生图请求转给用户填的中转站，并把结果原样带回。
+
+        和 /api/search 的区别只有一个：生图一张要几分钟，超时必须放宽（搜索那套 30 秒
+        会让一半的图直接超时）；另外有些中转只回图片 url，服务器顺手下载成 base64，
+        手机/浏览器就不用再处理跨域和防盗链。
+        """
+        payload = self._read_json() or {}
+        url = (payload.get("url") or "").strip()
+        key = (payload.get("key") or "").strip()
+        body = payload.get("body")
+        if not url or not isinstance(body, dict):
+            return self._json(400, {"error": "缺少生图接口地址或参数"})
+        if not url.lower().startswith(("http://", "https://")):
+            return self._json(400, {"error": "生图接口地址要以 http:// 或 https:// 开头"})
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        req = Request(
+            url,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            # 中转站生一张图经常五六分钟：给到 6 分钟，别用搜索那套 30 秒
+            with urlopen(req, timeout=360, context=SSL_CTX) as r:
+                raw = r.read()
+        except HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "ignore")[:400]
+            except Exception:
+                pass
+            if e.code in (401, 403):
+                msg = "生图接口拒绝了这次请求（%s），多半是生图 Key 不对或者没余额。" % e.code
+            else:
+                msg = "生图接口返回 %s：%s" % (e.code, detail or e.reason)
+            print("[IMAGE] HTTP %s %s" % (e.code, detail[:160]), flush=True)
+            return self._json(502, {"error": msg})
+        except URLError as e:
+            reason = str(getattr(e, "reason", e))
+            print("[IMAGE] 连不上 %s: %s" % (url[:80], reason[:160]), flush=True)
+            return self._json(502, {"error": "连不上生图接口：%s" % reason[:160]})
+        except Exception as e:
+            print("[IMAGE] 请求失败 %s: %s" % (url[:80], str(e)[:160]), flush=True)
+            return self._json(502, {"error": "生图请求失败：%s" % str(e)[:160]})
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return self._json(502, {"error": "生图接口返回的不是 JSON：%s"
+                                    % raw[:160].decode("utf-8", "ignore")})
+        if not isinstance(data, dict):
+            return self._json(502, {"error": "生图接口返回的格式不对"})
+        # 有的中转只给 url：服务端下载成 base64，客户端只认 data: 一种
+        items = data.get("data")
+        item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
+        if item and not (item.get("b64_json") or item.get("b64") or item.get("base64")) and item.get("url"):
+            img_url = str(item["url"]).strip()
+            try:
+                if not img_url.lower().startswith(("http://", "https://")):
+                    raise ValueError("图片地址不是 http(s)")
+                with urlopen(img_url, timeout=120, context=SSL_CTX) as ir:
+                    img = ir.read()
+                if img and len(img) <= 30 * 1024 * 1024:
+                    fmt = "png"
+                    if img[:3] == b"\xff\xd8\xff":
+                        fmt = "jpeg"
+                    elif img[:4] == b"RIFF" and img[8:12] == b"WEBP":
+                        fmt = "webp"
+                    item["b64_json"] = base64.b64encode(img).decode("ascii")
+                    item["output_format"] = fmt
+                    print("[IMAGE] url -> b64 %d bytes" % len(img), flush=True)
+            except Exception as e:
+                print("[IMAGE] 下载图片失败: %s" % str(e)[:160], flush=True)
+        print("[IMAGE] ok model=%s bytes=%d" % (str(body.get("model"))[:40], len(raw)), flush=True)
+        return self._json(200, data)
 
     # ---------- 聊天（透明代理） ----------
     def _chunk_bytes(self, data):

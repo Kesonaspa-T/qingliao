@@ -195,6 +195,16 @@ const DEFAULT_SETTINGS = {
   doodle: true,
   stickerChance: 25,
   stickerTriggers: '',
+  // 她会发照片（AI 生图，走 OpenAI 兼容的 /v1/images/generations）
+  imageOn: false,
+  imageBaseUrl: '',
+  imageApiKey: '',
+  imageModel: 'gpt-image-2',
+  imageSize: '1024x1024',
+  imageQuality: '',
+  imageStyle: '',
+  imageChance: 15,
+  imageTriggers: '',
   prompts: {},
   webSearch: true,
   delayOn: true,
@@ -2284,6 +2294,12 @@ function toApiMessage(m, allowImage, imgMap) {
         + (what ? '：' + what : '') + '）';
       return { role, content: (m.text ? m.text + ' ' : '') + label };
     }
+    // 她自己照的/拍的 AI 照片：留一句画面描述，下一轮她才知道刚才发的是什么
+    if (m.photo) {
+      return { role, content: (m.text ? m.text + ' ' : '')
+        + (isUser ? '（他发了一张照片：' : '（你刚发了一张照片：')
+        + String(m.photo).slice(0, 90) + '）' };
+    }
     // 只有用户消息能带图：接口明确不支持 assistant 里的 image_url
     //（报错：Image in assistant message is not supported）
     const url = (isUser && allowImage && imgMap) ? (imgMap.get(m.id) || '') : '';
@@ -2299,6 +2315,58 @@ function toApiMessage(m, allowImage, imgMap) {
     return { role, content: (m.text ? m.text + ' ' : '') + '（你发给他一个文件：' + m.file.name + '）' };
   }
   return { role, content: m.text };
+}
+
+/* ---------------- 她会发照片（AI 生图） ---------------- */
+
+/**
+ * 生图接口配置。over 可以传设置页里还没保存的输入框值——「试一张」要按当前填的试，
+ * 不能逼着人先点保存。
+ */
+function photoConfig(over) {
+  const s = state.settings || {};
+  const pick = (k, d) => {
+    const v = over && over[k] !== undefined && over[k] !== null ? over[k] : s[k];
+    return v === undefined || v === null ? d : v;
+  };
+  const base = String(pick('imageBaseUrl', '')).trim().replace(/\/+$/, '');
+  const key = String(pick('imageApiKey', '')).trim();
+  const model = String(pick('imageModel', '')).trim() || 'gpt-image-2';
+  const size = String(pick('imageSize', '1024x1024')).trim() || '1024x1024';
+  const quality = String(pick('imageQuality', '')).trim().toLowerCase();
+  const style = String(pick('imageStyle', '')).trim();
+  const on = over ? true : !!s.imageOn;
+  return { on, base, key, model, size, quality, style, ready: !!(base && model) };
+}
+
+/** 接口地址：填 https://x/v1 就补 /images/generations；填完整地址也认。 */
+function imagesEndpoint(base) {
+  const b = String(base || '').trim().replace(/\/+$/, '');
+  if (!b) return '';
+  if (/\/images\/generations$/i.test(b)) return b;
+  if (/\/v1$/i.test(b)) return b + '/images/generations';
+  return b + '/v1/images/generations';
+}
+
+/** 一张照片最终发给生图模型的提示词：画风 + 人物 + 这一幕。cfg 可传还没保存的界面值。 */
+function buildPhotoPrompt(scene, friend, cfgIn) {
+  const cfg = cfgIn || photoConfig();
+  const name = (friend && friend.name) || '她';
+  const persona = String((friend && friend.persona) || '')
+    .replace(/\r/g, '').replace(/<[^>\n]{1,200}>/g, '').split('\n')
+    .map((x) => x.trim()).filter(Boolean)
+    // 人设里的「禁止／不要」是在教她说话，不是长相，别喂给生图模型
+    .filter((x) => !/^(禁止|不要|不能|规矩|注意)[：:]/.test(x))
+    .join('，').slice(0, 240);
+  const style = cfg.style
+    || '真实感手机生活照，自然光，皮肤有细节；不要文字、水印、边框、拼图，不要插画和 3D 渲染';
+  return [
+    '一张「' + name + '」发给他的照片。',
+    '画风：' + style,
+    '人物：' + name + (persona ? '——' + persona : ''),
+    '画面：' + String(scene || '对着镜头自拍').slice(0, 400),
+    '要求：单人出镜，像用手机随手拍／自拍的，构图自然、有生活气；画面里不要出现文字、logo、水印。',
+  ].join('\n');
 }
 
 function buildMessages(friend, conv, nudge, imgMap) {
@@ -2426,6 +2494,39 @@ function buildMessages(friend, conv, nudge, imgMap) {
       + `- 发的时候**文字一定要有**：先说一句话，再贴表情包；不要只发一个光秃秃的表情包\n`
       + (promptExtra('sticker') ? (`\n- 【主人补充】${promptExtra('sticker')}`) : '')
       + `\n- 历史里像「（你刚发了一个表情包：…）」这种括号是系统标注，你绝对不要照抄或输出`;
+  }
+
+  // 发照片：和表情包一样「概率 + 关键词必发」两套并行，但一张要真花钱，所以默认关。
+  // 只在私聊；群里不发（和表情包一致）。
+  const imgCfg = photoConfig();
+  let photoOk = false;
+  let photoTrigger = '';
+  if (!isGroup && imgCfg.on && imgCfg.ready) {
+    const photoTriggers = String(s.imageTriggers || '')
+      .split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20);
+    const photoChance = Math.max(0, Math.min(100, Number(s.imageChance ?? 15)));
+    photoTrigger = photoTriggers.find((w) => w && lastUserText.includes(w)) || '';
+    const photoRoll = Math.random() * 100 < photoChance;
+    photoOk = !!(photoTrigger || (photoChance > 0 && photoRoll));
+  }
+  if (conv && typeof conv === 'object') {
+    conv.__photoThisTurn = photoOk;
+    conv.__photoTrigger = photoTrigger;
+  }
+  if (photoOk) {
+    sys += '\n\n【照片】你手机里就有相机，可以真的拍一张照片发给他。'
+      + (photoTrigger
+        ? `他这一句提到了「${photoTrigger}」，这一条你发一张照片给他。`
+        : '这一条你可以顺手发一张照片。')
+      + '\n想发就在消息**最后单独一行**写 [[照片:画面描述]]，描述写具体：你在哪、穿什么、在做什么、什么表情、什么光。'
+      + '\n例：[[照片:傍晚在书店柜台后面，米白色粗针织开衫，头发用夹子夹起来，捧着热可可，侧头看镜头，暖光]]'
+      + '\n规矩：\n'
+      + '- 描述里的你必须和之前发过的是同一个人：长相、发型、穿着要对得上\n'
+      + '- 拍的内容要接得上你刚说的话；不是你眼前的东西就别硬编\n'
+      + '- **文字一定要有**：先说一句话，再把 [[照片:…]] 另起一行；不要只发一张光秃秃的照片\n'
+      + '- 只写「给你看」不算发出，必须写 [[照片:…]] 才会真的发出去\n'
+      + '- 这是手机拍的真实照片，不是画：描述里不要写「插画」「动漫」，也不要加解释和引号\n'
+      + '- 历史里的「（你刚发了一张照片：…）」是系统标注，你绝对不要照抄或输出';
   }
 
   if (canDraw) {
@@ -3266,6 +3367,212 @@ function pickStickerForText(text, trigger) {
     || pool[Math.floor(Math.random() * pool.length)] || null;
 }
 
+/* ---------------- 她会发照片：调接口、存图、贴进聊天 ---------------- */
+
+/** 生图一张要几分钟（中转站经常五六分钟），不能套同步那 25 秒；客户端比服务端多留 20 秒。 */
+const PHOTO_TIMEOUT_MS = 6 * 60 * 1000;
+
+/** 生图请求的返回包成人话；/api/search 这类中转也走同一套。 */
+async function readPhotoJson(res) {
+  let data = null;
+  try { data = await res.json(); } catch (_) { data = null; }
+  const err = data && data.error;
+  if (!res.ok || err) {
+    const detail = err ? (typeof err === 'string' ? err : (err.message || JSON.stringify(err))) : '';
+    throw new Error(detail ? String(detail).slice(0, 200) : ('生图接口返回 ' + res.status));
+  }
+  if (!data || typeof data !== 'object') throw new Error('生图接口返回的不是 JSON');
+  return data;
+}
+
+async function urlToDataUrl(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('图片下载失败（' + res.status + '）');
+  const blob = await res.blob();
+  const out = await blobToDataUrl(blob);
+  if (!out) throw new Error('图片下载失败');
+  return out;
+}
+
+/**
+ * 发一次生图请求。三条路和聊天一样：
+ *   本机模式 → /__proxy；单机/APK → 直接 fetch；连服务器 → /api/image。
+ * 超时给到 200 秒：生图一张本来就慢，不能套同步那 25 秒。
+ */
+async function photoRequest(url, key, body) {
+  if (IS_LOCAL_SERVER && isSameOriginAsServer()) {
+    const res = await fetch('/__proxy', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json', 'X-Target-Url': url },
+        key ? { 'X-Target-Key': key } : {}),
+      body: JSON.stringify(body),
+    });
+    return await readPhotoJson(res);
+  }
+  if (!isCloud()) {
+    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, PHOTO_TIMEOUT_MS) : null;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' },
+          key ? { Authorization: 'Bearer ' + key } : {}),
+        body: JSON.stringify(body),
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+      return await readPhotoJson(res);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  let res = await apiFetch('/api/image', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, key, body }),
+    timeout: PHOTO_TIMEOUT_MS + 20000,
+  });
+  // 老版本服务器还没有 /api/image：退回通用 JSON 代理（它只有 30 秒上限，慢的中转会超时）
+  if (res.status === 404) {
+    res = await apiFetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, key, body }),
+      timeout: 60000,
+    });
+  }
+  return await readPhotoJson(res);
+}
+
+/** 一次生图：返回 data:image/...（base64 或 url 两种返回都认）。 */
+async function genImage(prompt, cfg) {
+  const c = cfg || photoConfig();
+  const url = imagesEndpoint(c.base);
+  if (!url) throw new Error('还没填生图接口地址');
+  const body = { model: c.model, prompt: String(prompt || '').slice(0, 4000), n: 1 };
+  if (c.size && c.size !== 'auto') body.size = c.size;
+  // 清晰度：auto 就整个不发，省得有的中转不认这个字段
+  if (c.quality && c.quality !== 'auto') body.quality = c.quality;
+  const data = await photoRequest(url, c.key, body);
+  const list = Array.isArray(data && data.data) ? data.data : [];
+  const item = (list[0] && typeof list[0] === 'object') ? list[0] : {};
+  const str = (x) => (typeof x === 'string' ? x : '');
+  let out = str(item.b64_json) || str(item.b64) || str(item.base64) || str(item.image_base64);
+  if (out && !/^data:/i.test(out)) {
+    const fmt = String(item.output_format || item.format || 'png').toLowerCase();
+    out = 'data:image/' + (fmt === 'jpg' ? 'jpeg' : fmt) + ';base64,' + String(out).replace(/\s+/g, '');
+  }
+  if (!out && typeof item.url === 'string' && item.url) out = await urlToDataUrl(item.url);
+  if (!out) throw new Error('生图接口没返回图片：' + JSON.stringify(data || {}).slice(0, 140));
+  return out;
+}
+
+/** 生图返回的 PNG 动辄两三 MB：统一转 JPEG 再存，状态文件才不会被照片撑大。 */
+function shrinkPhoto(dataUrl, max, quality) {
+  return new Promise((resolve) => {
+    if (!dataUrl || !/^data:image\//i.test(dataUrl)) return resolve(dataUrl || '');
+    const img = new Image();
+    img.onload = () => {
+      const w = img.width || 1;
+      const h = img.height || 1;
+      const scale = Math.min(1, max / Math.max(w, h));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w * scale));
+      c.height = Math.max(1, Math.round(h * scale));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      try { resolve(c.toDataURL('image/jpeg', quality)); } catch (_) { resolve(dataUrl); }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+/** 模型没写 [[照片:…]] 时的兜底：让她用一句话说清这一张拍什么。 */
+async function genPhotoScene(friend, trigger) {
+  const key = (state.settings.apiKey || '').trim();
+  if (!key || !state.settings.model) return '';
+  const recent = ((friend && friend.messages) || []).slice(-6)
+    .filter((m) => m.role !== 'system' && (m.text || m.image) && !m.recalled)
+    .map((m) => (m.role === 'user' ? (state.me.name || '他') : ((friend && friend.name) || '她')) + '：'
+      + (m.text || (m.photo ? '（发了一张照片）' : '（发了图片）')))
+    .join('\n');
+  try {
+    const text = await quickChat([
+      { role: 'system', content: '你在帮一个角色决定「这一张照片拍什么」，写给文生图模型用。\n'
+        + '只输出一句中文描述（不超过 80 字）：她在哪、穿什么、在做什么、什么表情、什么光。\n'
+        + '不要引号、不要解释、不要编号。' },
+      { role: 'user', content: '角色：' + ((friend && friend.name) || '她') + '\n人设：'
+        + String((friend && friend.persona) || '').slice(0, 300) + '\n最近聊的：\n' + (recent || '（没聊什么）')
+        + (trigger ? '\n她刚提到「' + trigger + '」。' : '') + '\n这一张拍什么？' },
+    ]);
+    return cleanLine(text, 120);
+  } catch (_) {
+    return '';
+  }
+}
+
+/** 同一会话一次只生成一张，失败也别把聊天卡住。 */
+const photoJobs = new Map();
+let photoErrorAt = 0;
+
+/**
+ * 她要真的发一张照片：后台调生图接口 → 压成 1024 的 JPEG 存进消息 → 贴到聊天里。
+ * 十几秒到一分钟，所以不挡文字（文字先到，图好了再出现），失败只在当前聊天里提示一句。
+ */
+function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue) {
+  const cfg = photoConfig();
+  if (!cfg.on || !cfg.ready || kind !== 'friend') return;
+  const key = convKey(kind, conv.id);
+  if (photoJobs.has(key)) return;          // 上一张还在生成：这一轮就不重复花钱了
+  photoJobs.set(key, true);
+  const ts = Date.now();
+  const alive = () => (typeof canContinue !== 'function' || canContinue());
+  // 状态栏那行小字等文字发完再写，不然刚写上就被 deliver 的「在线」盖掉
+  setTimeout(() => {
+    if (!photoJobs.has(key) || !alive() || !isActive(kind, conv.id)) return;
+    const r = rt.get(convKey(kind, conv.id));
+    if (r && r.phase !== 'idle') return;
+    setStatus('她在拍照…');
+  }, 1500);
+  (async () => {
+    try {
+      let desc = String(scene || '').trim();
+      if (!desc) desc = await genPhotoScene(conv, trigger);
+      if (!desc) desc = trigger || '对着镜头自拍';
+      const dataUrl = await genImage(buildPhotoPrompt(desc, conv), cfg);
+      if (!alive()) return;                 // 这一轮被取消/替换了：图就不发了
+      const thumb = await shrinkPhoto(dataUrl, 420, 0.72);
+      const stored = await shrinkPhoto(dataUrl, 1024, 0.9);
+      const msg = { id: uid('m'), role: 'peer', authorId, text: '',
+        image: stored, thumb, photo: String(desc).slice(0, 160), ts };
+      // 照片的时间戳取「决定要发」的那一刻：中间他插话了也不会插到他后面去
+      const at = conv.messages.findIndex((m) => Number(m.ts) > ts);
+      if (at >= 0) conv.messages.splice(at, 0, msg); else conv.messages.push(msg);
+      const active = isActive(kind, conv.id);
+      if (active) {
+        rememberScroll();
+        renderChat();
+        restoreScrollIfNeeded();
+        renderReplyState(kind, conv);
+      } else {
+        conv.unread = (conv.unread || 0) + 1;
+        notifyPeer(nameOf(authorId), '[照片]', conv.id, kind);
+      }
+      persist();
+      renderConversations();
+    } catch (e) {
+      const now = Date.now();
+      // 生图失败不该刷屏：一分钟只提示一次，而且只在她这个聊天开着的时候提示。
+      if (isActive(kind, conv.id) && now - photoErrorAt > 60000) {
+        photoErrorAt = now;
+        toast('照片没生成出来：' + friendlyError(e), 4000);
+        renderReplyState(kind, conv);
+      }
+    } finally {
+      photoJobs.delete(key);
+    }
+  })();
+}
+
 async function deliver(kind, conv, text, authorId, maxParts, canContinue = () => true) {
   if (kind === 'group' && isCloud()) return;
   const owner = kind === 'friend' ? conv : null;
@@ -3294,6 +3601,7 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
   const scrub = (t) => String(t || '')
     .replace(/[（(]\s*(你刚|刚刚?)?发(了)?一个?表情包[：:][^）)]*[）)]/g, '')
     .replace(/[（(]\s*(你刚|刚刚?)?发了一张图片[）)]/g, '')
+    .replace(/[（(]\s*(你刚|刚刚?)?发了一张照片([：:][^）)]*)?[）)]/g, '')
     .trim();
 
   // 表情包：把 [[表情:关键词]] 取出来，找到对应的图，剩下的才是文字
@@ -3310,6 +3618,20 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
     if (hit && usedStickers.length < 2 && !usedStickers.includes(hit)) usedStickers.push(hit);
     return '';
   }).trim();
+
+  // 照片：[[照片:画面描述]] 不发给他看，换成一张真的生成出来的照片。
+  // 不管这一轮有没有抽中，标记都要剥掉——模型有时会自己硬写。
+  const photoGate = (conv && typeof conv === 'object') ? conv.__photoThisTurn : undefined;
+  const photoTrigger = (conv && typeof conv === 'object') ? (conv.__photoTrigger || '') : '';
+  let photoScene = '';
+  body = body.replace(/\[\[照片[:：]([^\]\n]{1,300})\]\]/g, (_all, d) => {
+    if (!photoScene) photoScene = String(d || '').trim();
+    return '';
+  }).trim();
+  if (conv && typeof conv === 'object') {
+    conv.__photoThisTurn = undefined;
+    conv.__photoTrigger = '';
+  }
 
   // 文件块：[[文件:名字.ext]] … [[/文件]] → 文件卡片消息
   const files = [];
@@ -3371,6 +3693,13 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
   let tsCursor = now;
   const active = isActive(kind, conv.id);
   if (active) clearReadMark();
+
+  // 照片：这一轮真抽中了、且有文字兜底（不发光秃秃的图）才去生成。
+  // 生成放在后台跑：十几秒到一分钟，文字先到，图好了再贴上来。
+  const hasTextNow = parts.some((x) => String(x || '').trim());
+  if (photoGate === true && hasTextNow) {
+    startPhotoJob(kind, conv, authorId, photoScene, photoTrigger, canContinue);
+  }
 
   let sentCount = 0;
   let notifyText = '';
@@ -4158,6 +4487,16 @@ function fillForm() {
   if ($('#fDoodle')) $('#fDoodle').checked = s.doodle !== false;
   if ($('#fStickerChance')) $('#fStickerChance').value = Number(s.stickerChance ?? 25);
   if ($('#fStickerTriggers')) $('#fStickerTriggers').value = s.stickerTriggers || '';
+  // 她会发照片
+  if ($('#fImgOn')) $('#fImgOn').checked = !!s.imageOn;
+  if ($('#fImgBase')) $('#fImgBase').value = s.imageBaseUrl || '';
+  if ($('#fImgKey')) $('#fImgKey').value = s.imageApiKey || '';
+  if ($('#fImgModel')) $('#fImgModel').value = s.imageModel || '';
+  if ($('#fImgSize')) $('#fImgSize').value = s.imageSize || '1024x1024';
+  if ($('#fImgQuality')) $('#fImgQuality').value = s.imageQuality || '';
+  if ($('#fImgStyle')) $('#fImgStyle').value = s.imageStyle || '';
+  if ($('#fImgChance')) $('#fImgChance').value = Number(s.imageChance ?? 15);
+  if ($('#fImgTriggers')) $('#fImgTriggers').value = s.imageTriggers || '';
   renderStickerCount();
   $('#fSearch').checked = !!s.webSearch;
   $('#fDelayOn').checked = !!s.delayOn;
@@ -4223,6 +4562,19 @@ function saveForm() {
   if ($('#fStickerChance')) s.stickerChance = Math.max(0, Math.min(100, Number($('#fStickerChance').value) || 0));
   if ($('#fStickerTriggers')) {
     s.stickerTriggers = String($('#fStickerTriggers').value || '')
+      .split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20).join(', ');
+  }
+  // 她会发照片：接口和 Key 跟聊天那套分开存，换聊天模型不会把生图弄丢
+  if ($('#fImgOn')) s.imageOn = $('#fImgOn').checked;
+  if ($('#fImgBase')) s.imageBaseUrl = String($('#fImgBase').value || '').trim().replace(/\/+$/, '');
+  if ($('#fImgKey')) s.imageApiKey = String($('#fImgKey').value || '').trim();
+  if ($('#fImgModel')) s.imageModel = String($('#fImgModel').value || '').trim();
+  if ($('#fImgSize')) s.imageSize = String($('#fImgSize').value || '1024x1024');
+  if ($('#fImgQuality')) s.imageQuality = String($('#fImgQuality').value || '').trim().toLowerCase();
+  if ($('#fImgStyle')) s.imageStyle = String($('#fImgStyle').value || '').trim().slice(0, 300);
+  if ($('#fImgChance')) s.imageChance = Math.max(0, Math.min(100, Number($('#fImgChance').value) || 0));
+  if ($('#fImgTriggers')) {
+    s.imageTriggers = String($('#fImgTriggers').value || '')
       .split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20).join(', ');
   }
   s.webSearch = $('#fSearch').checked;
@@ -4371,6 +4723,30 @@ $('#btnTest').addEventListener('click', async () => {
     const j = await res.json();
     toast(j.ok ? '连通了 ✓' : '连不上：' + (j.error || ''));
   } catch (e) { toast('连不上：' + (e.message || e)); }
+});
+
+// 「试一张」：按设置页里现在填的（还没保存的）参数直接生一张，省得反复猜哪填错了。
+$('#btnImgTest').addEventListener('click', async () => {
+  const cfg = photoConfig({
+    imageBaseUrl: $('#fImgBase').value,
+    imageApiKey: $('#fImgKey').value,
+    imageModel: $('#fImgModel').value,
+    imageSize: $('#fImgSize').value,
+    imageQuality: $('#fImgQuality').value,
+    imageStyle: $('#fImgStyle').value,
+  });
+  if (!cfg.base) return toast('先填生图接口地址');
+  closeSheet();
+  toast('正在生成一张，大概要 10~60 秒…', 6000);
+  try {
+    const friend = state.friends.find((f) => state.conv && f.id === state.conv.id) || state.friends[0];
+    const dataUrl = await genImage(
+      buildPhotoPrompt('对着镜头自拍，穿着平常那件外套，窗外是傍晚的街道，暖光', friend, cfg), cfg);
+    openLightbox(dataUrl, dataUrl);
+    toast('生成好了');
+  } catch (e) {
+    toast('没生成出来：' + friendlyError(e), 6000);
+  }
 });
 
 $('#btnClearAll').addEventListener('click', () => {

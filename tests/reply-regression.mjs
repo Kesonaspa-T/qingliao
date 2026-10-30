@@ -345,6 +345,138 @@ try {
     apiFetch = original; LOCAL_MODE = true;
     return timeout === 0 && content === '好';
   `);
+  // ---------- 她会发照片（AI 生图） ----------
+  const PNG1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  await check('她发照片：关键词命中必发，文字先到、图随后贴上来', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk-img', imageModel: 'gpt-image-1', imageTriggers: '自拍', imageChance: 0 });
+    const realGen = genImage; const realShrink = shrinkPhoto;
+    window.__imgCalls = [];
+    genImage = async (prompt) => { __imgCalls.push(prompt); return 'data:image/png;base64,${PNG1}'; };
+    shrinkPhoto = async (d) => d;
+    try {
+      await send('给我看看你的自拍'); await advance(400);
+      if (!JSON.stringify(jobs[0].body).includes('【照片】')) return false;    // 关键词命中：提示词里要有照片规则
+      await complete(0, '好呀，等我一下\\n（你刚发了一张照片：以前那张）\\n[[照片:书店柜台后面，米白色开衫，捧着热可可]]');
+      await advance(2000);
+      const peers = f.messages.filter(m => m.role === 'peer');
+      const texts = peers.map(m => m.text);
+      // 标记不能漏给用户看，文字必须还在
+      if (texts.some(t => String(t).includes('[[照片'))) return false;
+      if (texts.some(t => String(t).includes('你刚发了一张照片'))) return false;   // 系统标注不能漏出去
+      if (!texts.includes('好呀，等我一下')) return false;
+      const pic = peers.find(m => m.image);
+      if (!pic || !pic.photo || !pic.photo.includes('书店柜台后面')) return false;
+      if (__imgCalls.length !== 1) return false;                              // 只花一张的钱
+      if (!__imgCalls[0].includes('书店柜台后面') || !__imgCalls[0].includes('测试朋友')) return false;
+      if (f.__photoThisTurn !== undefined) return false;                       // 这一轮的闸门用完要清掉
+      // 下一轮她要看得到「你刚发了一张照片：…」，不然她会忘了自己发过
+      return toApiMessage(pic).content.includes('你刚发了一张照片');
+    } finally { genImage = realGen; shrinkPhoto = realShrink; }
+  `);
+  await check('她发照片：概率 0 且没关键词就不发，模型硬写标记也会被剥掉', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk-img', imageChance: 0, imageTriggers: '' });
+    const realGen = genImage; const realShrink = shrinkPhoto;
+    window.__imgCalls = [];
+    genImage = async (p) => { __imgCalls.push(p); return 'data:image/png;base64,${PNG1}'; };
+    shrinkPhoto = async (d) => d;
+    try {
+      await send('在干嘛'); await advance(400);
+      if (JSON.stringify(jobs[0].body).includes('【照片】')) return false;     // 没抽中就不该提照片
+      await complete(0, '在看书呢\\n[[照片:不该发的一张]]'); await advance(2000);
+      return __imgCalls.length === 0
+        && !f.messages.some(m => m.image)
+        && !f.messages.some(m => String(m.text || '').includes('[[照片'));
+    } finally { genImage = realGen; shrinkPhoto = realShrink; }
+  `);
+  await check('她发照片：概率进了但模型没写标记，代码兜底生成一张', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk-img', imageChance: 100, imageTriggers: '' });
+    const realGen = genImage; const realShrink = shrinkPhoto; const realQuick = quickChat;
+    window.__imgCalls = [];
+    genImage = async (p) => { __imgCalls.push(p); return 'data:image/png;base64,${PNG1}'; };
+    shrinkPhoto = async (d) => d;
+    quickChat = async () => '窗边自拍，米色针织衫';
+    try {
+      await send('随便聊聊'); await advance(400);
+      if (!JSON.stringify(jobs[0].body).includes('【照片】')) return false;
+      await complete(0, '嗯嗯'); await advance(2000);
+      const pic = f.messages.find(m => m.image);
+      if (!pic || pic.photo !== '窗边自拍，米色针织衫') return false;
+      return __imgCalls.length === 1 && __imgCalls[0].includes('窗边自拍，米色针织衫');
+    } finally { genImage = realGen; shrinkPhoto = realShrink; quickChat = realQuick; }
+  `);
+  await check('她发照片：群里永远不发（和表情包一致）', `
+    await resetCase({ imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk-img', imageChance: 100, imageTriggers: '自拍' });
+    window.__imgCalls = [];
+    const realGen = genImage; genImage = async (p) => { __imgCalls.push(p); return ''; };
+    try {
+      const g = makeGroup({ id: 'g-test', name: '测试群', members: [f.id] });
+      state.groups = [g];
+      if (JSON.stringify(buildMessages(f, g)).includes('【照片】')) return false;
+      startPhotoJob('group', g, f.id, '群里的照片', '', () => true);
+      await flush();
+      return __imgCalls.length === 0;
+    } finally { genImage = realGen; }
+  `);
+  await check('她发照片：接口地址/请求体拼装正确，Key 只走 Authorization', `
+    await resetCase({ imageBaseUrl: ${JSON.stringify(site + '/v1')} + '/', imageApiKey: 'sk-x',
+      imageModel: 'gpt-image-2', imageSize: '1024x1536', imageQuality: 'high', imageStyle: '日系胶片' });
+    if (imagesEndpoint('https://x.test') !== 'https://x.test/v1/images/generations') return false;
+    if (imagesEndpoint('https://x.test/v1') !== 'https://x.test/v1/images/generations') return false;
+    if (imagesEndpoint('https://x.test/v1/images/generations') !== 'https://x.test/v1/images/generations') return false;
+    const seen = {}; const realFetch = window.fetch;
+    window.fetch = async (url, opts) => {
+      seen.url = String(url); seen.body = JSON.parse(opts.body); seen.headers = opts.headers;
+      return { ok: true, status: 200, json: async () => ({ data: [{ b64_json: '${PNG1}' }] }) };
+    };
+    try {
+      const out = await genImage(buildPhotoPrompt('窗边自拍', f));
+      if (seen.url !== ${JSON.stringify(site + '/v1/images/generations')}) return false;
+      if (seen.body.model !== 'gpt-image-2' || seen.body.size !== '1024x1536' || seen.body.n !== 1) return false;
+      if (seen.body.quality !== 'high') return false;            // 清晰度要真的发过去
+      if (!seen.body.prompt.includes('窗边自拍') || !seen.body.prompt.includes('日系胶片')) return false;
+      if (!seen.body.prompt.includes('测试朋友')) return false;
+      if (seen.headers.Authorization !== 'Bearer sk-x') return false;
+      if (!out.startsWith('data:image/png;base64,${PNG1}')) return false;
+      // size=auto / quality=auto 时不要把不合法的值塞进去
+      const cfgAuto = photoConfig({ imageSize: 'auto', imageQuality: '' });
+      if (cfgAuto.size !== 'auto' || cfgAuto.quality !== '') return false;
+      const seen2 = {}; window.fetch = async (url, opts) => {
+        seen2.body = JSON.parse(opts.body);
+        return { ok: true, status: 200, json: async () => ({ data: [{ b64_json: '${PNG1}' }] }) };
+      };
+      await genImage(buildPhotoPrompt('窗边自拍', f), photoConfig({ imageSize: 'auto', imageQuality: '' }));
+      if ('quality' in seen2.body || 'size' in seen2.body) return false;   // 自动就整条不发
+      return true;
+    } finally { window.fetch = realFetch; }
+  `);
+  await check('她发照片：设置能存、能同步、能迁移', `
+    await resetCase();
+    openSheet();
+    $('#fImgOn').checked = true;
+    $('#fImgBase').value = 'https://relay.example/v1/';
+    $('#fImgKey').value = 'sk-relay';
+    $('#fImgModel').value = 'gpt-image-2.5';
+    $('#fImgSize').value = '1024x1536';
+    $('#fImgQuality').value = 'medium';
+    $('#fImgStyle').value = '写实摄影，黑长直';
+    $('#fImgChance').value = '25';
+    $('#fImgTriggers').value = '自拍， 照片';
+    saveForm();
+    if (!state.settings.imageOn || state.settings.imageBaseUrl !== 'https://relay.example/v1') return false;
+    if (state.settings.imageApiKey !== 'sk-relay' || state.settings.imageModel !== 'gpt-image-2.5') return false;
+    if (state.settings.imageQuality !== 'medium') return false;
+    if (state.settings.imageChance !== 25 || state.settings.imageTriggers !== '自拍, 照片') return false;
+    if (pendingEdits.settings.imageOn !== true) return false;      // 要让服务器也收到这次改动
+    const back = migrate(JSON.parse(JSON.stringify(state)));
+    return back.settings.imageOn === true
+      && back.settings.imageBaseUrl === 'https://relay.example/v1'
+      && back.settings.imageQuality === 'medium'
+      && back.settings.imageTriggers === '自拍, 照片';
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();

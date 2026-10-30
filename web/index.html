@@ -222,6 +222,44 @@
         </div>
 
         <div class="group">
+          <div class="group-title">她会发照片（AI 生图）</div>
+          <label class="field row-inline"><span>让她发照片</span><input id="fImgOn" type="checkbox" class="switch"></label>
+          <p class="hint">打开后，她聊着聊着会<b>真的生成一张照片</b>发给你（自拍、她眼前的东西）。用的是下面这个生图接口，按张计费。</p>
+          <label class="field"><span>生图接口</span><input id="fImgBase" placeholder="https://你的中转站/v1"></label>
+          <label class="field"><span>生图 Key</span><input id="fImgKey" type="password" placeholder="sk-..."></label>
+          <label class="field"><span>生图模型</span><input id="fImgModel" placeholder="gpt-image-2 / gpt-image-1"></label>
+          <label class="field">
+            <span>图片尺寸</span>
+            <select id="fImgSize">
+              <option value="1024x1024">方形 1024×1024</option>
+              <option value="1024x1536">竖图 1024×1536</option>
+              <option value="1536x1024">横图 1536×1024</option>
+              <option value="auto">让接口自己定</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>清晰度</span>
+            <select id="fImgQuality">
+              <option value="">自动（接口默认）</option>
+              <option value="low">低（快、便宜）</option>
+              <option value="medium">中</option>
+              <option value="high">高（慢、贵、细节多）</option>
+            </select>
+          </label>
+          <p class="hint">清晰度对应接口的 <code>quality</code>（low / medium / high）；选「自动」就不发这个字段，有的中转不认它。</p>
+          <label class="field"><span>画风 / 长相</span><input id="fImgStyle" placeholder="写实摄影，22 岁女生，黑长直，米色毛衣"></label>
+          <p class="hint">写死每次生图都会带上的东西：画风、她的长相。留空就用内置的「真实感手机生活照」。</p>
+          <label class="field"><span>发照片概率</span><input id="fImgChance" type="number" min="0" max="100" step="5" placeholder="0-100"></label>
+          <p class="hint">百分比：0 = 不按概率发；15 = 平均每 7 条里有 1 条带照片。一张要真花钱，别设太高。</p>
+          <label class="field"><span>关键词必发照片</span><input id="fImgTriggers" placeholder="自拍, 照片, 看看你"></label>
+          <p class="hint">逗号分隔，规则和表情包一样：说到这些词<b>一定</b>发一张（不看概率）；只想按关键词发，把概率填 0。她只在私聊里发，群里不发。</p>
+          <div class="row-btns">
+            <button type="button" class="ghost" id="btnImgTest">用这组参数试一张</button>
+          </div>
+          <p class="hint">生成一张通常几十秒，慢的中转要几分钟（这里给到 6 分钟）。只支持 OpenAI 兼容的 <code>/v1/images/generations</code>；DeepSeek 没有生图模型，Key 要填带生图模型的那家。</p>
+        </div>
+
+        <div class="group">
           <div class="group-title">回复节奏</div>
           <label class="field row-inline"><span>随机延迟</span><input id="fDelayOn" type="checkbox" class="switch"></label>
           <label class="field"><span>最短（秒）</span><input id="fDelayMin" type="number" min="0" max="600" step="1"></label>
@@ -549,6 +587,6 @@
   </div>
 </div>
 
-<script src="app.js?v=84"></script>
+<script src="app.js?v=85"></script>
 </body>
 </html>
