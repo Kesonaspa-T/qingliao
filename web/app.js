@@ -203,6 +203,11 @@ const DEFAULT_SETTINGS = {
   imageSize: '1024x1024',
   imageQuality: '',
   imageStyle: '',
+  // 什么时候该发照片（她自己判断）；每个角色可以在资料里写自己的一份
+  imagePrompt: '什么时候发照片：\n'
+    + '- 他说「拍张照」「自拍」「看看你」「发张照片」「你在干嘛」这类想看你样子的句子 → 发一张照片\n'
+    + '- 他说「画个」「画一张」「涂鸦」这类要你画画的句子 → 不发照片（那是画图）\n'
+    + '拍什么：接得上你刚说的话，拍此刻真实的场景；光线自然，穿着和平时一样',
   imageChance: 15,
   imageTriggers: '',
   prompts: {},
@@ -2339,18 +2344,64 @@ function photoConfig(over) {
   return { on, base, key, model, size, quality, style, ready: !!(base && model) };
 }
 
-/** 接口地址：填 https://x/v1 就补 /images/generations；填完整地址也认。 */
-function imagesEndpoint(base) {
+/** 接口地址：填 https://x/v1 就补 /images/<kind>；填完整地址也认。 */
+function imagesApiUrl(base, kind) {
   const b = String(base || '').trim().replace(/\/+$/, '');
   if (!b) return '';
-  if (/\/images\/generations$/i.test(b)) return b;
-  if (/\/v1$/i.test(b)) return b + '/images/generations';
-  return b + '/v1/images/generations';
+  const m = b.match(/\/images\/(generations|edits)$/i);
+  if (m) return m[1].toLowerCase() === kind ? b : b.replace(/\/images\/(generations|edits)$/i, '/images/' + kind);
+  if (/\/v1$/i.test(b)) return b + '/images/' + kind;
+  return b + '/v1/images/' + kind;
+}
+
+function imagesEndpoint(base) {
+  return imagesApiUrl(base, 'generations');
+}
+
+/**
+ * 这个角色这次要用哪套生图设置：
+ *   接口地址/Key 走全局（一套中转就够）；模型、尺寸、清晰度、画风、提示词、概率、
+ *   关键词、参考图都可以在「朋友资料 → 她的照片」里单独覆盖——统一那套不适合所有人。
+ */
+function photoCfgFor(friend) {
+  const g = photoConfig();
+  const own = (friend && friend.settings) || {};
+  const has = (k) => own[k] !== undefined && own[k] !== null && own[k] !== '';
+  const str = (k, d) => (has(k) ? String(own[k]).trim() : d);
+  const num = (k, d) => {
+    const n = Number(has(k) ? own[k] : d);
+    return Number.isFinite(n) ? n : d;
+  };
+  const refs = (Array.isArray(own.imageRefs) ? own.imageRefs : [])
+    .filter((x) => typeof x === 'string' && x)
+    .slice(0, 6);
+  const triggers = String(has('imageTriggers') ? own.imageTriggers : (state.settings.imageTriggers || ''))
+    .split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20);
+  const globalChance = Number((state.settings || {}).imageChance ?? 15);
+  return {
+    // 全局总开关 + 这个角色自己的开关（false = 这个角色不发照片）
+    on: g.on && own.imageOn !== false,
+    base: g.base, key: g.key,
+    model: str('imageModel', g.model),
+    size: str('imageSize', g.size),
+    quality: (has('imageQuality') ? String(own.imageQuality).trim().toLowerCase() : g.quality),
+    style: str('imageStyle', g.style),
+    prompt: str('imagePrompt', String((state.settings || {}).imagePrompt || '').trim()),
+    chance: Math.max(0, Math.min(100, num('imageChance', Number.isFinite(globalChance) ? globalChance : 15))),
+    triggers,
+    refs,
+    ready: g.ready,
+  };
+}
+
+/** 他这一句是不是在让她「画」（画画走简笔画，和生图是两件事）。 */
+function wantsDoodleText(text) {
+  return /(画一|画个|画张|画幅|画点|画啥|画什么|画画|涂鸦|画给|试试画|画吧|画嘛|画呀)/.test(String(text || ''));
 }
 
 /** 一张照片最终发给生图模型的提示词：画风 + 人物 + 这一幕。cfg 可传还没保存的界面值。 */
 function buildPhotoPrompt(scene, friend, cfgIn) {
-  const cfg = cfgIn || photoConfig();
+  const cfg = cfgIn || photoCfgFor(friend);
   const name = (friend && friend.name) || '她';
   const persona = String((friend && friend.persona) || '')
     .replace(/\r/g, '').replace(/<[^>\n]{1,200}>/g, '').split('\n')
@@ -2360,13 +2411,17 @@ function buildPhotoPrompt(scene, friend, cfgIn) {
     .join('，').slice(0, 240);
   const style = cfg.style
     || '真实感手机生活照，自然光，皮肤有细节；不要文字、水印、边框、拼图，不要插画和 3D 渲染';
-  return [
+  const lines = [
     '一张「' + name + '」发给他的照片。',
     '画风：' + style,
     '人物：' + name + (persona ? '——' + persona : ''),
     '画面：' + String(scene || '对着镜头自拍').slice(0, 400),
     '要求：单人出镜，像用手机随手拍／自拍的，构图自然、有生活气；画面里不要出现文字、logo、水印。',
-  ].join('\n');
+  ];
+  if (cfg.refs && cfg.refs.length) {
+    lines.push('参考图里就是她本人：只换场景、动作和衣服，脸型、五官、发型、肤色、年龄必须和参考图一致。');
+  }
+  return lines.join('\n');
 }
 
 function buildMessages(friend, conv, nudge, imgMap) {
@@ -2497,17 +2552,15 @@ function buildMessages(friend, conv, nudge, imgMap) {
   }
 
   // 发照片：和表情包一样「概率 + 关键词必发」两套并行，但一张要真花钱，所以默认关。
-  // 只在私聊；群里不发（和表情包一致）。
-  const imgCfg = photoConfig();
+  // 只在私聊；群里不发（和表情包一致）。他明说让她「画」的时候一律走画图，不走生图。
+  const photoCfg = isGroup ? { on: false } : photoCfgFor(friend);
+  const askedToDraw = wantsDoodleText(lastUserText);
   let photoOk = false;
   let photoTrigger = '';
-  if (!isGroup && imgCfg.on && imgCfg.ready) {
-    const photoTriggers = String(s.imageTriggers || '')
-      .split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20);
-    const photoChance = Math.max(0, Math.min(100, Number(s.imageChance ?? 15)));
-    photoTrigger = photoTriggers.find((w) => w && lastUserText.includes(w)) || '';
-    const photoRoll = Math.random() * 100 < photoChance;
-    photoOk = !!(photoTrigger || (photoChance > 0 && photoRoll));
+  if (photoCfg.on && photoCfg.ready && !askedToDraw) {
+    photoTrigger = photoCfg.triggers.find((w) => w && lastUserText.includes(w)) || '';
+    const photoRoll = Math.random() * 100 < photoCfg.chance;
+    photoOk = !!(photoTrigger || (photoCfg.chance > 0 && photoRoll));
   }
   if (conv && typeof conv === 'object') {
     conv.__photoThisTurn = photoOk;
@@ -2517,22 +2570,27 @@ function buildMessages(friend, conv, nudge, imgMap) {
     sys += '\n\n【照片】你手机里就有相机，可以真的拍一张照片发给他。'
       + (photoTrigger
         ? `他这一句提到了「${photoTrigger}」，这一条你发一张照片给他。`
-        : '这一条你可以顺手发一张照片。')
+        : '这一条你可以发一张照片。')
       + '\n想发就在消息**最后单独一行**写 [[照片:画面描述]]，描述写具体：你在哪、穿什么、在做什么、什么表情、什么光。'
       + '\n例：[[照片:傍晚在书店柜台后面，米白色粗针织开衫，头发用夹子夹起来，捧着热可可，侧头看镜头，暖光]]'
+      + (photoCfg.prompt
+        ? '\n【主人写的生图规则（怎么判断该发、发什么，按这个来）】\n' + String(photoCfg.prompt).slice(0, 1500)
+        : '')
+      + (photoCfg.refs.length
+        ? `\n【参考图】这次会把你之前存的 ${photoCfg.refs.length} 张参考图一起交给生图模型。`
+          + '描述里只写这一张要换成的场景、动作、衣服；长相、发型、肤色要和参考图一致，不要重新编长相。'
+        : '')
       + '\n规矩：\n'
-      + '- 描述里的你必须和之前发过的是同一个人：长相、发型、穿着要对得上\n'
       + '- 拍的内容要接得上你刚说的话；不是你眼前的东西就别硬编\n'
       + '- **文字一定要有**：先说一句话，再把 [[照片:…]] 另起一行；不要只发一张光秃秃的照片\n'
       + '- 只写「给你看」不算发出，必须写 [[照片:…]] 才会真的发出去\n'
       + '- 这是手机拍的真实照片，不是画：描述里不要写「插画」「动漫」，也不要加解释和引号\n'
+      + '- 这一条只发照片，不要再画简笔画（<svg>）；他要「画」的时候是画图，不是拍照\n'
       + '- 历史里的「（你刚发了一张照片：…）」是系统标注，你绝对不要照抄或输出';
   }
 
-  if (canDraw) {
-    const lastUser = [...(conv.messages || [])].reverse().find((m) => m.role === 'user');
-    const lastUserText = (lastUser && lastUser.text) || '';
-    const askedToDraw = /(画一|画个|画张|画幅|画点|画啥|画什么|画画|涂鸦|画给|试试画|画吧|画嘛|画呀)/.test(lastUserText);
+  if (canDraw && !photoOk) {
+    // askedToDraw 上面已经按同一套规则算过：他明说要画 → 走这里；说要看照片 → 走上面
     const drewRecently = (conv.messages || []).slice(-6)
       .some((m) => m.role !== 'user' && splitSvg(m.text || ''));
     if (askedToDraw) {
@@ -3443,16 +3501,8 @@ async function photoRequest(url, key, body) {
   return await readPhotoJson(res);
 }
 
-/** 一次生图：返回 data:image/...（base64 或 url 两种返回都认）。 */
-async function genImage(prompt, cfg) {
-  const c = cfg || photoConfig();
-  const url = imagesEndpoint(c.base);
-  if (!url) throw new Error('还没填生图接口地址');
-  const body = { model: c.model, prompt: String(prompt || '').slice(0, 4000), n: 1 };
-  if (c.size && c.size !== 'auto') body.size = c.size;
-  // 清晰度：auto 就整个不发，省得有的中转不认这个字段
-  if (c.quality && c.quality !== 'auto') body.quality = c.quality;
-  const data = await photoRequest(url, c.key, body);
+/** 生图返回的 JSON → data:image/...（b64 和 url 两种返回都认）。 */
+async function readPhotoResponse(data) {
   const list = Array.isArray(data && data.data) ? data.data : [];
   const item = (list[0] && typeof list[0] === 'object') ? list[0] : {};
   const str = (x) => (typeof x === 'string' ? x : '');
@@ -3464,6 +3514,107 @@ async function genImage(prompt, cfg) {
   if (!out && typeof item.url === 'string' && item.url) out = await urlToDataUrl(item.url);
   if (!out) throw new Error('生图接口没返回图片：' + JSON.stringify(data || {}).slice(0, 140));
   return out;
+}
+
+/** 参考图是不是这个中转根本不支持（只有这种情况才退回纯文字生图）。 */
+function isRefsUnsupported(e) {
+  const msg = String((e && e.message) || e || '');
+  if (/401|403|Key|余额|网络|连不上|超时/i.test(msg)) return false;
+  return /(\b400\b|\b404\b|\b405\b|\b415\b|\b422\b)/.test(msg)
+    || /not\s*support|unsupport|invalid|unknown|unrecognized|不支持/i.test(msg);
+}
+
+let refsWarnAt = 0;
+function noteRefsUnsupported() {
+  const now = Date.now();
+  if (now - refsWarnAt < 10 * 60 * 1000) return;
+  refsWarnAt = now;
+  toast('这个中转不支持参考图（/images/edits），这次按纯文字生图', 5000);
+}
+
+/** 参考图 → data URL（@blob: 从服务器取；统一压到 768 的 JPEG，少占地方）。 */
+async function refToDataUrl(ref, max = 768) {
+  let url = String(ref || '');
+  if (!url) return '';
+  if (url.startsWith('@blob:')) {
+    if (!isCloud()) return '';
+    try {
+      const res = await apiFetch('/api/blob/' + encodeURIComponent(url.slice(6)), { timeout: 20000 });
+      if (!res.ok) return '';
+      url = await blobToDataUrl(await res.blob());
+    } catch (_) {
+      return '';
+    }
+  }
+  if (!url) return '';
+  return await shrinkPhoto(url, max, 0.88);
+}
+
+/**
+ * 带参考图的一次生图：走 OpenAI 兼容的 /v1/images/edits（multipart）。
+ * 有服务器就让服务器拼 multipart（页面不用管跨域）；单机/APK 自己拼 FormData 直发。
+ */
+async function photoEditRequest(url, key, body, images) {
+  const dataUrls = (images || []).filter(Boolean).slice(0, 6);
+  if (!dataUrls.length) throw new Error('没有可用的参考图');
+  if (isCloud() || (IS_LOCAL_SERVER && isSameOriginAsServer())) {
+    const res = await apiFetch('/api/image-edit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, key, body, images: dataUrls }),
+      timeout: PHOTO_TIMEOUT_MS + 20000,
+    });
+    if (res.status === 404) throw new Error('服务器还是旧版，不支持参考图（重新部署后就好了）');
+    return await readPhotoJson(res);
+  }
+  const fd = new FormData();
+  Object.keys(body || {}).forEach((k) => fd.append(k, String(body[k])));
+  for (let i = 0; i < dataUrls.length; i += 1) {
+    const blob = await (await fetch(dataUrls[i])).blob();
+    fd.append('image[]', blob, 'ref' + i + '.jpg');
+  }
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, PHOTO_TIMEOUT_MS) : null;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: key ? { Authorization: 'Bearer ' + key } : {},
+      body: fd,
+      signal: ctrl ? ctrl.signal : undefined,
+    });
+    return await readPhotoJson(res);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** 一次生图：返回 data:image/...；这个角色有参考图就走 edits，没有就走 generations。 */
+async function genImage(prompt, cfg) {
+  const c = cfg || photoConfig();
+  if (!String(c.base || '').trim()) throw new Error('还没填生图接口地址');
+  const body = { model: c.model, prompt: String(prompt || '').slice(0, 4000), n: 1 };
+  if (c.size && c.size !== 'auto') body.size = c.size;
+  // 清晰度：auto 就整个不发，省得有的中转不认这个字段
+  if (c.quality && c.quality !== 'auto') body.quality = c.quality;
+  const refs = (c.refs || []).slice(0, 6);
+  if (refs.length) {
+    try {
+      const images = [];
+      for (const r of refs) {
+        const d = await refToDataUrl(r);
+        if (d) images.push(d);
+      }
+      if (images.length) {
+        const data = await photoEditRequest(imagesApiUrl(c.base, 'edits'), c.key, body, images);
+        return await readPhotoResponse(data);
+      }
+    } catch (e) {
+      if (!isRefsUnsupported(e)) throw e;
+      noteRefsUnsupported();
+    }
+  }
+  const data = await photoRequest(imagesEndpoint(c.base), c.key, body);
+  return await readPhotoResponse(data);
 }
 
 /** 生图返回的 PNG 动辄两三 MB：统一转 JPEG 再存，状态文件才不会被照片撑大。 */
@@ -3519,7 +3670,7 @@ let photoErrorAt = 0;
  * 十几秒到一分钟，所以不挡文字（文字先到，图好了再出现），失败只在当前聊天里提示一句。
  */
 function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue) {
-  const cfg = photoConfig();
+  const cfg = photoCfgFor(conv);
   if (!cfg.on || !cfg.ready || kind !== 'friend') return;
   const key = convKey(kind, conv.id);
   if (photoJobs.has(key)) return;          // 上一张还在生成：这一轮就不重复花钱了
@@ -3538,7 +3689,7 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue) {
       let desc = String(scene || '').trim();
       if (!desc) desc = await genPhotoScene(conv, trigger);
       if (!desc) desc = trigger || '对着镜头自拍';
-      const dataUrl = await genImage(buildPhotoPrompt(desc, conv), cfg);
+      const dataUrl = await genImage(buildPhotoPrompt(desc, conv, cfg), cfg);
       if (!alive()) return;                 // 这一轮被取消/替换了：图就不发了
       const thumb = await shrinkPhoto(dataUrl, 420, 0.72);
       const stored = await shrinkPhoto(dataUrl, 1024, 0.9);
@@ -4495,6 +4646,7 @@ function fillForm() {
   if ($('#fImgSize')) $('#fImgSize').value = s.imageSize || '1024x1024';
   if ($('#fImgQuality')) $('#fImgQuality').value = s.imageQuality || '';
   if ($('#fImgStyle')) $('#fImgStyle').value = s.imageStyle || '';
+  if ($('#fImgPrompt')) $('#fImgPrompt').value = s.imagePrompt || '';
   if ($('#fImgChance')) $('#fImgChance').value = Number(s.imageChance ?? 15);
   if ($('#fImgTriggers')) $('#fImgTriggers').value = s.imageTriggers || '';
   renderStickerCount();
@@ -4572,6 +4724,7 @@ function saveForm() {
   if ($('#fImgSize')) s.imageSize = String($('#fImgSize').value || '1024x1024');
   if ($('#fImgQuality')) s.imageQuality = String($('#fImgQuality').value || '').trim().toLowerCase();
   if ($('#fImgStyle')) s.imageStyle = String($('#fImgStyle').value || '').trim().slice(0, 300);
+  if ($('#fImgPrompt')) s.imagePrompt = String($('#fImgPrompt').value || '').trim().slice(0, 2000);
   if ($('#fImgChance')) s.imageChance = Math.max(0, Math.min(100, Number($('#fImgChance').value) || 0));
   if ($('#fImgTriggers')) {
     s.imageTriggers = String($('#fImgTriggers').value || '')
@@ -5191,6 +5344,65 @@ async function writeSignatureByAi() {
   }
 }
 
+let friendRefDraft = [];
+
+/** 朋友资料里那排参考图（最多 6 张，点右上角 × 删）。 */
+function renderImgRefs() {
+  const grid = document.getElementById('rImgRefs');
+  if (!grid) return;
+  grid.textContent = '';
+  friendRefDraft.forEach((ref, i) => {
+    const cell = document.createElement('div');
+    cell.className = 'sticker-cell';
+    const img = document.createElement('img');
+    img.src = imgSrc(ref);
+    img.alt = '';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'st-del';
+    del.textContent = '×';
+    del.addEventListener('click', () => {
+      friendRefDraft.splice(i, 1);
+      renderImgRefs();
+    });
+    cell.append(img, del);
+    grid.append(cell);
+  });
+  const empty = document.getElementById('rImgRefEmpty');
+  if (empty) {
+    empty.textContent = friendRefDraft.length
+      ? ''
+      : '还没有参考图：加 1~6 张她的照片，生图时一起发给模型，长相会更稳。';
+  }
+  const add = document.getElementById('btnImgRefAdd');
+  if (add) {
+    add.disabled = friendRefDraft.length >= 6;
+    add.textContent = friendRefDraft.length >= 6 ? '已经 6 张了' : '＋ 加参考图';
+  }
+}
+
+/** 用这个角色面板上（还没保存）的参数试一张，专门用来调参考图和生图提示词。 */
+async function testFriendPhoto(f) {
+  const cfg = photoCfgFor(f);
+  const val = (id) => { const el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; };
+  cfg.model = val('rImgModel') || cfg.model;
+  cfg.size = val('rImgSize') || cfg.size;
+  cfg.quality = val('rImgQuality') || cfg.quality;
+  cfg.style = val('rImgStyle') || cfg.style;
+  cfg.refs = friendRefDraft.slice(0, 6);
+  if (!cfg.base) return toast('先去「设置 → 她会发照片」填生图接口和 Key');
+  closeFriendSheet();
+  toast(cfg.refs.length ? ('带着 ' + cfg.refs.length + ' 张参考图生成，可能要几分钟…') : '正在生成一张，可能要几分钟…', 6000);
+  try {
+    const dataUrl = await genImage(
+      buildPhotoPrompt('对着镜头自拍，穿着平常那件衣服，窗外是傍晚的街道，暖光', f, cfg), cfg);
+    openLightbox(dataUrl, dataUrl);
+    toast('生成好了');
+  } catch (e) {
+    toast('没生成出来：' + friendlyError(e), 6000);
+  }
+}
+
 function renderFriendRhythm(target, isMe) {
   let box = document.getElementById('rhythmBox');
   if (!box) {
@@ -5234,6 +5446,57 @@ function renderFriendRhythm(target, isMe) {
       + '</div>';
     const anchor = document.getElementById('relationGroup');
     anchor.parentNode.insertBefore(box, anchor);
+
+    // 她的照片：每个角色一套生图预设（画风/提示词/参考图/概率…），接口和 Key 还是全局的
+    const photoBox = document.createElement('div');
+    photoBox.className = 'group';
+    photoBox.id = 'friendPhotoBox';
+    photoBox.innerHTML = '<div class="group-title">她的照片（生图 · 每个角色单独设）</div>'
+      + '<label class="field row-inline"><span>这个角色会发照片</span><input id="rImgOn" type="checkbox" class="switch"></label>'
+      + '<p class="hint">关掉就只有她不发照片（别的角色照常）。接口、Key、总开关在「设置 → 她会发照片」里。</p>'
+      + '<label class="field col"><span>生图提示词（什么时候拍、拍成什么样）</span>'
+      + '<textarea id="rImgPrompt" rows="6" placeholder="留空跟随全局。例：&#10;他说「拍张照」「看看你」才发照片；&#10;他说「画个」就画图，不拍照；&#10;只拍她此刻在做的具体的事"></textarea></label>'
+      + '<div class="field col"><span>参考图（最多 6 张，长相以这些为准）</span>'
+      + '<div id="rImgRefs" class="sticker-grid"></div>'
+      + '<p class="hint" id="rImgRefEmpty"></p>'
+      + '<button type="button" class="ghost" id="btnImgRefAdd">＋ 加参考图</button></div>'
+      + '<p class="hint">加了参考图就会走接口的 <code>/images/edits</code>：这几张一起发过去，只换场景和动作。中转不支持会自动退回纯文字生图。</p>'
+      + '<label class="field"><span>生图模型</span><input id="rImgModel" placeholder="跟随全局"></label>'
+      + '<label class="field"><span>图片尺寸</span><select id="rImgSize">'
+      + '<option value="">跟随全局</option>'
+      + '<option value="1024x1024">方形 1024×1024</option>'
+      + '<option value="1024x1536">竖图 1024×1536</option>'
+      + '<option value="1536x1024">横图 1536×1024</option>'
+      + '<option value="auto">让接口自己定</option>'
+      + '</select></label>'
+      + '<label class="field"><span>清晰度</span><select id="rImgQuality">'
+      + '<option value="">跟随全局</option>'
+      + '<option value="low">低（快、便宜）</option>'
+      + '<option value="medium">中</option>'
+      + '<option value="high">高（慢、贵、细节多）</option>'
+      + '<option value="auto">接口默认</option>'
+      + '</select></label>'
+      + '<label class="field"><span>画风 / 长相</span><input id="rImgStyle" placeholder="跟随全局"></label>'
+      + '<label class="field"><span>发照片概率（%）</span><input id="rImgChance" type="number" min="0" max="100" step="5" placeholder="跟随全局"></label>'
+      + '<label class="field"><span>关键词必发照片</span><input id="rImgTriggers" placeholder="跟随全局"></label>'
+      + '<p class="hint">他明说要「画」的时候一定走画图，不会触发照片。这里填了就按这个角色来，清空＝跟随全局。</p>'
+      + '<div class="row-btns"><button type="button" class="ghost" id="btnImgRefTest">用她的设置试一张</button></div>';
+    box.parentNode.insertBefore(photoBox, box.nextSibling);
+
+    photoBox.querySelector('#btnImgRefAdd').addEventListener('click', async () => {
+      if (friendRefDraft.length >= 6) return toast('参考图最多 6 张');
+      const dataUrl = await pickImage({ max: 900, quality: 0.85 });
+      if (!dataUrl) return;
+      toast('处理参考图…', 1500);
+      const ref = await uploadImage(dataUrl);
+      friendRefDraft = friendRefDraft.concat([ref]).slice(0, 6);
+      renderImgRefs();
+    });
+    photoBox.querySelector('#btnImgRefTest').addEventListener('click', () => {
+      const f = friendById(editingFriendId);
+      if (!f) return toast('先保存这个人，再试');
+      testFriendPhoto(f);
+    });
 
     // 用事件委托：这几个按钮是动态生成的，重新渲染时不用重新绑
     box.addEventListener('click', (e) => {
@@ -5287,6 +5550,26 @@ function renderFriendRhythm(target, isMe) {
   chk('rProactive', own.proactive, true);
   chk('rGreet', own.greet, true);
   chk('rDoodle', own.doodle, true);
+  // 她的照片（每个角色单独设）
+  const photoBox = document.getElementById('friendPhotoBox');
+  if (photoBox) photoBox.style.display = isMe ? 'none' : '';
+  chk('rImgOn', own.imageOn, true);
+  set('rImgPrompt', own.imagePrompt);
+  set('rImgModel', own.imageModel);
+  const sel = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+  sel('rImgSize', own.imageSize);
+  sel('rImgQuality', own.imageQuality);
+  set('rImgStyle', own.imageStyle);
+  set('rImgChance', own.imageChance);
+  set('rImgTriggers', own.imageTriggers);
+  if (document.getElementById('rImgChance')) {
+    document.getElementById('rImgChance').placeholder = '跟随全局 ' + Number(state.settings.imageChance ?? 15);
+  }
+  if (document.getElementById('rImgModel')) {
+    document.getElementById('rImgModel').placeholder = '跟随全局 ' + (state.settings.imageModel || 'gpt-image-2');
+  }
+  friendRefDraft = (Array.isArray(own.imageRefs) ? own.imageRefs : []).filter((x) => typeof x === 'string' && x).slice(0, 6);
+  renderImgRefs();
   set('rEssayChance', own.essayChance !== undefined ? own.essayChance : undefined);
   chk('rDiary', own.diary, true);
   set('rNextProactive', own.nextProactive);
@@ -5346,6 +5629,20 @@ function readFriendRhythm() {
     essayChance: num('rEssayChance'),
     diary: document.getElementById('rDiary').checked,
     nextProactive: (document.getElementById('rNextProactive').value || '').trim() || undefined,
+    // 她的照片（每个角色单独设）
+    imageOn: document.getElementById('rImgOn') ? document.getElementById('rImgOn').checked : true,
+    imageModel: (document.getElementById('rImgModel') ? document.getElementById('rImgModel').value : '').trim() || undefined,
+    imageSize: (document.getElementById('rImgSize') ? document.getElementById('rImgSize').value : '') || undefined,
+    imageQuality: (document.getElementById('rImgQuality') ? document.getElementById('rImgQuality').value : '') || undefined,
+    imageStyle: (document.getElementById('rImgStyle') ? document.getElementById('rImgStyle').value : '').trim() || undefined,
+    imagePrompt: (document.getElementById('rImgPrompt') ? document.getElementById('rImgPrompt').value : '').trim() || undefined,
+    imageChance: num('rImgChance'),
+    imageTriggers: (() => {
+      const el = document.getElementById('rImgTriggers');
+      const words = String(el ? el.value : '').split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20);
+      return words.length ? words.join(', ') : undefined;
+    })(),
+    imageRefs: friendRefDraft.length ? friendRefDraft.slice(0, 6) : undefined,
   };
   Object.keys(out).forEach((k) => { if (out[k] === undefined) delete out[k]; });
   return out;
@@ -5353,8 +5650,12 @@ function readFriendRhythm() {
 
 const FRIEND_RHYTHM_KEYS = ['bursts', 'delayMin', 'delayMax', 'nudgeAfter',
   'momentInterval', 'proactive', 'greet', 'doodle', 'essayChance', 'diary',
-  'wake', 'sleep', 'nextProactive'];
-const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true, essayChance: 15, diary: true };
+  'wake', 'sleep', 'nextProactive',
+  // 她的照片：每个角色一套生图预设
+  'imageOn', 'imageModel', 'imageSize', 'imageQuality', 'imageStyle', 'imagePrompt',
+  'imageChance', 'imageTriggers', 'imageRefs'];
+const FRIEND_RHYTHM_DEFAULTS = { proactive: true, greet: true, doodle: true, essayChance: 15, diary: true,
+  imageOn: true };
 
 /** 面板上的值 vs 这个好友当前的 settings → 只给出真正变了的那几项。 */
 function friendSettingsPatch(friend, want) {

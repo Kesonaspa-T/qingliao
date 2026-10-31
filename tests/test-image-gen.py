@@ -10,6 +10,7 @@ server.py 起在另一个随机端口，全部走真实 HTTP。
 """
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -45,6 +46,35 @@ PNG_1X1 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE
 
 # ---------- 假的生图中转站 ----------
 CALLS = []
+EDITS = []
+EDIT_AUTH = []
+
+
+def parse_multipart(headers, raw):
+    """把 multipart/form-data 拆成 [{name, filename, value, size}]，用来断言服务器怎么拼的。"""
+    ctype = headers.get("Content-Type", "")
+    m = re.search(r"boundary=([^;]+)", ctype)
+    if not m:
+        return []
+    boundary = m.group(1).strip().strip('"').encode()
+    parts = []
+    for chunk in raw.split(b"--" + boundary):
+        chunk = chunk.strip(b"\r\n")
+        if not chunk or chunk.startswith(b"--"):
+            continue
+        head, _, body = chunk.partition(b"\r\n\r\n")
+        name = filename = ""
+        for line in head.decode("utf-8", "ignore").split("\r\n"):
+            mm = re.search(r'name="([^"]*)"', line)
+            if mm:
+                name = mm.group(1)
+            mm = re.search(r'filename="([^"]*)"', line)
+            if mm:
+                filename = mm.group(1)
+        parts.append({"name": name, "filename": filename,
+                      "size": len(body),
+                      "value": "" if filename else body.decode("utf-8", "ignore")})
+    return parts
 
 
 class MockRelay(BaseHTTPRequestHandler):
@@ -72,7 +102,19 @@ class MockRelay(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(n) or b"{}")
+        raw = self.rfile.read(n)
+        if self.path == "/v1/images/edits":
+            parts = parse_multipart(self.headers, raw)
+            EDITS.append(parts)
+            EDIT_AUTH.append(self.headers.get("Authorization"))
+            names = [p["name"] for p in parts]
+            model = next((p["value"] for p in parts if p["name"] == "model"), "")
+            if model == "retry-field" and "image[]" in names:
+                return self._send(400, {"error": {"message": "Unknown parameter: image[]"}})
+            if model == "edits-fail":
+                return self._send(500, {"error": {"message": "boom"}})
+            return self._send(200, {"created": 1, "data": [{"b64_json": PNG_1X1}]})
+        body = json.loads(raw or b"{}")
         CALLS.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
         if self.path != "/v1/images/generations":
             return self._send(404, {"error": "not found"})
@@ -138,7 +180,7 @@ try:
     TOKEN = j.get("token", "")
 
     st, j = api("GET", "/api/status")
-    ok("服务端 build 升到 v45", st == 200 and j.get("build") == "v45", j.get("build"))
+    ok("服务端 build 升到 v46", st == 200 and j.get("build") == "v46", j.get("build"))
 
     # 1) 正常 b64_json 转发 + Key 透传
     st, j = api("POST", "/api/image", {
@@ -189,6 +231,44 @@ try:
     # 5) 连不上的地址
     st, j = api("POST", "/api/image", {"url": "http://127.0.0.1:1/v1/images/generations", "body": {"prompt": "x"}})
     ok("连不上中转时给一句人话", st == 502 and "连不上生图接口" in (j.get("error") or ""), (st, j))
+
+    # 6) 带参考图：/api/image-edit 拼 multipart
+    refs = ["data:image/jpeg;base64," + "A" * 8, "data:image/png;base64," + "B" * 8]
+    st, j = api("POST", "/api/image-edit", {
+        "url": RELAY + "/v1/images/edits", "key": "sk-edit",
+        "body": {"model": "edits-ok", "prompt": "窗边自拍", "n": 1, "size": "1024x1536", "quality": "high"},
+        "images": refs,
+    })
+    item = ((j.get("data") or [{}])[0] if isinstance(j.get("data"), list) else {})
+    ok("参考图走 /images/edits 并拿回 b64", st == 200 and item.get("b64_json") == PNG_1X1, (st, j))
+    last = EDITS[-1] if EDITS else []
+    names = [p["name"] for p in last]
+    ok("multipart 里参数齐全", all(k in names for k in ("model", "prompt", "n", "size", "quality")), names)
+    ok("参考图按 image[] 传，数量对", names.count("image[]") == 2, names)
+    ok("参考图带文件名和内容", all(p["filename"] and p["size"] > 0 for p in last if p["name"] == "image[]"),
+       [(p["name"], p["filename"], p["size"]) for p in last])
+    ok("edit 的 Key 也走 Bearer", EDIT_AUTH and EDIT_AUTH[-1] == "Bearer sk-edit", EDIT_AUTH[-1] if EDIT_AUTH else None)
+    # 中继只认 image 时自动换字段名再试一次
+    before = len(EDITS)
+    st, j = api("POST", "/api/image-edit", {
+        "url": RELAY + "/v1/images/edits", "key": "k",
+        "body": {"model": "retry-field", "prompt": "x"}, "images": refs[:1],
+    })
+    tried = [sorted(set(p["name"] for p in e)) for e in EDITS[before:]]
+    ok("image[] 被拒后自动改试 image", st == 200 and len(EDITS) - before == 2
+       and "image[]" in tried[0] and "image" in tried[1], (st, j, tried))
+    # 500 不该重试、也不该假装成功
+    before = len(EDITS)
+    st, j = api("POST", "/api/image-edit", {
+        "url": RELAY + "/v1/images/edits", "key": "k",
+        "body": {"model": "edits-fail", "prompt": "x"}, "images": refs[:1],
+    })
+    ok("中转 500 直接报错，不重复扣费", st == 502 and len(EDITS) - before == 1, (st, j))
+    st, j = api("POST", "/api/image-edit", {"url": RELAY + "/v1/images/edits", "body": {"prompt": "x"}, "images": []})
+    ok("没有参考图返回 400", st == 400 and "参考图" in (j.get("error") or ""), (st, j))
+    st, j = api("POST", "/api/image-edit", {
+        "url": RELAY + "/v1/images/edits", "body": {"prompt": "x"}, "images": refs}, token="")
+    ok("没登录不能带参考图生图", st == 401, (st, j))
 finally:
     proc.terminate()
     try:

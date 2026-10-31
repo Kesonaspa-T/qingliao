@@ -477,6 +477,139 @@ try {
       && back.settings.imageQuality === 'medium'
       && back.settings.imageTriggers === '自拍, 照片';
   `);
+  await check('她发照片：每个角色的预设覆盖全局（模型/尺寸/清晰度/画风/提示词/概率）', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk-g', imageModel: 'gpt-image-global', imageSize: '1024x1024', imageQuality: 'low',
+      imageStyle: '全局画风', imagePrompt: '全局提示词', imageChance: 0, imageTriggers: '' });
+    f.settings = { imageChance: 100, imageTriggers: '自拍', imageStyle: '她的画风',
+      imagePrompt: '她的提示词：他说想看才发', imageModel: 'gpt-image-her',
+      imageSize: '1024x1536', imageQuality: 'high' };
+    const realGen = genImage; const realShrink = shrinkPhoto;
+    window.__imgCalls = [];
+    genImage = async (p, c) => { __imgCalls.push({ p, c }); return 'data:image/png;base64,${PNG1}'; };
+    shrinkPhoto = async (d) => d;
+    try {
+      await send('给我看看自拍'); await advance(400);
+      const body = JSON.stringify(jobs[0].body);
+      if (!body.includes('【照片】')) return false;
+      if (!body.includes('她的提示词')) return false;        // 用她的提示词
+      if (body.includes('全局提示词')) return false;
+      await complete(0, '好呀\\n[[照片:窗边]]'); await advance(2000);
+      if (__imgCalls.length !== 1) return false;
+      const c = __imgCalls[0].c;
+      if (c.model !== 'gpt-image-her' || c.size !== '1024x1536' || c.quality !== 'high') return false;
+      return __imgCalls[0].p.includes('她的画风') && !__imgCalls[0].p.includes('全局画风');
+    } finally { genImage = realGen; shrinkPhoto = realShrink; }
+  `);
+  await check('她发照片：说要「画」时只画图，绝不生图', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageChance: 100, imageTriggers: '自拍' });
+    const realGen = genImage; window.__imgCalls = [];
+    genImage = async () => { __imgCalls.push(1); return ''; };
+    try {
+      await send('给我画个猫'); await advance(400);
+      const body = JSON.stringify(jobs[0].body);
+      if (body.includes('【照片】')) return false;             // 不许塞生图规则
+      if (!body.includes('【画图】')) return false;            // 要走画图
+      await complete(0, '好呀\\n<svg viewBox="0 0 240 240"><circle cx="120" cy="120" r="60"/></svg>');
+      await advance(2000);
+      return __imgCalls.length === 0
+        && f.messages.some(m => m.role === 'peer' && String(m.text).includes('<svg'));
+    } finally { genImage = realGen; }
+  `);
+  await check('她发照片：有参考图就走 /images/edits（multipart，最多 6 张）', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk-r', imageModel: 'gpt-image-2', imageChance: 0, imageTriggers: '自拍' });
+    f.settings = { imageChance: 100,
+      imageRefs: ['data:image/jpeg;base64,AAAA', 'data:image/jpeg;base64,BBBB'] };
+    const realGen = genImage; const realShrink = shrinkPhoto; const realFetch = window.fetch;
+    shrinkPhoto = async (d) => d;
+    let seen = null; let dataFetch = 0;
+    window.fetch = async (url, opts) => {
+      const u = String(url);
+      if (u.startsWith('data:')) { dataFetch += 1; return { blob: async () => new Blob(['x'], { type: 'image/jpeg' }) }; }
+      seen = { url: u, body: opts.body, headers: opts.headers };
+      return { ok: true, status: 200, json: async () => ({ data: [{ b64_json: '${PNG1}' }] }) };
+    };
+    try {
+      const cfg = photoCfgFor(f);
+      const out = await genImage(buildPhotoPrompt('窗边', f, cfg), cfg);
+      if (!seen || !seen.url.endsWith('/v1/images/edits')) return false;
+      if (!(seen.body instanceof FormData)) return false;
+      if (seen.body.getAll('image[]').length !== 2 || dataFetch !== 2) return false;
+      if (seen.body.get('model') !== 'gpt-image-2') return false;
+      if (!String(seen.body.get('prompt')).includes('窗边')) return false;
+      if (!seen.body.get('prompt').includes('参考图')) return false;
+      if (seen.headers.Authorization !== 'Bearer sk-r') return false;
+      if (!out.startsWith('data:image/png;base64,')) return false;
+      // 中转不认参考图：退回纯文字生图，别把人卡死
+      let posts = [];
+      window.fetch = async (url) => {
+        const u = String(url);
+        if (u.startsWith('data:')) return { blob: async () => new Blob(['x']) };
+        posts.push(u);
+        if (u.endsWith('/images/edits')) {
+          return { ok: false, status: 400, json: async () => ({ error: { message: 'image[] not supported' } }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ data: [{ b64_json: '${PNG1}' }] }) };
+      };
+      const out2 = await genImage(buildPhotoPrompt('窗边', f, cfg), cfg);
+      if (!(out2.startsWith('data:image/png;base64,')
+        && posts.some(u => u.endsWith('/images/edits'))
+        && posts.some(u => u.endsWith('/images/generations')))) return false;
+
+      // 连服务器时交给 /api/image-edit（参考图的 base64 走 JSON，服务器拼 multipart）
+      const wasLocal = LOCAL_MODE; const wasServer = SERVER; const wasToken = TOKEN;
+      LOCAL_MODE = false; SERVER = 'http://example.test'; TOKEN = 'tk';
+      const realApi = apiFetch; let box = null;
+      apiFetch = async (path, opts) => {
+        box = { path, payload: JSON.parse(opts.body) };
+        return { ok: true, status: 200, json: async () => ({ data: [{ b64_json: '${PNG1}' }] }) };
+      };
+      try {
+        const out3 = await genImage(buildPhotoPrompt('窗边', f, cfg), cfg);
+        if (!box || box.path !== '/api/image-edit') return false;
+        if (!Array.isArray(box.payload.images) || box.payload.images.length !== 2) return false;
+        if (!box.payload.images[0].startsWith('data:image/')) return false;
+        if (!String(box.payload.url).endsWith('/images/edits')) return false;
+        if (!String(box.payload.body.prompt).includes('窗边')) return false;
+        return out3.startsWith('data:image/png;base64,');
+      } finally {
+        apiFetch = realApi; LOCAL_MODE = wasLocal; SERVER = wasServer; TOKEN = wasToken;
+      }
+    } finally { genImage = realGen; shrinkPhoto = realShrink; window.fetch = realFetch; }
+  `);
+  await check('她发照片：朋友资料能存她自己的生图预设和参考图', `
+    await resetCase({ imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageModel: 'gpt-image-2' });
+    openFriendSheet(f, 'edit');
+    $('#rImgChance').value = '35';
+    $('#rImgTriggers').value = '自拍， 照片';
+    $('#rImgModel').value = 'gpt-image-her';
+    $('#rImgSize').value = '1024x1536';
+    $('#rImgOn').checked = false;                       // 这个角色不发照片
+    friendRefDraft = ['data:image/jpeg;base64,AAAA'];
+    renderImgRefs();
+    $('#btnFSave').click();
+    await flush();
+    const st = f.settings || {};
+    if (st.imageChance !== 35 || st.imageTriggers !== '自拍, 照片') return false;
+    if (st.imageModel !== 'gpt-image-her' || st.imageSize !== '1024x1536') return false;
+    if (st.imageOn !== false) return false;
+    if (!Array.isArray(st.imageRefs) || st.imageRefs.length !== 1) return false;
+    if (photoCfgFor(f).on !== false) return false;       // 这个角色关掉生图
+    // 清空 = 跟随全局
+    openFriendSheet(f, 'edit');
+    $('#rImgChance').value = '';
+    $('#rImgTriggers').value = '';
+    $('#rImgOn').checked = true;
+    friendRefDraft = [];
+    renderImgRefs();
+    $('#btnFSave').click();
+    await flush();
+    return f.settings.imageChance === undefined && f.settings.imageRefs === undefined
+      && f.settings.imageOn === true && photoCfgFor(f).on === true;
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();

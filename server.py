@@ -903,7 +903,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v45",
+                    "build": "v46",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1027,6 +1027,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._handle_proxy_json()
         if path == "/api/image":
             return self._handle_image()
+        if path == "/api/image-edit":
+            return self._handle_image_edit()
         if path == "/api/read-link":
             payload = self._read_json() or {}
             link = (payload.get("url") or "").strip()
@@ -1191,62 +1193,9 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             return self._json(502, {"error": "返回的不是 JSON"})
 
-    # ---------- 生图（OpenAI 兼容的 /v1/images/generations） ----------
-    def _handle_image(self):
-        """把生图请求转给用户填的中转站，并把结果原样带回。
-
-        和 /api/search 的区别只有一个：生图一张要几分钟，超时必须放宽（搜索那套 30 秒
-        会让一半的图直接超时）；另外有些中转只回图片 url，服务器顺手下载成 base64，
-        手机/浏览器就不用再处理跨域和防盗链。
-        """
-        payload = self._read_json() or {}
-        url = (payload.get("url") or "").strip()
-        key = (payload.get("key") or "").strip()
-        body = payload.get("body")
-        if not url or not isinstance(body, dict):
-            return self._json(400, {"error": "缺少生图接口地址或参数"})
-        if not url.lower().startswith(("http://", "https://")):
-            return self._json(400, {"error": "生图接口地址要以 http:// 或 https:// 开头"})
-        headers = {"Content-Type": "application/json"}
-        if key:
-            headers["Authorization"] = "Bearer " + key
-        req = Request(
-            url,
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        try:
-            # 中转站生一张图经常五六分钟：给到 6 分钟，别用搜索那套 30 秒
-            with urlopen(req, timeout=360, context=SSL_CTX) as r:
-                raw = r.read()
-        except HTTPError as e:
-            detail = ""
-            try:
-                detail = e.read().decode("utf-8", "ignore")[:400]
-            except Exception:
-                pass
-            if e.code in (401, 403):
-                msg = "生图接口拒绝了这次请求（%s），多半是生图 Key 不对或者没余额。" % e.code
-            else:
-                msg = "生图接口返回 %s：%s" % (e.code, detail or e.reason)
-            print("[IMAGE] HTTP %s %s" % (e.code, detail[:160]), flush=True)
-            return self._json(502, {"error": msg})
-        except URLError as e:
-            reason = str(getattr(e, "reason", e))
-            print("[IMAGE] 连不上 %s: %s" % (url[:80], reason[:160]), flush=True)
-            return self._json(502, {"error": "连不上生图接口：%s" % reason[:160]})
-        except Exception as e:
-            print("[IMAGE] 请求失败 %s: %s" % (url[:80], str(e)[:160]), flush=True)
-            return self._json(502, {"error": "生图请求失败：%s" % str(e)[:160]})
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except Exception:
-            return self._json(502, {"error": "生图接口返回的不是 JSON：%s"
-                                    % raw[:160].decode("utf-8", "ignore")})
-        if not isinstance(data, dict):
-            return self._json(502, {"error": "生图接口返回的格式不对"})
-        # 有的中转只给 url：服务端下载成 base64，客户端只认 data: 一种
+    # ---------- 生图（OpenAI 兼容的 /v1/images/generations、/v1/images/edits） ----------
+    def _image_payload(self, data):
+        """中转只给图片 url 时，服务器顺手下载成 base64；客户端只认 data: 一种。"""
         items = data.get("data")
         item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
         if item and not (item.get("b64_json") or item.get("b64") or item.get("base64")) and item.get("url"):
@@ -1267,8 +1216,133 @@ class Handler(SimpleHTTPRequestHandler):
                     print("[IMAGE] url -> b64 %d bytes" % len(img), flush=True)
             except Exception as e:
                 print("[IMAGE] 下载图片失败: %s" % str(e)[:160], flush=True)
+        return data
+
+    def _image_post(self, url, key, payload, ctype):
+        """发一次生图请求，返回 (json, raw)；失败抛 HTTPError / URLError / 其它异常。"""
+        headers = {"Content-Type": ctype}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        req = Request(url, data=payload, headers=headers, method="POST")
+        # 中转站生一张图经常五六分钟：给到 6 分钟，别用搜索那套 30 秒
+        with urlopen(req, timeout=360, context=SSL_CTX) as r:
+            raw = r.read()
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("生图接口返回的格式不对")
+        return data, raw
+
+    def _image_error(self, e, url):
+        if isinstance(e, HTTPError):
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "ignore")[:400]
+            except Exception:
+                pass
+            if e.code in (401, 403):
+                msg = "生图接口拒绝了这次请求（%s），多半是生图 Key 不对或者没余额。" % e.code
+            else:
+                msg = "生图接口返回 %s：%s" % (e.code, detail or e.reason)
+            print("[IMAGE] HTTP %s %s" % (e.code, detail[:160]), flush=True)
+            return self._json(502, {"error": msg})
+        if isinstance(e, URLError):
+            reason = str(getattr(e, "reason", e))
+            print("[IMAGE] 连不上 %s: %s" % (url[:80], reason[:160]), flush=True)
+            return self._json(502, {"error": "连不上生图接口：%s" % reason[:160]})
+        print("[IMAGE] 失败 %s: %s" % (url[:80], str(e)[:160]), flush=True)
+        return self._json(502, {"error": "生图请求失败：%s" % str(e)[:160]})
+
+    def _handle_image(self):
+        """把生图请求转给用户填的中转站，并把结果原样带回。
+
+        和 /api/search 的区别只有一个：生图一张要几分钟，超时必须放宽（搜索那套 30 秒
+        会让一半的图直接超时）；另外有些中转只回图片 url，服务器顺手下载成 base64，
+        手机/浏览器就不用再处理跨域和防盗链。
+        """
+        payload = self._read_json() or {}
+        url = (payload.get("url") or "").strip()
+        key = (payload.get("key") or "").strip()
+        body = payload.get("body")
+        if not url or not isinstance(body, dict):
+            return self._json(400, {"error": "缺少生图接口地址或参数"})
+        if not url.lower().startswith(("http://", "https://")):
+            return self._json(400, {"error": "生图接口地址要以 http:// 或 https:// 开头"})
+        try:
+            data, raw = self._image_post(
+                url, key, json.dumps(body, ensure_ascii=False).encode("utf-8"), "application/json")
+        except (HTTPError, URLError) as e:
+            return self._image_error(e, url)
+        except Exception as e:
+            return self._image_error(e, url)
         print("[IMAGE] ok model=%s bytes=%d" % (str(body.get("model"))[:40], len(raw)), flush=True)
-        return self._json(200, data)
+        return self._json(200, self._image_payload(data))
+
+    def _image_multipart(self, body, images, field):
+        """把参数 + 参考图拼成 multipart/form-data（/images/edits 只收这种）。"""
+        boundary = "----qingliao" + secrets.token_hex(12)
+        chunks = []
+        for k, v in (body or {}).items():
+            if v is None or isinstance(v, (dict, list)):
+                continue
+            chunks.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
+                           % (boundary, k, str(v))).encode("utf-8"))
+        used = 0
+        for i, data_url in enumerate(images[:6]):
+            ext, b64 = _b64_part(data_url)
+            if not ext or not b64:
+                continue
+            try:
+                raw = base64.b64decode(b64, validate=False)
+            except Exception:
+                continue
+            if not raw or len(raw) > 20 * 1024 * 1024:
+                continue
+            ext = "jpeg" if ext in ("jpg", "jpeg") else ext
+            name = "reference%d.%s" % (i, ext)
+            chunks.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\n"
+                           "Content-Type: image/%s\r\n\r\n" % (boundary, field, name, ext)).encode("utf-8")
+                          + raw + b"\r\n")
+            used += 1
+        chunks.append(("--%s--\r\n" % boundary).encode("utf-8"))
+        return b"".join(chunks), boundary, used
+
+    def _handle_image_edit(self):
+        """带参考图的生图：把角色参考图一起发给 /v1/images/edits（multipart）。
+
+        客户端只传 base64 的参考图，服务器负责拼 multipart：
+          - 大部分中转认 image[]，个别只认重复的 image，400/422 时自动换一种再试一次。
+        """
+        payload = self._read_json() or {}
+        url = (payload.get("url") or "").strip()
+        key = (payload.get("key") or "").strip()
+        body = payload.get("body")
+        images = payload.get("images")
+        if not url or not isinstance(body, dict):
+            return self._json(400, {"error": "缺少生图接口地址或参数"})
+        if not url.lower().startswith(("http://", "https://")):
+            return self._json(400, {"error": "生图接口地址要以 http:// 或 https:// 开头"})
+        if not isinstance(images, list) or not images:
+            return self._json(400, {"error": "没有参考图"})
+        last = None
+        for field in ("image[]", "image"):
+            blob, boundary, used = self._image_multipart(body, images, field)
+            if not used:
+                return self._json(400, {"error": "参考图不是有效的图片"})
+            ctype = "multipart/form-data; boundary=" + boundary
+            try:
+                data, raw = self._image_post(url, key, blob, ctype)
+                print("[IMAGE] edit ok field=%s refs=%d model=%s bytes=%d"
+                      % (field, used, str(body.get("model"))[:40], len(raw)), flush=True)
+                return self._json(200, self._image_payload(data))
+            except HTTPError as e:
+                last = e
+                # 只有「字段名不对」这一类校验错才换一种试；401/500 之类直接报错
+                if e.code not in (400, 404, 405, 415, 422):
+                    return self._image_error(e, url)
+                print("[IMAGE] edit 字段 %s 被拒（HTTP %s），换一种再试" % (field, e.code), flush=True)
+            except Exception as e:
+                return self._image_error(e, url)
+        return self._image_error(last, url)
 
     # ---------- 聊天（透明代理） ----------
     def _chunk_bytes(self, data):
