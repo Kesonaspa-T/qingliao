@@ -610,6 +610,64 @@ try {
     return f.settings.imageChance === undefined && f.settings.imageRefs === undefined
       && f.settings.imageOn === true && photoCfgFor(f).on === true;
   `);
+  await check('她发照片：最近 5 条聊天进提示词；审核拦了用干净版重试', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageChance: 0, imageTriggers: '自拍' });
+    f.messages = [
+      { id: 'h1', role: 'user', text: '第一句很久以前', ts: 1 },
+      { id: 'h2', role: 'peer', authorId: f.id, text: '第二句很久以前', ts: 2 },
+      { id: 'h3', role: 'user', text: '第三句', ts: 3 },
+      { id: 'h4', role: 'peer', authorId: f.id, text: '第四句', ts: 4 },
+      { id: 'h5', role: 'user', text: '第五句', ts: 5 },
+      { id: 'h6', role: 'peer', authorId: f.id, text: '第六句', ts: 6 },
+      { id: 'h7', role: 'user', text: '发张自拍', ts: 7 },
+    ];
+    const cfg = photoCfgFor(f);
+    const p = buildPhotoPrompt('窗边', f, cfg);
+    if (!p.includes('最近的对话')) return false;
+    if (!p.includes('第六句') || !p.includes('第五句')) return false;
+    if (p.includes('第一句很久以前')) return false;           // 只放最近 5 条
+    const p2 = buildPhotoPrompt('窗边', f, cfg, { safe: true });
+    if (p2.includes('最近的对话') || p2.includes('你叫林小满')) return false;  // 干净版去掉人设和聊天
+    if (!p2.includes('衣着完整')) return false;
+    // 第一次被审核拦，第二次（干净版）成功
+    const realFetch = window.fetch;
+    const bodies = [];
+    window.fetch = async (url, opts) => {
+      bodies.push(JSON.parse(opts.body));
+      if (bodies.length === 1) {
+        return { ok: false, status: 400, json: async () => ({ error: { message: 'Your prompt may violate our guardrails around nudity, sexuality or erotic content' } }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ data: [{ b64_json: '${PNG1}' }] }) };
+    };
+    try {
+      const out = await genPhoto('窗边', f, cfg);
+      if (bodies.length !== 2) return false;
+      if (!bodies[0].prompt.includes('最近的对话')) return false;
+      if (bodies[1].prompt.includes('最近的对话') || bodies[1].prompt.includes('你叫林小满')) return false;
+      if (!bodies[1].prompt.includes('衣着完整')) return false;
+      return out.startsWith('data:image/png;base64,');
+    } finally { window.fetch = realFetch; }
+  `);
+  await check('她发照片：失败在聊天里留一行灰字，不是闪一下就没', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageChance: 0, imageTriggers: '自拍' });
+    const realFetch = window.fetch;
+    window.fetch = async () => ({ ok: false, status: 400,
+      json: async () => ({ error: { message: 'Your prompt may violate our guardrails around nudity' } }) });
+    try {
+      await send('发张自拍'); await advance(400);
+      await complete(0, '好呀\\n[[照片:窗边]]'); await advance(3000);
+      const line = f.messages.find((m) => m.role === 'system' && String(m.text).includes('照片没发出来'));
+      if (!line) return false;
+      if (!line.text.includes('安全审核')) return false;
+      if (!chatEl.textContent.includes('照片没发出来')) return false;
+      const before = f.messages.filter((m) => m.role === 'system').length;
+      await send('再发一张'); await advance(400);
+      await complete(1, '好呀\\n[[照片:窗边]]'); await advance(3000);
+      return f.messages.filter((m) => m.role === 'system').length === before;   // 一分钟内不刷屏
+    } finally { window.fetch = realFetch; }
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();

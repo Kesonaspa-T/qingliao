@@ -113,6 +113,8 @@ class MockRelay(BaseHTTPRequestHandler):
                 return self._send(400, {"error": {"message": "Unknown parameter: image[]"}})
             if model == "edits-fail":
                 return self._send(500, {"error": {"message": "boom"}})
+            if model == "guardrail":
+                return self._send(400, {"error": {"message": "Your prompt may violate our guardrails around nudity, sexuality"}})
             return self._send(200, {"created": 1, "data": [{"b64_json": PNG_1X1}]})
         body = json.loads(raw or b"{}")
         CALLS.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
@@ -180,7 +182,7 @@ try:
     TOKEN = j.get("token", "")
 
     st, j = api("GET", "/api/status")
-    ok("服务端 build 升到 v46", st == 200 and j.get("build") == "v46", j.get("build"))
+    ok("服务端 build 升到 v47", st == 200 and j.get("build") == "v47", j.get("build"))
 
     # 1) 正常 b64_json 转发 + Key 透传
     st, j = api("POST", "/api/image", {
@@ -264,6 +266,15 @@ try:
         "body": {"model": "edits-fail", "prompt": "x"}, "images": refs[:1],
     })
     ok("中转 500 直接报错，不重复扣费", st == 502 and len(EDITS) - before == 1, (st, j))
+    # 审核拦下来：不要换字段名重试（白跑一次），直接把原话带回去
+    before = len(EDITS)
+    st, j = api("POST", "/api/image-edit", {
+        "url": RELAY + "/v1/images/edits", "key": "k",
+        "body": {"model": "guardrail", "prompt": "x"}, "images": refs[:1],
+    })
+    ok("审核 400 不重复请求，原话带回去",
+       st == 502 and len(EDITS) - before == 1 and "guardrails" in (j.get("error") or ""),
+       (st, j, len(EDITS) - before))
     st, j = api("POST", "/api/image-edit", {"url": RELAY + "/v1/images/edits", "body": {"prompt": "x"}, "images": []})
     ok("没有参考图返回 400", st == 400 and "参考图" in (j.get("error") or ""), (st, j))
     st, j = api("POST", "/api/image-edit", {

@@ -2399,11 +2399,25 @@ function wantsDoodleText(text) {
   return /(画一|画个|画张|画幅|画点|画啥|画什么|画画|涂鸦|画给|试试画|画吧|画嘛|画呀)/.test(String(text || ''));
 }
 
-/** 一张照片最终发给生图模型的提示词：画风 + 人物 + 这一幕。cfg 可传还没保存的界面值。 */
-function buildPhotoPrompt(scene, friend, cfgIn) {
+/** 最近 5 条聊天：生图模型看不到聊天记录，只靠这段文字知道刚才在聊什么。 */
+function recentChatContext(friend, limit = 5) {
+  const list = ((friend && friend.messages) || [])
+    .filter((m) => m.role !== 'system' && !m.recalled && (m.text || m.photo || m.image))
+    .slice(-limit);
+  return list.map((m) => {
+    const who = m.role === 'user' ? (state.me.name || '他') : ((friend && friend.name) || '她');
+    const what = String(m.text || '').replace(/\s+/g, ' ').trim()
+      || (m.photo ? '（发了一张照片）' : '（发了图片）');
+    return who + '：' + what.slice(0, 60);
+  }).join('\n');
+}
+
+/** 一张照片最终发给生图模型的提示词：画风 + 人物 + 最近聊的 + 这一幕。 */
+function buildPhotoPrompt(scene, friend, cfgIn, opts) {
   const cfg = cfgIn || photoCfgFor(friend);
+  const safe = !!(opts && opts.safe);      // 审核没过的重试：去掉人设和聊天原文
   const name = (friend && friend.name) || '她';
-  const persona = String((friend && friend.persona) || '')
+  const persona = safe ? '' : String((friend && friend.persona) || '')
     .replace(/\r/g, '').replace(/<[^>\n]{1,200}>/g, '').split('\n')
     .map((x) => x.trim()).filter(Boolean)
     // 人设里的「禁止／不要」是在教她说话，不是长相，别喂给生图模型
@@ -2414,10 +2428,15 @@ function buildPhotoPrompt(scene, friend, cfgIn) {
   const lines = [
     '一张「' + name + '」发给他的照片。',
     '画风：' + style,
-    '人物：' + name + (persona ? '——' + persona : ''),
-    '画面：' + String(scene || '对着镜头自拍').slice(0, 400),
-    '要求：单人出镜，像用手机随手拍／自拍的，构图自然、有生活气；画面里不要出现文字、logo、水印。',
   ];
+  if (persona) lines.push('人物：' + name + '——' + persona);
+  const ctx = safe ? '' : recentChatContext(friend, 5);
+  if (ctx) lines.push('最近的对话（只用来对上上下文，不要把聊天原文画进图里）：\n' + ctx);
+  lines.push('画面：' + String(scene || '对着镜头自拍').slice(0, 400));
+  lines.push('要求：单人出镜，像用手机随手拍／自拍的，构图自然、有生活气；画面里不要出现文字、logo、水印。');
+  if (safe) {
+    lines.push('另外：日常、干净的生活照，衣着完整，正常室内/室外场景；不要裸露、不要性暗示、不要亲密接触。');
+  }
   if (cfg.refs && cfg.refs.length) {
     lines.push('参考图里就是她本人：只换场景、动作和衣服，脸型、五官、发型、肤色、年龄必须和参考图一致。');
   }
@@ -2585,6 +2604,7 @@ function buildMessages(friend, conv, nudge, imgMap) {
       + '- **文字一定要有**：先说一句话，再把 [[照片:…]] 另起一行；不要只发一张光秃秃的照片\n'
       + '- 只写「给你看」不算发出，必须写 [[照片:…]] 才会真的发出去\n'
       + '- 这是手机拍的真实照片，不是画：描述里不要写「插画」「动漫」，也不要加解释和引号\n'
+      + '- 描述要干净、能过审：不要裸露、性暗示、亲密接触、床上或浴室；就拍日常的样子\n'
       + '- 这一条只发照片，不要再画简笔画（<svg>）；他要「画」的时候是画图，不是拍照\n'
       + '- 历史里的「（你刚发了一张照片：…）」是系统标注，你绝对不要照抄或输出';
   }
@@ -2975,7 +2995,9 @@ function renderReplyState(kind, conv) {
     r.holder.bubble.classList.add('error');
   }
   setStatus(r.error ? '回复失败，请重试' : r.phase === 'streaming' ? '对方正在输入…'
-    : conv.lateReplyAt ? '已读，等会儿回' : '在线');
+    : conv.lateReplyAt ? '已读，等会儿回'
+    // 生图要几十秒到几分钟：状态栏一直写「她在拍照…」，同步重绘也不会被冲掉
+    : photoJobs.has(convKey(kind, conv.id)) ? '她在拍照…' : '在线');
   updateSendBtn();
 }
 
@@ -3516,12 +3538,51 @@ async function readPhotoResponse(data) {
   return out;
 }
 
+/** 中转的内容审核把提示词拦了（不是接口不支持，别拿它当「退回纯文字」的理由）。 */
+function isContentBlocked(e) {
+  const msg = String((e && e.message) || e || '');
+  return /guardrails?|violate|nudity|sexuality|erotic|content.?policy|safety.?system|敏感|违规|审核/i.test(msg);
+}
+
+/** 生图失败 → 聊天里那句人话。 */
+function photoErrorText(e) {
+  const raw = String((e && e.message) || e || '').trim();
+  if (isContentBlocked(e)) {
+    return '中转的安全审核拦了这张（被判成成人/敏感内容），换个场景描述或换张参考图再试';
+  }
+  if (/401|403|Key|余额/i.test(raw)) return '生图 Key 不对，或者没余额';
+  if (/连不上|网络|超时|abort/i.test(raw)) return '连不上生图接口（或者超时了）';
+  return raw.slice(0, 120) || '未知原因';
+}
+
 /** 参考图是不是这个中转根本不支持（只有这种情况才退回纯文字生图）。 */
 function isRefsUnsupported(e) {
   const msg = String((e && e.message) || e || '');
+  if (isContentBlocked(e)) return false;
   if (/401|403|Key|余额|网络|连不上|超时/i.test(msg)) return false;
+  if (/not\s*support|unsupport|unknown parameter|unrecognized|invalid|不支持/i.test(msg)) return true;
   return /(\b400\b|\b404\b|\b405\b|\b415\b|\b422\b)/.test(msg)
-    || /not\s*support|unsupport|invalid|unknown|unrecognized|不支持/i.test(msg);
+    && /image|file|field|parameter|form/i.test(msg);
+}
+
+let safeRetryAt = 0;
+function noteSafeRetry() {
+  const now = Date.now();
+  if (now - safeRetryAt < 10 * 60 * 1000) return;
+  safeRetryAt = now;
+  toast('中转的审核拦了一次，换成干净描述重试成功了', 4000);
+}
+
+/** 生成一张照片：中转的安全审核拦了，就用「干净版」提示词（去掉人设和聊天原文）再试一次。 */
+async function genPhoto(scene, friend, cfg) {
+  try {
+    return await genImage(buildPhotoPrompt(scene, friend, cfg), cfg);
+  } catch (e) {
+    if (!isContentBlocked(e)) throw e;
+    const out = await genImage(buildPhotoPrompt(scene, friend, cfg, { safe: true }), cfg);
+    noteSafeRetry();
+    return out;
+  }
 }
 
 let refsWarnAt = 0;
@@ -3689,7 +3750,7 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue) {
       let desc = String(scene || '').trim();
       if (!desc) desc = await genPhotoScene(conv, trigger);
       if (!desc) desc = trigger || '对着镜头自拍';
-      const dataUrl = await genImage(buildPhotoPrompt(desc, conv, cfg), cfg);
+      const dataUrl = await genPhoto(desc, conv, cfg);
       if (!alive()) return;                 // 这一轮被取消/替换了：图就不发了
       const thumb = await shrinkPhoto(dataUrl, 420, 0.72);
       const stored = await shrinkPhoto(dataUrl, 1024, 0.9);
@@ -3712,12 +3773,24 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue) {
       renderConversations();
     } catch (e) {
       const now = Date.now();
-      // 生图失败不该刷屏：一分钟只提示一次，而且只在她这个聊天开着的时候提示。
-      if (isActive(kind, conv.id) && now - photoErrorAt > 60000) {
+      // 生图失败不能只闪 4 秒 toast：在聊天里留一行灰字，过一会儿回来也看得到。
+      // 一分钟最多一条，别刷屏。
+      if (now - photoErrorAt > 60000) {
         photoErrorAt = now;
-        toast('照片没生成出来：' + friendlyError(e), 4000);
-        renderReplyState(kind, conv);
+        const line = { id: uid('m'), role: 'system',
+          text: '照片没发出来：' + photoErrorText(e), ts };
+        const at = conv.messages.findIndex((m) => Number(m.ts) > ts);
+        if (at >= 0) conv.messages.splice(at, 0, line); else conv.messages.push(line);
+        if (isActive(kind, conv.id)) {
+          rememberScroll();
+          renderChat();
+          restoreScrollIfNeeded();
+          renderReplyState(kind, conv);
+        }
+        persist();
+        if (isActive(kind, conv.id)) toast('照片没发出来（看聊天里那行灰字）', 4000);
       }
+      console.warn('[photo]', e);
     } finally {
       photoJobs.delete(key);
     }

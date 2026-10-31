@@ -903,7 +903,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v46",
+                    "build": "v47",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1232,13 +1232,14 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("生图接口返回的格式不对")
         return data, raw
 
-    def _image_error(self, e, url):
+    def _image_error(self, e, url, detail=None):
         if isinstance(e, HTTPError):
-            detail = ""
-            try:
-                detail = e.read().decode("utf-8", "ignore")[:400]
-            except Exception:
-                pass
+            if detail is None:
+                detail = ""
+                try:
+                    detail = e.read().decode("utf-8", "ignore")[:400]
+                except Exception:
+                    pass
             if e.code in (401, 403):
                 msg = "生图接口拒绝了这次请求（%s），多半是生图 Key 不对或者没余额。" % e.code
             else:
@@ -1271,8 +1272,10 @@ class Handler(SimpleHTTPRequestHandler):
             data, raw = self._image_post(
                 url, key, json.dumps(body, ensure_ascii=False).encode("utf-8"), "application/json")
         except (HTTPError, URLError) as e:
+            print("[IMAGE] prompt=%s" % str(body.get("prompt"))[:240].replace("\n", " "), flush=True)
             return self._image_error(e, url)
         except Exception as e:
+            print("[IMAGE] prompt=%s" % str(body.get("prompt"))[:240].replace("\n", " "), flush=True)
             return self._image_error(e, url)
         print("[IMAGE] ok model=%s bytes=%d" % (str(body.get("model"))[:40], len(raw)), flush=True)
         return self._json(200, self._image_payload(data))
@@ -1335,14 +1338,29 @@ class Handler(SimpleHTTPRequestHandler):
                       % (field, used, str(body.get("model"))[:40], len(raw)), flush=True)
                 return self._json(200, self._image_payload(data))
             except HTTPError as e:
-                last = e
-                # 只有「字段名不对」这一类校验错才换一种试；401/500 之类直接报错
-                if e.code not in (400, 404, 405, 415, 422):
-                    return self._image_error(e, url)
+                detail = ""
+                try:
+                    detail = e.read().decode("utf-8", "ignore")[:400]
+                except Exception:
+                    pass
+                if e.code in (401, 403) or e.code >= 500:
+                    print("[IMAGE] edit prompt=%s" % str(body.get("prompt"))[:240].replace("\n", " "), flush=True)
+                    return self._image_error(e, url, detail)
+                low = detail.lower()
+                # 只有「字段名/文件」这类校验错才换一种字段名再试。
+                # 审核（guardrails/nudity…）也是 400，换字段名没用，只会白跑一次。
+                field_issue = any(k in low for k in (
+                    "image[", "image field", "file", "files", "field", "parameter", "form",
+                    "multipart", "unsupported", "not support", "unexpected"))
+                if e.code not in (400, 404, 405, 415, 422) or not field_issue:
+                    print("[IMAGE] edit prompt=%s" % str(body.get("prompt"))[:240].replace("\n", " "), flush=True)
+                    return self._image_error(e, url, detail)
+                last = (e, detail)
                 print("[IMAGE] edit 字段 %s 被拒（HTTP %s），换一种再试" % (field, e.code), flush=True)
             except Exception as e:
                 return self._image_error(e, url)
-        return self._image_error(last, url)
+        err, detail = last
+        return self._image_error(err, url, detail)
 
     # ---------- 聊天（透明代理） ----------
     def _chunk_bytes(self, data):
