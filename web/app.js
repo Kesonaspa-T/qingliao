@@ -2375,8 +2375,9 @@ function photoCfgFor(friend) {
   const refs = (Array.isArray(own.imageRefs) ? own.imageRefs : [])
     .filter((x) => typeof x === 'string' && x)
     .slice(0, 6);
-  const triggers = String(has('imageTriggers') ? own.imageTriggers : (state.settings.imageTriggers || ''))
+  let triggers = String(has('imageTriggers') ? own.imageTriggers : (state.settings.imageTriggers || ''))
     .split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20);
+  if (!triggers.length) triggers = PHOTO_DEFAULT_TRIGGERS.slice();
   const globalChance = Number((state.settings || {}).imageChance ?? 15);
   return {
     // 全局总开关 + 这个角色自己的开关（false = 这个角色不发照片）
@@ -2393,6 +2394,9 @@ function photoCfgFor(friend) {
     ready: g.ready,
   };
 }
+
+/** 关键词一个都没填时的兜底：他说要看照片就该发，不用先教一遍关键词。 */
+const PHOTO_DEFAULT_TRIGGERS = ['自拍', '照片', '看看你', '拍一张'];
 
 /** 他这一句是不是在让她「画」（画画走简笔画，和生图是两件事）。 */
 function wantsDoodleText(text) {
@@ -2591,7 +2595,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
         ? `他这一句提到了「${photoTrigger}」，这一条你发一张照片给他。`
         : '这一条你可以发一张照片。')
       + '\n格式：先说一句话，另起一行写 [[照片:画面描述]]（描述写具体：你在哪、穿什么、在做什么、什么表情、什么光）。'
-      + '\n想再补一句（「拍好啦」「头发有点乱」）就写在标记后面另起一行——那句会等照片发出去之后才到他那儿。'
+      + '\n照片要等一会儿才真的发到他那儿：所以前面先说「等我一下」「我这就拍」，**别说「发给你了」「拍好了」**。'
+      + '\n标记后面一定要再补一句（「拍好啦」「头发有点乱」），那句会等照片到了之后才发出去。'
       + '\n例：[[照片:傍晚在书店柜台后面，米白色粗针织开衫，头发用夹子夹起来，捧着热可可，侧头看镜头，暖光]]'
       + (photoCfg.prompt
         ? '\n【主人写的生图规则（怎么判断该发、发什么，按这个来）】\n' + String(photoCfg.prompt).slice(0, 1500)
@@ -3743,6 +3748,7 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterw
   if (photoJobs.has(key)) return;          // 上一张还在生成：这一轮就不重复花钱了
   photoJobs.set(key, true);
   const ts = Date.now();
+  if (isActive(kind, conv.id)) toast('她开始拍了，图好了会直接发到聊天里（要等一会儿）', 3000);
   const alive = () => (typeof canContinue !== 'function' || canContinue());
   // 状态栏那行小字等文字发完再写，不然刚写上就被 deliver 的「在线」盖掉
   setTimeout(() => {
@@ -4753,6 +4759,7 @@ function fillForm() {
   if ($('#fImgPrompt')) $('#fImgPrompt').value = s.imagePrompt || '';
   if ($('#fImgChance')) $('#fImgChance').value = Number(s.imageChance ?? 15);
   if ($('#fImgTriggers')) $('#fImgTriggers').value = s.imageTriggers || '';
+  renderImgStatus();
   renderStickerCount();
   $('#fSearch').checked = !!s.webSearch;
   $('#fDelayOn').checked = !!s.delayOn;
@@ -4783,6 +4790,25 @@ function fillForm() {
   if ($('#fEssayChance')) $('#fEssayChance').value = Number(s.essayChance ?? 15);
   if ($('#fArchiveDays')) $('#fArchiveDays').value = Number(s.archiveDays) || 0;
   syncChips();
+}
+
+/** 设置页里那行「现在到底会不会发」：一眼看出是没开、没填接口，还是能发。 */
+function renderImgStatus() {
+  const el = document.getElementById('imgStatus');
+  if (!el) return;
+  const on = !!(document.getElementById('fImgOn') || {}).checked;
+  const base = String((document.getElementById('fImgBase') || {}).value || '').trim();
+  const model = String((document.getElementById('fImgModel') || {}).value || '').trim() || 'gpt-image-2';
+  const trig = String((document.getElementById('fImgTriggers') || {}).value || '').trim();
+  const chance = Number((document.getElementById('fImgChance') || {}).value) || 0;
+  let text;
+  if (!on) text = '现在：没开启，她不会发照片。';
+  else if (!base) text = '现在：开关开了，但生图接口还是空的——填上地址和 Key 才会真的发图。';
+  else {
+    text = '现在：会发 · 接口已填 · 模型 ' + model + ' · 关键词 '
+      + (trig || '（内置：自拍、照片、看看你、拍一张）') + ' · 概率 ' + chance + '%';
+  }
+  el.textContent = text;
 }
 
 function syncChips() {
@@ -4885,6 +4911,11 @@ $('#btnSettings').addEventListener('click', openSheet);
 $('#btnSheetClose').addEventListener('click', saveForm);
 $('#btnSheetSave').addEventListener('click', saveForm);
 // 改延迟的时候把「现在到底几秒」实时算出来：不用保存才知道生效没生效
+['#fImgOn', '#fImgBase', '#fImgModel', '#fImgTriggers', '#fImgChance'].forEach((sel) => {
+  const el = $(sel);
+  if (el) el.addEventListener('input', renderImgStatus);
+  if (el) el.addEventListener('change', renderImgStatus);
+});
 ['#fDelayMin', '#fDelayMax', '#fDelayOn'].forEach((sel) => {
   const el = $(sel);
   if (el) el.addEventListener('input', renderDelayLive);
@@ -7914,6 +7945,16 @@ function syncDiagSnapshot() {
     err: syncLastError,
     online: navigator.onLine !== false,
     hidden: document.hidden,
+    // 生图排障：客户端这一侧到底开没开、接口填没填、关键词几个、概率多少
+    photo: (() => {
+      try {
+        const conv = (state.conv && state.conv.kind === 'friend') ? currentConv() : null;
+        const cfg = conv ? photoCfgFor(conv) : null;
+        if (!cfg) return null;
+        return { on: cfg.on ? 1 : 0, rd: cfg.ready ? 1 : 0, tr: (cfg.triggers || []).length,
+          ch: cfg.chance, rf: (cfg.refs || []).length, b: String(cfg.base || '').length };
+      } catch (_) { return null; }
+    })(),
   };
 }
 

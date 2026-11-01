@@ -727,6 +727,20 @@ try {
       return !photoJobs.has('friend:f-test') && f.messages.some((m) => m.image);
     } finally { genImage = realGen; shrinkPhoto = realShrink; }
   `);
+  await check('她发照片：关键词留空也有内置的（自拍/照片/看看你）', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageChance: 0, imageTriggers: '' });
+    const realGen = genImage; const realShrink = shrinkPhoto;
+    window.__imgCalls = [];
+    genImage = async (p) => { __imgCalls.push(p); return 'data:image/png;base64,${PNG1}'; };
+    shrinkPhoto = async (d) => d;
+    try {
+      await send('发个自拍呗'); await advance(400);
+      if (!JSON.stringify(jobs[0].body).includes('【照片】')) return false;
+      await complete(0, '好呀\\n[[照片:窗边]]'); await advance(5000);
+      return __imgCalls.length === 1 && f.messages.some((m) => m.image);
+    } finally { genImage = realGen; shrinkPhoto = realShrink; }
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();

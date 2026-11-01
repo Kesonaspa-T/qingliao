@@ -306,6 +306,35 @@ def merge_friend(base, incoming, patch, *, background=False, strict=False):
     return out
 
 
+_LAST_PHOTO_CFG = {}
+
+
+def log_photo_cfg(uid, settings, friends):
+    """生图排障：客户端报上来的生图配置变了就打一行（不含任何 Key）。
+
+    「关键词死活不触发」这类问题，光看服务端存的 settings 不够——可能是客户端
+    本地那份不一样（没同步上/被旧快照盖住）。这里看的就是客户端自己认的值。
+    """
+    s = settings or {}
+    keys = ("imageOn", "imageBaseUrl", "imageModel", "imageTriggers", "imageChance", "imageQuality")
+    sig = tuple(str(s.get(k))[:80] for k in keys)
+    triggers = str(s.get("imageTriggers") or "")
+    per = []
+    for f in friends or []:
+        fs = f.get("settings") or {}
+        if any(k.startswith("image") for k in fs):
+            per.append("%s:%s" % (f.get("name") or "?", ",".join(
+                "%s=%s" % (k[5:], len(fs[k]) if k == "imageRefs" else fs[k])
+                for k in fs if k.startswith("image") and k != "imageRefs")))
+    sig = sig + (tuple(per),)
+    if _LAST_PHOTO_CFG.get(uid) == sig:
+        return
+    _LAST_PHOTO_CFG[uid] = sig
+    print("[PHOTO-CFG] %s on=%s base=%r model=%r trig=%r chance=%s quality=%r per-friend=%s"
+          % (uid, s.get("imageOn"), str(s.get("imageBaseUrl"))[:80], s.get("imageModel"),
+             triggers[:60], s.get("imageChance"), s.get("imageQuality"), per[:3]), flush=True)
+
+
 def _link_host_ok(url):
     """只允许公网 http(s)：挡掉 127.0.0.1 / 内网 / 元数据地址（SSRF）。"""
     try:
@@ -903,7 +932,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v48",
+                    "build": "v49",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -956,6 +985,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(payload, dict):
                 return self._json(400, {"error": "bad json"})
             uid = self._uid()
+            try:
+                log_photo_cfg(uid, payload.get("settings") or {}, payload.get("friends") or [])
+            except Exception:
+                pass
             with STATE_LOCK:
                 cur = load_state(uid)
                 merged = merge_state(cur, payload)

@@ -254,11 +254,12 @@
           <label class="field"><span>发照片概率</span><input id="fImgChance" type="number" min="0" max="100" step="5" placeholder="0-100"></label>
           <p class="hint">百分比：0 = 不按概率发（只走关键词）；15 = 平均每 7 条里有 1 条给她一次拍照机会；100 = 每条都按上面的提示词自己判断。一张要真花钱，别设太高。</p>
           <label class="field"><span>关键词必发照片</span><input id="fImgTriggers" placeholder="自拍, 照片, 看看你"></label>
-          <p class="hint">逗号分隔，规则和表情包一样：说到这些词<b>一定</b>发一张（不看概率）；只想按关键词发，把概率填 0。她只在私聊里发，群里不发。</p>
+          <p class="hint">逗号分隔，规则和表情包一样：说到这些词<b>一定</b>发一张（不看概率）；只想按关键词发，把概率填 0。留空就用内置的「自拍、照片、看看你、拍一张」。她只在私聊里发，群里不发。</p>
           <div class="row-btns">
             <button type="button" class="ghost" id="btnImgTest">用这组参数试一张</button>
           </div>
-          <p class="hint">生成一张通常几十秒，慢的中转要几分钟（这里给到 6 分钟）。只支持 OpenAI 兼容的 <code>/v1/images/generations</code>；DeepSeek 没有生图模型，Key 要填带生图模型的那家。</p>
+          <p class="hint" id="imgStatus"></p>
+          <p class="hint">生成一张通常几十秒，慢的中转要几分钟（这里给到 10 分钟）。只支持 OpenAI 兼容的 <code>/v1/images/generations</code>；DeepSeek 没有生图模型，Key 要填带生图模型的那家。</p>
         </div>
 
         <div class="group">
@@ -589,6 +590,6 @@
   </div>
 </div>
 
-<script src="app.js?v=89"></script>
+<script src="app.js?v=91"></script>
 </body>
 </html>
