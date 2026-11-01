@@ -190,8 +190,8 @@ try {
     const replies = f.messages.filter(m => m.role === 'peer').map(m => m.text);
     return replies.length === 1 && replies[0].includes('我今天有点累') && jobs.length === 1;
   `);
-  await check('90 秒总超时取消任务；迟到响应不会落地', `
-    await resetCase({ delayOn: false }); await send('超时'); await advance(400); await advance(90000);
+  await check('10 分钟总超时取消任务；迟到响应不会落地', `
+    await resetCase({ delayOn: false }); await send('超时'); await advance(400); await advance(600000);
     if (!jobs[0].cancelled || r.phase !== 'idle' || !r.error.includes('超时')) return false;
     await complete(0, '迟到消息'); await advance(20000);
     return f.messages.length === 1 && !!chatEl.querySelector('.error');
@@ -667,6 +667,65 @@ try {
       await complete(1, '好呀\\n[[照片:窗边]]'); await advance(3000);
       return f.messages.filter((m) => m.role === 'system').length === before;   // 一分钟内不刷屏
     } finally { window.fetch = realFetch; }
+  `);
+  await check('她发照片：标记后面那句话说在照片之后', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageChance: 0, imageTriggers: '自拍' });
+    const realGen = genImage; const realShrink = shrinkPhoto;
+    genImage = async () => 'data:image/png;base64,${PNG1}';
+    shrinkPhoto = async (d) => d;
+    try {
+      await send('发张自拍'); await advance(400);
+      await complete(0, '好呀\\n[[照片:窗边]]\\n拍好啦，头发有点乱'); await advance(5000);
+      const peers = f.messages.filter((m) => m.role === 'peer');
+      const iPic = peers.findIndex((m) => m.image);
+      if (iPic < 0) return false;
+      const after = peers[iPic + 1];
+      if (!after || after.text !== '拍好啦，头发有点乱') return false;
+      if (Number(after.ts) <= Number(peers[iPic].ts)) return false;
+      return peers.slice(0, iPic).every((m) => !String(m.text || '').includes('[[照片'));
+    } finally { genImage = realGen; shrinkPhoto = realShrink; }
+  `);
+  await check('她发照片：模型没补话就兜底一句，别光秃秃挂张图', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageChance: 0, imageTriggers: '自拍' });
+    const realGen = genImage; const realShrink = shrinkPhoto;
+    genImage = async () => 'data:image/png;base64,${PNG1}';
+    shrinkPhoto = async (d) => d;
+    try {
+      await send('发张自拍'); await advance(400);
+      await complete(0, '好呀\\n[[照片:窗边]]'); await advance(5000);
+      const peers = f.messages.filter((m) => m.role === 'peer');
+      const iPic = peers.findIndex((m) => m.image);
+      if (iPic < 0) return false;
+      const after = peers[iPic + 1];
+      return !!after && !!after.text && after.text.length <= 20;
+    } finally { genImage = realGen; shrinkPhoto = realShrink; }
+  `);
+  await check('她发照片：生图的时候也能照常聊天，状态是「正在拍照…」', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageChance: 0, imageTriggers: '自拍' });
+    const realGen = genImage; const realShrink = shrinkPhoto;
+    let release = null;
+    genImage = () => new Promise((r) => { release = r; });
+    shrinkPhoto = async (d) => d;
+    try {
+      await send('发张自拍'); await advance(400);
+      await complete(0, '好呀\\n[[照片:窗边]]'); await advance(2000);
+      if (!photoJobs.has('friend:f-test')) return false;         // 这张还在生成
+      if (statusEl.textContent !== '正在拍照…') return false;
+      // 生成期间照常发消息、照常回
+      await send('你在干嘛'); await advance(400);
+      if (jobs.length !== 2) return false;
+      await complete(1, '在想你'); await advance(2000);
+      if (!f.messages.some((m) => m.text === '在想你')) return false;
+      if (r.phase !== 'idle') return false;
+      // 收尾：放掉这张图，别把后面的用例堵住
+      release('data:image/png;base64,${PNG1}');
+      await flush();
+      await advance(5000);
+      return !photoJobs.has('friend:f-test') && f.messages.some((m) => m.image);
+    } finally { genImage = realGen; shrinkPhoto = realShrink; }
   `);
   console.log(`\n${count} browser regressions passed`);
 } finally {

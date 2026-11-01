@@ -115,8 +115,8 @@ final class LocalWebServer {
         }
         var req = URLRequest(url: url)
         req.httpMethod = (headerValue(head, "x-method") ?? "POST").uppercased()
-        // 生图一张要几分钟：同步那套 120 秒会把慢中转的图直接掐掉
-        req.timeoutInterval = 360
+        // 生图一张要几分钟：同步那套 120 秒会把慢中转的图直接掐掉（现在给到 10 分钟）
+        req.timeoutInterval = 600
         if let key = headerValue(head, "x-target-key"), !key.isEmpty {
             req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
         } else if let auth = headerValue(head, "authorization") {
@@ -137,7 +137,7 @@ final class LocalWebServer {
             if let d = d { out = d }
             sem.signal()
         }.resume()
-        if sem.wait(timeout: .now() + 360) == .timedOut { status = 504 }
+        if sem.wait(timeout: .now() + 600) == .timedOut { status = 504 }
         respond(c, status, ctype, out)
     }
 

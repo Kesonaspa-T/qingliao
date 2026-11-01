@@ -2590,7 +2590,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
       + (photoTrigger
         ? `他这一句提到了「${photoTrigger}」，这一条你发一张照片给他。`
         : '这一条你可以发一张照片。')
-      + '\n想发就在消息**最后单独一行**写 [[照片:画面描述]]，描述写具体：你在哪、穿什么、在做什么、什么表情、什么光。'
+      + '\n格式：先说一句话，另起一行写 [[照片:画面描述]]（描述写具体：你在哪、穿什么、在做什么、什么表情、什么光）。'
+      + '\n想再补一句（「拍好啦」「头发有点乱」）就写在标记后面另起一行——那句会等照片发出去之后才到他那儿。'
       + '\n例：[[照片:傍晚在书店柜台后面，米白色粗针织开衫，头发用夹子夹起来，捧着热可可，侧头看镜头，暖光]]'
       + (photoCfg.prompt
         ? '\n【主人写的生图规则（怎么判断该发、发什么，按这个来）】\n' + String(photoCfg.prompt).slice(0, 1500)
@@ -2996,8 +2997,8 @@ function renderReplyState(kind, conv) {
   }
   setStatus(r.error ? '回复失败，请重试' : r.phase === 'streaming' ? '对方正在输入…'
     : conv.lateReplyAt ? '已读，等会儿回'
-    // 生图要几十秒到几分钟：状态栏一直写「她在拍照…」，同步重绘也不会被冲掉
-    : photoJobs.has(convKey(kind, conv.id)) ? '她在拍照…' : '在线');
+    // 生图要几十秒到几分钟：状态栏一直写「正在拍照…」，同步重绘也不会被冲掉
+    : photoJobs.has(convKey(kind, conv.id)) ? '正在拍照…' : '在线');
   updateSendBtn();
 }
 
@@ -3138,13 +3139,16 @@ function delayFor(friend) {
 
 /* ---------- 提前生成：到点直接整条到 ---------- */
 
+/** 一轮回复最多等多久：模型/中转忙的时候 90 秒根本不够，给到 10 分钟（随时可以按「停止」）。 */
+const REPLY_TIMEOUT_MS = 10 * 60 * 1000;
+
 /**
  * 开一轮生成：job 里带取消开关和结果 promise。
  * 等待期就开始跑（prefetch），到点直接把整条消息发出来 —— 不逐字、也不冒加载气泡。
  */
 function beginGeneration(kind, conv, r) {
   const job = { inputId: lastUserId(conv), cancelled: false, abort: null,
-    expiresAt: Date.now() + 90000, painted: '', rt: r };
+    expiresAt: Date.now() + REPLY_TIMEOUT_MS, painted: '', rt: r };
   const cancelled = new Promise((_, reject) => {
     job.cancel = (reason) => {
       if (job.cancelled) return;
@@ -3159,7 +3163,7 @@ function beginGeneration(kind, conv, r) {
   const friend = kind === 'friend' ? conv : null;
   job.result = Promise.race([runChat(friend, conv, job, r.nudge || null), cancelled]);
   job.result.catch(() => {});            // 出错有人接；这里只是别留下未处理的 rejection
-  job.watchdog = setTimeout(() => { if (r.job === job) job.cancel('timeout'); }, 90000);
+  job.watchdog = setTimeout(() => { if (r.job === job) job.cancel('timeout'); }, REPLY_TIMEOUT_MS);
   return job;
 }
 
@@ -3449,8 +3453,8 @@ function pickStickerForText(text, trigger) {
 
 /* ---------------- 她会发照片：调接口、存图、贴进聊天 ---------------- */
 
-/** 生图一张要几分钟（中转站经常五六分钟），不能套同步那 25 秒；客户端比服务端多留 20 秒。 */
-const PHOTO_TIMEOUT_MS = 6 * 60 * 1000;
+/** 生图一张要几分钟（中转站经常五六分钟），不能套同步那 25 秒；给到 10 分钟。 */
+const PHOTO_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** 生图请求的返回包成人话；/api/search 这类中转也走同一套。 */
 async function readPhotoJson(res) {
@@ -3730,7 +3734,9 @@ let photoErrorAt = 0;
  * 她要真的发一张照片：后台调生图接口 → 压成 1024 的 JPEG 存进消息 → 贴到聊天里。
  * 十几秒到一分钟，所以不挡文字（文字先到，图好了再出现），失败只在当前聊天里提示一句。
  */
-function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue) {
+const PHOTO_AFTERWORD_FALLBACK = ['拍好啦。', '喏，刚拍的。', '拍得不太好……'];
+
+function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterword) {
   const cfg = photoCfgFor(conv);
   if (!cfg.on || !cfg.ready || kind !== 'friend') return;
   const key = convKey(kind, conv.id);
@@ -3743,7 +3749,7 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue) {
     if (!photoJobs.has(key) || !alive() || !isActive(kind, conv.id)) return;
     const r = rt.get(convKey(kind, conv.id));
     if (r && r.phase !== 'idle') return;
-    setStatus('她在拍照…');
+    setStatus('正在拍照…');
   }, 1500);
   (async () => {
     try {
@@ -3757,19 +3763,34 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue) {
       const msg = { id: uid('m'), role: 'peer', authorId, text: '',
         image: stored, thumb, photo: String(desc).slice(0, 160), ts };
       // 照片的时间戳取「决定要发」的那一刻：中间他插话了也不会插到他后面去
-      const at = conv.messages.findIndex((m) => Number(m.ts) > ts);
-      if (at >= 0) conv.messages.splice(at, 0, msg); else conv.messages.push(msg);
+      const insert = (m) => {
+        const at = conv.messages.findIndex((x) => Number(x.ts) > Number(m.ts));
+        if (at >= 0) conv.messages.splice(at, 0, m); else conv.messages.push(m);
+      };
+      insert(msg);
       const active = isActive(kind, conv.id);
-      if (active) {
+      const redraw = () => {
+        if (!isActive(kind, conv.id)) return;
         rememberScroll();
         renderChat();
         restoreScrollIfNeeded();
-        renderReplyState(kind, conv);
-      } else {
+      };
+      if (active) redraw();
+      persist();
+      // 照片落地之后，她再补一句：「拍好啦」「头发有点乱」。模型写在标记后面就用它的，
+      // 没写就随便补一句，别让照片光秃秃地挂在那儿。
+      const say = String(afterword || '').trim()
+        || PHOTO_AFTERWORD_FALLBACK[Math.floor(Math.random() * PHOTO_AFTERWORD_FALLBACK.length)];
+      if (say && alive()) {
+        await sleep(600 + Math.random() * 600);
+        insert({ id: uid('m'), role: 'peer', authorId, text: say.slice(0, 80), ts: ts + 1 + Math.floor(Math.random() * 400) });
+        if (isActive(kind, conv.id)) redraw();
+        persist();
+      }
+      if (!active) {
         conv.unread = (conv.unread || 0) + 1;
         notifyPeer(nameOf(authorId), '[照片]', conv.id, kind);
       }
-      persist();
       renderConversations();
     } catch (e) {
       const now = Date.now();
@@ -3793,6 +3814,7 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue) {
       console.warn('[photo]', e);
     } finally {
       photoJobs.delete(key);
+      if (isActive(kind, conv.id)) renderReplyState(kind, conv);
     }
   })();
 }
@@ -3848,10 +3870,19 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
   const photoGate = (conv && typeof conv === 'object') ? conv.__photoThisTurn : undefined;
   const photoTrigger = (conv && typeof conv === 'object') ? (conv.__photoTrigger || '') : '';
   let photoScene = '';
-  body = body.replace(/\[\[照片[:：]([^\]\n]{1,300})\]\]/g, (_all, d) => {
-    if (!photoScene) photoScene = String(d || '').trim();
-    return '';
-  }).trim();
+  let photoAfter = '';
+  const photoHit = body.match(/\[\[照片[:：]([^\]\n]{1,300})\]\]/);
+  if (photoHit) {
+    photoScene = String(photoHit[1] || '').trim();
+    // 标记后面写的话：等照片发出去之后再补给她，像真人拍完补一句
+    const tail = body.slice(photoHit.index + photoHit[0].length).trim();
+    body = body.slice(0, photoHit.index);
+    if (tail) {
+      photoAfter = tail.split('\n').map((x) => x.trim()).filter(Boolean).join('\n')
+        .replace(/\[\[[^\]]*\]\]/g, '').trim().slice(0, 80);
+    }
+    body = body.replace(/\[\[照片[:：][^\]\n]{1,300}\]\]/g, '').trim();
+  }
   if (conv && typeof conv === 'object') {
     conv.__photoThisTurn = undefined;
     conv.__photoTrigger = '';
@@ -3922,7 +3953,7 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
   // 生成放在后台跑：十几秒到一分钟，文字先到，图好了再贴上来。
   const hasTextNow = parts.some((x) => String(x || '').trim());
   if (photoGate === true && hasTextNow) {
-    startPhotoJob(kind, conv, authorId, photoScene, photoTrigger, canContinue);
+    startPhotoJob(kind, conv, authorId, photoScene, photoTrigger, canContinue, photoAfter);
   }
 
   let sentCount = 0;

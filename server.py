@@ -903,7 +903,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v47",
+                    "build": "v48",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1203,7 +1203,7 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 if not img_url.lower().startswith(("http://", "https://")):
                     raise ValueError("图片地址不是 http(s)")
-                with urlopen(img_url, timeout=120, context=SSL_CTX) as ir:
+                with urlopen(img_url, timeout=180, context=SSL_CTX) as ir:
                     img = ir.read()
                 if img and len(img) <= 30 * 1024 * 1024:
                     fmt = "png"
@@ -1224,8 +1224,8 @@ class Handler(SimpleHTTPRequestHandler):
         if key:
             headers["Authorization"] = "Bearer " + key
         req = Request(url, data=payload, headers=headers, method="POST")
-        # 中转站生一张图经常五六分钟：给到 6 分钟，别用搜索那套 30 秒
-        with urlopen(req, timeout=360, context=SSL_CTX) as r:
+        # 中转站生一张图经常五六分钟：给到 10 分钟，别用搜索那套 30 秒
+        with urlopen(req, timeout=600, context=SSL_CTX) as r:
             raw = r.read()
         data = json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
@@ -1396,7 +1396,8 @@ class Handler(SimpleHTTPRequestHandler):
         )
 
         try:
-            resp = urlopen(req, timeout=180, context=SSL_CTX)
+            # 模型慢的时候 3 分钟不够：和客户端一样给到 10 分钟（nginx 那边 660s）
+            resp = urlopen(req, timeout=600, context=SSL_CTX)
         except HTTPError as e:
             detail = ""
             try:
