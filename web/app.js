@@ -835,7 +835,7 @@ function openBgSheet(kind, id, name) {
           <button type="button" class="ghost solid" id="btnBgPick">从相册选一张</button>
           <button type="button" class="ghost danger-text" id="btnBgClear">清除背景</button>
         </div>
-        <p class="hint">只存在这台设备（本地存储），不上传服务器；换手机或重装不会带过去。图片会压到 1080 长边。</p>
+        <p class="hint">只存在这台设备（本地存储），不上传服务器，换手机或重装不会带过去。原图存原样、<b>不压缩画质</b>（只在太夸张的大图才会被浏览器自己缩放显示）。</p>
       </div>
     </div>`);
   if (!el.dataset.bound) {
@@ -849,7 +849,7 @@ function openBgSheet(kind, id, name) {
       }
       if (!bgTarget) return;
       if (e.target.id === 'btnBgPick') {
-        const dataUrl = await pickImage({ max: 1080, quality: 0.82 });
+        const dataUrl = await pickOriginalImage();
         if (!dataUrl) return;
         await ChatBg.set(bgTarget.kind, bgTarget.id, dataUrl);
         renderBgSheet();
@@ -987,6 +987,40 @@ function imageToDataUrl(file, max, quality) {
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片读不出来')); };
     img.src = url;
+  });
+}
+
+/**
+ * 选一张图，原样读进来——不重压、不缩尺寸。
+ * 聊天背景只存本机（IndexedDB），不需要为同步省体积，画质优先。
+ */
+function pickOriginalImage() {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return resolve(null);
+      const raw = await new Promise((r) => {
+        const fr = new FileReader();
+        fr.onload = () => r(String(fr.result || ''));
+        fr.onerror = () => r('');
+        fr.readAsDataURL(file);
+      });
+      if (!raw) return resolve(null);
+      // 浏览器画不出来的格式（HEIC 之类）再退回 canvas 转一次，别让背景裂掉
+      const ok = await new Promise((r) => {
+        const im = new Image();
+        im.onload = () => r(true);
+        im.onerror = () => r(false);
+        im.src = raw;
+      });
+      if (ok) return resolve(raw);
+      const fixed = await imageToDataUrl(file, 4096, 0.95).catch(() => null);
+      resolve(fixed || null);
+    };
+    input.click();
   });
 }
 
