@@ -787,6 +787,71 @@ try {
     mergeRemote(remote);
     return state.stickers.length === 1 && state.stickers[0].id === 'st1';
   `);
+  await check('引用不再是灰色：自己的气泡上改成白色', `
+    await resetCase();
+    f.messages.push({ id: 'q1', role: 'user', text: '你看这个', quote: { author: f.name, text: '旧消息' }, ts: Date.now() });
+    f.messages.push({ id: 'q2', role: 'peer', authorId: f.id, text: '看到了', quote: { author: '我', text: '你看这个' }, ts: Date.now() + 1 });
+    renderChat();
+    const mine = chatEl.querySelector('.row.me .quote-block');
+    const hers = chatEl.querySelector('.row.peer .quote-block');
+    if (!mine || !hers) return false;
+    const c1 = getComputedStyle(mine).color;
+    // 自己的蓝气泡上必须是白色（深色主题也一样）
+    return c1 === 'rgb(255, 255, 255)' || c1 === 'rgba(255, 255, 255, 1)';
+  `);
+  await check('群聊头像：像微信群一样拼成员头像', `
+    await resetCase();
+    state.friends.push(makeFriend({ id: 'g-a', name: '阿二' }), makeFriend({ id: 'g-b', name: '阿三' }));
+    const g = makeGroup({ id: 'g1', name: '测试群', members: [state.friends[0].id, 'g-a', 'g-b'] });
+    const av = avatarEl(g);
+    if (!av.classList.contains('group-avatar')) return false;
+    if (av.querySelectorAll('i').length !== 3) return false;
+    if (!av.classList.contains('n3')) return false;
+    // 单聊不受影响
+    const one = avatarEl(state.friends[0]);
+    return !one.classList.contains('group-avatar') && one.textContent.length > 0;
+  `);
+  await check('红包：能发、能渲染、她也看得到、提示词里有', `
+    await resetCase({ delayOn: false });
+    sendMoney(520, '给你买奶茶');
+    await advance(400);
+    const m = f.messages.find((x) => x.money);
+    if (!m || m.money.amount !== 520 || m.money.note !== '给你买奶茶') return false;
+    const bubble = chatEl.querySelector('.bubble.money');
+    if (!bubble || !bubble.textContent.includes('¥520')) return false;
+    if (!bubble.textContent.includes('给你买奶茶')) return false;
+    if (!convPreview(f, 'friend').includes('[红包] ¥520')) return false;
+    const api = toApiMessage(m);
+    if (typeof api.content !== 'string' || !api.content.includes('¥520') || !api.content.includes('红包')) return false;
+    if (jobs.length !== 1) return false;
+    const body = JSON.stringify(jobs[0].body);
+    return body.includes('【红包】') && body.includes('¥520') && body.includes('给你买奶茶');
+  `);
+  await check('聊天背景：只存本机，不进 state、不上传', `
+    await resetCase();
+    await ChatBg.set('friend', 'f-test', 'data:image/jpeg;base64,AAAA');
+    await applyChatBg();
+    if (!String(chatEl.style.backgroundImage).includes('AAAA')) return false;
+    if (JSON.stringify(state).includes('bg:friend') || JSON.stringify(state).includes('AAAA')) return false;
+    // 本地确实存下来了
+    if ((localStorage.getItem('ql.bg:friend:f-test') || '').indexOf('AAAA') < 0) return false;
+    await ChatBg.set('friend', 'f-test', '');
+    await applyChatBg();
+    return !chatEl.style.backgroundImage;
+  `);
+  await check('皮肤：切换就生效，并且会同步给服务器', `
+    await resetCase();
+    openSheet();
+    const chip = document.querySelector('#skinChips .chip[data-skin="forest"]');
+    if (!chip) return false;
+    chip.click();
+    if (state.settings.skin !== 'forest') return false;
+    if (document.documentElement.getAttribute('data-skin') !== 'forest') return false;
+    if (pendingEdits.settings.skin !== 'forest') return false;
+    state.settings.skin = 'sakura';
+    applyTheme();
+    return document.documentElement.getAttribute('data-skin') === 'sakura';
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();

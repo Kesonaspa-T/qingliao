@@ -138,6 +138,13 @@
             </svg>
           </button>
           <textarea id="input" rows="1" placeholder="说点什么…" autocomplete="off"></textarea>
+          <button class="tool" id="btnCoin" aria-label="发红包">
+            <svg viewBox="0 0 24 24" class="ic">
+              <rect x="3.2" y="5.6" width="17.6" height="12.8" rx="3"/>
+              <path d="M8.4 5.6c0 3.2 1.6 5 3.6 5s3.6-1.8 3.6-5"/>
+              <circle cx="12" cy="13.8" r="1.6"/>
+            </svg>
+          </button>
           <button class="tool" id="btnImage" aria-label="图片">
             <svg viewBox="0 0 24 24" class="ic">
               <rect x="3.4" y="5.4" width="17.2" height="13.2" rx="3"/>
@@ -299,6 +306,18 @@
         </div>
 
         <div class="group">
+          <div class="group-title">皮肤</div>
+          <div class="chips" id="skinChips">
+            <button type="button" class="chip" data-skin="default">默认</button>
+            <button type="button" class="chip" data-skin="sakura">樱花</button>
+            <button type="button" class="chip" data-skin="forest">抹茶</button>
+            <button type="button" class="chip" data-skin="ocean">海盐</button>
+            <button type="button" class="chip" data-skin="paper">米纸</button>
+          </div>
+          <p class="hint">只换配色，不影响聊天记录。想给某个聊天单独换背景图：进聊天 → 右上角「⋯」→ 聊天背景（只存在本机，不上传服务器）。</p>
+        </div>
+
+        <div class="group">
           <div class="group-title">其他</div>
           <label class="field">
             <span>主题</span>
@@ -370,6 +389,11 @@
             <button type="button" class="chip" data-preset="bookish">文艺型</button>
           </div>
           <p class="hint">套模板会覆盖上面的人设文字，名字也会跟着改。改完记得点保存。</p>
+        </div>
+
+        <div class="group">
+          <button type="button" class="field row-inline link-row" id="btnFBg"><span>聊天背景</span><span class="link-val" id="fbBgVal">只存本机</span></button>
+          <p class="hint">给这个聊天单独选一张背景图，只存在这台设备上，不上传服务器。</p>
         </div>
 
         <div class="row-btns" id="friendDanger">
@@ -576,6 +600,10 @@
             <textarea id="fGIPrompt" rows="5" placeholder="比如：这是个损友群，说话随意、互相拆台，不超过两句。"></textarea>
           </label>
         </div>
+        <div class="group">
+          <button type="button" class="field row-inline link-row" id="btnGIBg"><span>聊天背景</span><span class="link-val">只存本机</span></button>
+          <p class="hint">给这个群单独选一张背景图，只存在这台设备上，不上传服务器。</p>
+        </div>
         <div class="row-btns">
           <button type="button" class="ghost danger-text" id="btnGIDelete">删除并退出群聊</button>
         </div>
@@ -593,6 +621,6 @@
   </div>
 </div>
 
-<script src="app.js?v=96"></script>
+<script src="app.js?v=97"></script>
 </body>
 </html>

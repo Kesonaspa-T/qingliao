@@ -225,6 +225,7 @@ const DEFAULT_SETTINGS = {
   idleMin: 20,
   momentInterval: 43200,
   groupReplyMax: 2,
+  skin: 'default',
   // 「她会活过来」：三个独立开关 + 概率
   recallOn: true, recallChance: 20,
   rewordOn: true, rewordChance: 10,
@@ -381,6 +382,13 @@ function listTime(ts) {
 
 function weekday(d) {
   return '周' + '日一二三四五六'[d.getDay()];
+}
+
+/** 红包金额显示：整数不带小数点，小数留两位 */
+function moneyText(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '0';
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
 }
 
 function initialOf(name) {
@@ -727,6 +735,7 @@ function applyTheme() {
   const t = state.settings.theme || 'auto';
   const dark = t === 'dark' || (t === 'auto' && darkMedia.matches);
   document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-skin', state.settings.skin || 'default');
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', dark ? '#17181b' : '#f7f8fa');
   if (NATIVE && window.AndroidChat.setBars) {
@@ -740,6 +749,125 @@ darkMedia.addEventListener('change', () => {
 
 
 /** 图片地址：新格式是 @blob:<文件>，走服务器；老数据还是 data: 直接内联。 */
+const SKIN_IDS = ['default', 'sakura', 'forest', 'ocean', 'paper'];
+
+function renderSkinChips() {
+  const cur = state.settings.skin || 'default';
+  $$('#skinChips .chip').forEach((c) => c.classList.toggle('active', c.dataset.skin === cur));
+}
+
+/**
+ * 每个会话的自定义聊天背景：只存本机（IndexedDB / localStorage），
+ * 永远不进 state、不上传服务器——换手机、重装都不会带过去。
+ */
+const ChatBg = {
+  cache: new Map(),
+  key(kind, id) { return 'bg:' + kind + ':' + id; },
+  async get(kind, id) {
+    const k = this.key(kind, id);
+    if (this.cache.has(k)) return this.cache.get(k);
+    let v = '';
+    try {
+      if (await IdbStore.available()) v = String((await IdbStore.get(k)) || '');
+      else v = localStorage.getItem('ql.' + k) || '';
+    } catch (_) { v = ''; }
+    this.cache.set(k, v);
+    return v;
+  },
+  async set(kind, id, dataUrl) {
+    const k = this.key(kind, id);
+    const v = String(dataUrl || '');
+    this.cache.set(k, v);
+    const fallback = () => {
+      try { if (v) localStorage.setItem('ql.' + k, v); else localStorage.removeItem('ql.' + k); } catch (_) {}
+    };
+    try {
+      if (await IdbStore.available()) await IdbStore.set(k, v);
+      else fallback();
+    } catch (_) { fallback(); }
+  },
+};
+
+/** 把当前会话的背景铺到聊天区（没有就还原） */
+async function applyChatBg() {
+  const conv = currentConv();
+  if (!conv || !chatEl || !state.conv) return;
+  const kind = state.conv.kind;
+  const bg = await ChatBg.get(kind, conv.id);
+  if (!state.conv || state.conv.kind !== kind || state.conv.id !== conv.id) return;
+  if (bg) {
+    chatEl.style.backgroundImage = 'linear-gradient(var(--chat-bg-tint), var(--chat-bg-tint)), url("' + bg + '")';
+    chatEl.style.backgroundSize = 'cover';
+    chatEl.style.backgroundPosition = 'center';
+  } else {
+    chatEl.style.backgroundImage = '';
+    chatEl.style.backgroundSize = '';
+    chatEl.style.backgroundPosition = '';
+  }
+}
+
+let bgTarget = null;
+
+async function renderBgSheet() {
+  const box = document.getElementById('bgPreview');
+  if (!box || !bgTarget) return;
+  const bg = await ChatBg.get(bgTarget.kind, bgTarget.id);
+  box.style.backgroundImage = bg ? 'url("' + bg + '")' : '';
+  const t = document.getElementById('bgSheetTitle');
+  if (t) t.textContent = (bgTarget.name || '聊天') + ' 的背景';
+  const clr = document.getElementById('btnBgClear');
+  if (clr) clr.disabled = !bg;
+}
+
+function openBgSheet(kind, id, name) {
+  bgTarget = { kind, id, name: name || '聊天' };
+  const el = ensureSheet('bgSheet', `
+    <header class="sheet-nav">
+      <button class="text-btn" data-close="bgSheet">关闭</button>
+      <span class="sheet-title">聊天背景</span>
+      <span></span>
+    </header>
+    <div class="sheet-body">
+      <div class="group">
+        <div class="group-title" id="bgSheetTitle">聊天背景</div>
+        <div class="bg-preview" id="bgPreview"></div>
+        <div class="row-btns">
+          <button type="button" class="ghost solid" id="btnBgPick">从相册选一张</button>
+          <button type="button" class="ghost danger-text" id="btnBgClear">清除背景</button>
+        </div>
+        <p class="hint">只存在这台设备（本地存储），不上传服务器；换手机或重装不会带过去。图片会压到 1080 长边。</p>
+      </div>
+    </div>`);
+  if (!el.dataset.bound) {
+    el.dataset.bound = '1';
+    el.addEventListener('click', async (e) => {
+      const close = e.target.closest('[data-close]');
+      if (close) {
+        el.classList.remove('open');
+        el.setAttribute('aria-hidden', 'true');
+        return;
+      }
+      if (!bgTarget) return;
+      if (e.target.id === 'btnBgPick') {
+        const dataUrl = await pickImage({ max: 1080, quality: 0.82 });
+        if (!dataUrl) return;
+        await ChatBg.set(bgTarget.kind, bgTarget.id, dataUrl);
+        renderBgSheet();
+        applyChatBg();
+        toast('背景换好了（只存本机）');
+      } else if (e.target.id === 'btnBgClear') {
+        await ChatBg.set(bgTarget.kind, bgTarget.id, '');
+        renderBgSheet();
+        applyChatBg();
+        toast('背景清掉了');
+      }
+    });
+  }
+  renderBgSheet();
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+}
+
 function imgSrc(ref) {
   if (!ref) return '';
   if (ref.startsWith('@blob:')) {
@@ -756,6 +884,26 @@ function imgSrc(ref) {
 function avatarEl(who, cls) {
   const el = document.createElement('div');
   el.className = 'avatar' + (cls ? ' ' + cls : '');
+  // 群聊：像微信一样把成员头像拼成九宫格（最多 4 个）；单聊还是原来那张
+  if (who && Array.isArray(who.members)) {
+    const ids = who.members.filter((id) => friendById(id)).slice(0, 4);
+    el.classList.add('group-avatar', 'n' + Math.max(1, ids.length));
+    if (!ids.length) { el.textContent = initialOf(who.name); return el; }
+    for (const id of ids) {
+      const f = friendById(id);
+      const cell = document.createElement('i');
+      if (f && f.avatar) {
+        const im = document.createElement('img');
+        im.src = imgSrc(f.avatar);
+        im.alt = '';
+        cell.append(im);
+      } else {
+        cell.textContent = initialOf((f && f.name) || '?');
+      }
+      el.append(cell);
+    }
+    return el;
+  }
   const url = who && who.avatar;
   if (url) {
     const img = document.createElement('img');
@@ -873,6 +1021,7 @@ function convPreview(c, kind) {
   const last = lastMessage(c);
   if (!last) return '';
   const prefix = last.role === 'user' ? '我：' : '';
+  if (last.money) return prefix + '[红包] ¥' + moneyText(last.money.amount);
   if (last.image) return prefix + '[图片]';
   if (last.file && last.file.name) return prefix + '[文件] ' + last.file.name;
   if (kind === 'group') {
@@ -899,14 +1048,8 @@ function renderConversations() {
     const row = document.createElement('div');
     row.className = 'conv';
 
-    if (kind === 'group') {
-      const av = document.createElement('div');
-      av.className = 'avatar group-av';
-      av.textContent = '群';
-      row.append(av);
-    } else {
-      row.append(avatarEl(data));
-    }
+    // 群聊头像：成员头像拼起来（和微信一样），单聊用她自己的头像
+    row.append(avatarEl(data));
 
     const main = document.createElement('div');
     main.className = 'conv-main';
@@ -970,10 +1113,7 @@ function renderContacts() {
     for (const g of state.groups) {
       const row = document.createElement('div');
       row.className = 'conv';
-      const av = document.createElement('div');
-      av.className = 'avatar group-av';
-      av.textContent = '群';
-      row.append(av);
+      row.append(avatarEl(g));
       const main = document.createElement('div');
       main.className = 'conv-main';
       const top = document.createElement('div');
@@ -1518,6 +1658,7 @@ function openChat(kind, id) {
   phone.classList.add('chat-open');
 
   renderChat();
+  applyChatBg().catch(() => {});
   restoreDraft();
   updateSendBtn();
 
@@ -1910,6 +2051,29 @@ function renderMessage(msg, opts = {}) {
 
   if (typing) {
     bubble.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
+  } else if (msg.money) {
+    bubble.classList.add('money');
+    const row = document.createElement('div');
+    row.className = 'money-row';
+    const ic = document.createElement('div');
+    ic.className = 'money-icon';
+    ic.textContent = '🧧';
+    const col = document.createElement('div');
+    const amt = document.createElement('div');
+    amt.className = 'money-amt';
+    amt.textContent = '¥' + moneyText(msg.money.amount);
+    const sub = document.createElement('div');
+    sub.className = 'money-sub';
+    sub.textContent = '轻聊币 · 红包';
+    col.append(amt, sub);
+    row.append(ic, col);
+    bubble.append(row);
+    if (msg.money.note) {
+      const note = document.createElement('div');
+      note.className = 'money-note';
+      note.textContent = msg.money.note;
+      bubble.append(note);
+    }
   } else if (msg.image) {
     const img = document.createElement('img');
     if (msg.sticker) {
@@ -2290,6 +2454,11 @@ async function resolveImagesForModel(conv, budget = 2) {
 function toApiMessage(m, allowImage, imgMap) {
   const isUser = m.role === 'user';
   const role = isUser ? 'user' : 'assistant';
+  if (m.money) {
+    const amt = moneyText(m.money.amount);
+    const note = m.money.note ? '，附言：' + String(m.money.note).slice(0, 40) : '';
+    return { role, content: (isUser ? '（他给你发了一个 ¥' : '（你给他发了一个 ¥') + amt + ' 的轻聊币红包' + note + '）' };
+  }
   if (m.image) {
     // 表情包一律用文字标注，不占「看图」的额度：标签/描述本来就是模型自己认的，
     // 而且这样「你发的」和「她发的」不会搅在一起。
@@ -2532,6 +2701,19 @@ function buildMessages(friend, conv, nudge, imgMap) {
 
   if (searchEnabled()) {
     sys += '\n\n【联网】需要最新消息或不确定的事，用 web_search 查一下再说。不要提“搜索”这个词，别编。';
+  }
+
+  // 红包：他刚发了轻聊币，她得有点真实反应（别装没看见，也别退回去）
+  {
+    const um = [...(conv.messages || [])].reverse()
+      .find((m) => m.role === 'user' && !m.recalled && (m.text || m.money));
+    if (um && um.money) {
+      const amt = moneyText(um.money.amount);
+      const note = um.money.note ? '（附言：' + String(um.money.note).slice(0, 40) + '）' : '';
+      sys += '\n\n【红包】' + (isGroup ? '他刚在群里发了一个 ¥' : '他刚给你发了一个 ¥') + amt + ' 的轻聊币红包' + note + '。'
+        + '你的反应要像真人：开心、客气一句、撒娇、或者嘴上说不要但收下了都行；'
+        + '不要问他要不要退，不要提「程序」「虚拟货币」「余额」，也不要报数字之外的解释。';
+    }
   }
 
   // 画图：不是「聊够多少轮就画」，而是由具体的事情触发
@@ -4303,6 +4485,87 @@ async function sendImage(dataUrl) {
 }
 
 /**
+ * 发红包：轻聊币是无限的，随便发。消息里只存金额和附言（很小），
+ * 她通过 toApiMessage / 提示词看得到，会自己反应。
+ */
+function sendMoney(amount, note) {
+  const conv = currentConv();
+  if (!conv) return;
+  const amt = Math.max(0.01, Math.min(999999, Number(amount) || 0));
+  if (!amt) return toast('先填个金额');
+  const kind = state.conv.kind;
+  const msg = {
+    id: uid('m'), role: 'user', text: '',
+    money: { amount: Math.round(amt * 100) / 100, note: String(note || '').trim().slice(0, 20) },
+    ts: Date.now(),
+  };
+  conv.messages.push(msg);
+  clearReadMark();
+  renderMessage(msg, { conv, kind });
+  scrollBottom(true);
+  lastActivity = Date.now();
+  if (kind === 'group' && isCloud()) saveHint = 'social';
+  persist();
+  renderConversations();
+  afterUserMessage(kind, conv);
+}
+
+function openCoinSheet() {
+  const conv = currentConv();
+  if (!conv) return;
+  const isGroup = state.conv.kind === 'group';
+  const el = ensureSheet('coinSheet', `
+    <header class="sheet-nav">
+      <button class="text-btn" data-close="coinSheet">关闭</button>
+      <span class="sheet-title">发红包</span>
+      <span></span>
+    </header>
+    <div class="sheet-body">
+      <div class="group">
+        <div class="group-title">${isGroup ? '发到群里' : '给她发'}</div>
+        <div class="chips" id="coinChips">
+          <button type="button" class="chip" data-amt="5.2">¥5.20</button>
+          <button type="button" class="chip" data-amt="13.14">¥13.14</button>
+          <button type="button" class="chip" data-amt="52">¥52</button>
+          <button type="button" class="chip" data-amt="520">¥520</button>
+          <button type="button" class="chip" data-amt="1314">¥1314</button>
+        </div>
+        <label class="field"><span>金额</span><input id="coinAmt" type="number" min="0.01" max="999999" step="0.01" value="52"></label>
+        <label class="field"><span>附言</span><input id="coinNote" maxlength="20" placeholder="（可不填）"></label>
+        <div class="row-btns"><button type="button" class="ghost solid" id="btnCoinSend">塞进红包</button></div>
+        <p class="hint">轻聊币余额：<b>∞</b>（无限）——随便发，她收到会自己反应。</p>
+      </div>
+    </div>`);
+  const amtEl = el.querySelector('#coinAmt');
+  const noteEl = el.querySelector('#coinNote');
+  if (!el.dataset.bound) {
+    el.dataset.bound = '1';
+    el.addEventListener('click', (ev) => {
+      const close = ev.target.closest('[data-close]');
+      if (close) {
+        el.classList.remove('open');
+        el.setAttribute('aria-hidden', 'true');
+        return;
+      }
+      const chip = ev.target.closest('#coinChips .chip');
+      if (chip && amtEl) { amtEl.value = chip.dataset.amt; return; }
+      if (ev.target.id === 'btnCoinSend') {
+        const amt = Number(amtEl && amtEl.value);
+        if (!(amt > 0)) return toast('金额填大一点');
+        sendMoney(amt, noteEl ? noteEl.value : '');
+        el.classList.remove('open');
+        el.setAttribute('aria-hidden', 'true');
+        toast('红包发出去了');
+      }
+    });
+  }
+  if (amtEl) amtEl.value = '52';
+  if (noteEl) noteEl.value = '';
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+}
+
+/**
  * 你也能发表情包：和「她」的表情包共用同一个库（我的 → 表情包 里上传的那些），
  * 发出去就是一条表情消息；她也看得见你发了什么（见 toApiMessage 的「他发了一个表情包」）。
  */
@@ -4566,6 +4829,8 @@ if (stkMoreBtn) {
   stkMoreBtn.addEventListener('click', () => { closeEmoji(); openStickerSheet(); });
 }
 
+$('#btnCoin').addEventListener('click', openCoinSheet);
+
 $('#btnImage').addEventListener('click', async () => {
   const data = await pickImage({ max: 1024, quality: 0.8 });
   if (data) sendImage(data);
@@ -4797,6 +5062,7 @@ function fillForm() {
   if ($('#fLife')) $('#fLife').checked = s.lifeOn !== false;
   if ($('#fEssayChance')) $('#fEssayChance').value = Number(s.essayChance ?? 15);
   if ($('#fArchiveDays')) $('#fArchiveDays').value = Number(s.archiveDays) || 0;
+  renderSkinChips();
   syncChips();
 }
 
@@ -4962,6 +5228,17 @@ function renderDelayLive() {
 }
 $('#fTemp').addEventListener('input', (e) => { $('#fTempOut').textContent = Number(e.target.value).toFixed(1); });
 $('#fModel').addEventListener('input', syncChips);
+$('#skinChips').addEventListener('click', (e) => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  const skin = SKIN_IDS.includes(chip.dataset.skin) ? chip.dataset.skin : 'default';
+  state.settings.skin = skin;
+  pendingEdits.settings.skin = skin;
+  applyTheme();
+  renderSkinChips();
+  persist();
+});
+
 $('#modelChips').addEventListener('click', (e) => {
   const chip = e.target.closest('.chip');
   if (!chip) return;
@@ -5411,8 +5688,11 @@ function renderProfile() {
   const hers = msgs - mine;
   const pics = (f.messages || []).filter((m) => m.image || splitSvg(m.text || '')).length;
   const momentCount = (state.moments || []).filter((m) => m.authorId === f.id).length;
+  const moneyList = (f.messages || []).filter((m) => m.role === 'user' && m.money);
+  const moneySum = moneyList.reduce((n, m) => n + (Number(m.money.amount) || 0), 0);
   $('#pfStats').textContent = `认识 ${days} 天 · 一共 ${msgs} 条消息（她说 ${hers}，你说 ${mine}）\n`
-    + `画过 ${pics} 张图 · 发过 ${momentCount} 条朋友圈`;
+    + `画过 ${pics} 张图 · 发过 ${momentCount} 条朋友圈`
+    + (moneyList.length ? `\n收过 ${moneyList.length} 个红包 · 共 ¥${moneyText(moneySum)}` : '');
 
   // 她的近况 / 纪念日 + 记忆、日记入口（只建一次）
   let life = document.getElementById('pfLife');
@@ -5852,6 +6132,13 @@ function openFriendSheet(friend, mode) {
   }
 
   renderFriendRhythm(target, isMe);
+  const fbBg = $('#fbBgVal');
+  if (fbBg) {
+    fbBg.textContent = '只存本机';
+    if (friend && !isNew && !isMe) {
+      ChatBg.get('friend', friend.id).then((v) => { if (fbBg.isConnected) fbBg.textContent = v ? '已设置' : '只存本机'; }).catch(() => {});
+    }
+  }
   friendSheet.classList.add('open');
   friendSheet.setAttribute('aria-hidden', 'false');
 }
@@ -5861,6 +6148,18 @@ function closeFriendSheet() {
   friendSheet.classList.remove('open');
   friendSheet.setAttribute('aria-hidden', 'true');
 }
+
+$('#btnFBg').addEventListener('click', () => {
+  const f = friendById(editingFriendId);
+  if (!f) return toast('先保存这个人');
+  openBgSheet('friend', f.id, f.note || f.name);
+});
+
+$('#btnGIBg').addEventListener('click', () => {
+  const conv = currentConv();
+  if (!conv || !state.conv || state.conv.kind !== 'group') return;
+  openBgSheet('group', conv.id, conv.name);
+});
 
 $('#btnFClose').addEventListener('click', closeFriendSheet);
 

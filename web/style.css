@@ -59,6 +59,40 @@ html[data-theme="dark"] body {
     linear-gradient(160deg, #0b0d10 0%, #0f1216 50%, #131720 100%);
 }
 
+/* 皮肤：只换配色，结构一点不动。深色模式下各有一份，免得把夜间模式冲掉 */
+html[data-skin="sakura"] {
+  --me: #f2668b; --me-dark: #d94f74; --bg: #fdf3f7; --nav: #fff8fb; --field-bg: #fdf0f5;
+  --peer-avatar: linear-gradient(135deg, #ffc2d6, #ff9fbd);
+}
+html[data-theme="dark"][data-skin="sakura"] {
+  --me: #d9557d; --me-dark: #b84066; --bg: #17121a; --nav: #1e1721; --field-bg: #241c28;
+  --peer-avatar: linear-gradient(135deg, #7d3f57, #5e2f42);
+}
+html[data-skin="forest"] {
+  --me: #45a97a; --me-dark: #379168; --bg: #f2f8f4; --nav: #f7fcf9; --field-bg: #eef7f1;
+  --peer-avatar: linear-gradient(135deg, #b9e3c9, #8bd0a6);
+}
+html[data-theme="dark"][data-skin="forest"] {
+  --me: #3f9469; --me-dark: #2f7a55; --bg: #0f1512; --nav: #151d18; --field-bg: #1a241e;
+  --peer-avatar: linear-gradient(135deg, #2f6a4c, #245039);
+}
+html[data-skin="ocean"] {
+  --me: #4a86e8; --me-dark: #3a6fc4; --bg: #eef4fb; --nav: #f6f9fe; --field-bg: #eaf2fc;
+  --peer-avatar: linear-gradient(135deg, #bcd7f7, #8bb8ee);
+}
+html[data-theme="dark"][data-skin="ocean"] {
+  --me: #4179cf; --me-dark: #3362ab; --bg: #0d1219; --nav: #141b24; --field-bg: #18222e;
+  --peer-avatar: linear-gradient(135deg, #2c4f7a, #213c5e);
+}
+html[data-skin="paper"] {
+  --me: #b08968; --me-dark: #96755a; --bg: #f8f3ea; --nav: #fbf7ef; --field-bg: #f6efe3;
+  --peer-avatar: linear-gradient(135deg, #e0cfb8, #c9b294);
+}
+html[data-theme="dark"][data-skin="paper"] {
+  --me: #9a7a5f; --me-dark: #80644d; --bg: #14110d; --nav: #1b1712; --field-bg: #221c15;
+  --peer-avatar: linear-gradient(135deg, #5d4b38, #463829);
+}
+
 /* 舞台 */
 .stage {
   width: 100%;
@@ -178,6 +212,9 @@ html[data-theme="dark"] body {
   background: var(--bg);
 }
 .chat::-webkit-scrollbar { width: 0; }
+/* 每个会话的自定义背景（只存本机）：图片 + 一层半透明罩，保证字看得清 */
+.chat { --chat-bg-tint: rgba(255, 255, 255, .55); }
+html[data-theme="dark"] .chat { --chat-bg-tint: rgba(0, 0, 0, .55); }
 
 .time-divider {
   text-align: center;
@@ -212,6 +249,25 @@ html[data-theme="dark"] body {
 }
 .row.me .avatar { background: var(--me-avatar); }
 .avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 群聊头像：像微信一样拼成员头像（最多 4 个） */
+.avatar.group-avatar {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: 1fr;
+  gap: 2px; padding: 2px;
+  background: var(--field-bg);
+  place-items: stretch;
+}
+.avatar.group-avatar.n1 { grid-template-columns: 1fr; }
+.avatar.group-avatar.n2 { grid-template-columns: repeat(2, 1fr); }
+.avatar.group-avatar i {
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; border-radius: 4px;
+  background: var(--peer-avatar);
+  font-style: normal; font-size: .5em; font-weight: 600; color: #fff;
+  min-width: 0; min-height: 0;
+}
+.avatar.group-avatar i img { width: 100%; height: 100%; object-fit: cover; border-radius: 0; }
 
 .filter-bar {
   display: flex; align-items: center; justify-content: space-between;
@@ -278,6 +334,35 @@ html[data-theme="dark"] body {
   color: var(--me-text);
   border-top-left-radius: 16px;
   border-top-right-radius: 5px;
+}
+/* 红包（轻聊币） */
+.bubble.money {
+  background: linear-gradient(135deg, #ff7a5c, #e5453b);
+  color: #fff;
+  padding: 10px 12px;
+  min-width: 148px;
+  max-width: 62%;
+}
+/* 自己的红包也要是红包色，盖掉 .row.me .bubble 的蓝色 */
+.row.me .bubble.money { background: linear-gradient(135deg, #ff7a5c, #e5453b); color: #fff; }
+.money-row { display: flex; align-items: center; gap: 10px; }
+.money-icon {
+  width: 34px; height: 34px; flex: 0 0 auto; border-radius: 9px;
+  display: grid; place-items: center; font-size: 19px;
+  background: rgba(255, 255, 255, .22);
+}
+.money-amt { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
+.money-sub { font-size: 11.5px; opacity: .9; margin-top: 1px; }
+/* 聊天背景预览（朋友资料 → 聊天背景） */
+.bg-preview {
+  height: 150px; margin: 8px 0 10px; border-radius: 12px;
+  background: var(--field-bg) center / cover no-repeat;
+  border: 1px solid var(--line);
+}
+.money-note {
+  margin-top: 7px; font-size: 12.5px; opacity: .95;
+  border-top: 1px solid rgba(255, 255, 255, .25); padding-top: 6px;
+  white-space: pre-wrap; word-break: break-word;
 }
 .bubble.pic { padding: 4px; background: var(--bubble-peer); }
 .row.me .bubble.pic { background: var(--me); }
@@ -1420,8 +1505,16 @@ html[data-theme="dark"] .login { background: #0b0d10; }
 
 /* 引用 / 系统行 / 拍一拍 */
 .sys-line { justify-content: center; font-size: 12px; color: var(--sub); margin: 8px 0; }
-.quote-block { font-size: 12px; color: var(--sub); background: rgba(0,0,0,.05);
+.quote-block { font-size: 12.5px; color: #5b6270; background: rgba(0,0,0,.05);
   border-left: 3px solid var(--line); padding: 4px 8px; border-radius: 6px; margin-bottom: 4px; }
+/* 自己的蓝气泡上灰色几乎看不见：引用改成白色 */
+.row.me .quote-block {
+  color: #ffffff;
+  background: rgba(255, 255, 255, .22);
+  border-left-color: rgba(255, 255, 255, .75);
+}
+html[data-theme="dark"] .quote-block { color: #c3cad6; background: rgba(255,255,255,.07); }
+html[data-theme="dark"] .row.me .quote-block { color: #fff; background: rgba(255,255,255,.2); }
 #quoteBar { display: flex; align-items: center; gap: 8px; padding: 6px 12px;
   background: var(--nav); border-top: 1px solid var(--line); font-size: 12px; color: var(--sub); }
 #quoteBar span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
