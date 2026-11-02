@@ -754,7 +754,7 @@ try {
   `);
   await check('参考图太大：启动后压小并传成 blob，别把状态拖成几 MB', `
     await resetCase();
-    f.settings = { imageRefs: ['data:image/png;base64,' + 'A'.repeat(300000), '@blob:ok.jpg'] };
+    f.settings = { imageRefs: ['data:image/png;base64,' + 'A'.repeat(700000), '@blob:ok.jpg'] };
     const realShrink = shrinkPhoto; const realUpload = uploadImage; const realPersist = persist;
     let uploaded = 0; let saved = 0;
     shrinkPhoto = async () => 'data:image/jpeg;base64,SMALL';

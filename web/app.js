@@ -3609,7 +3609,7 @@ function noteRefsUnsupported() {
 }
 
 /** 参考图 → data URL（@blob: 从服务器取；统一压到 768 的 JPEG，少占地方）。 */
-async function refToDataUrl(ref, max = 768) {
+async function refToDataUrl(ref, max = 2048) {
   let url = String(ref || '');
   if (!url) return '';
   if (url.startsWith('@blob:')) {
@@ -3742,7 +3742,7 @@ const photoJobs = new Map();
 let photoErrorAt = 0;
 
 /**
- * 她要真的发一张照片：后台调生图接口 → 压成 1024 的 JPEG 存进消息 → 贴到聊天里。
+ * 她要真的发一张照片：后台调生图接口 → 压成 2048 的 JPEG 存进消息 → 贴到聊天里。
  * 十几秒到一分钟，所以不挡文字（文字先到，图好了再出现），失败只在当前聊天里提示一句。
  */
 const PHOTO_AFTERWORD_FALLBACK = ['拍好啦。', '喏，刚拍的。', '拍得不太好……'];
@@ -3771,7 +3771,8 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterw
       const dataUrl = await genPhoto(desc, conv, cfg);
       if (!alive()) return;                 // 这一轮被取消/替换了：图就不发了
       const thumb = await shrinkPhoto(dataUrl, 420, 0.72);
-      const stored = await shrinkPhoto(dataUrl, 1024, 0.9);
+      // 落盘按 2048 存（和用户发的图一个标准）：中转出更大的图时聊天里也能点开看清
+      const stored = await shrinkPhoto(dataUrl, 2048, 0.9);
       const msg = { id: uid('m'), role: 'peer', authorId, text: '',
         image: stored, thumb, photo: String(desc).slice(0, 160), ts };
       // 照片的时间戳取「决定要发」的那一刻：中间他插话了也不会插到他后面去
@@ -5626,7 +5627,8 @@ function renderFriendRhythm(target, isMe) {
 
     photoBox.querySelector('#btnImgRefAdd').addEventListener('click', async () => {
       if (friendRefDraft.length >= 6) return toast('参考图最多 6 张');
-      const dataUrl = await pickImage({ max: 900, quality: 0.85 });
+      // 参考图要看清脸：长边 2048（太长会把状态撑大，太短生图会糊）
+      const dataUrl = await pickImage({ max: 2048, quality: 0.92 });
       if (!dataUrl) return;
       toast('处理参考图…', 1500);
       const ref = await uploadImage(dataUrl);
@@ -7950,9 +7952,9 @@ async function repairImageRefs() {
     const next = [];
     let changed = false;
     for (const ref of refs) {
-      if (typeof ref === 'string' && ref.startsWith('data:') && ref.length > 200000) {
+      if (typeof ref === 'string' && ref.startsWith('data:') && ref.length > 600000) {
         try {
-          const small = await shrinkPhoto(ref, 1024, 0.9);
+          const small = await shrinkPhoto(ref, 2048, 0.92);
           next.push((await uploadImage(small)) || small);
           changed = true;
         } catch (_) {
