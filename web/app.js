@@ -7937,6 +7937,41 @@ let syncLastFullAt = 0;
 let syncLastError = '';
 let syncGeneration = 0;
 
+/**
+ * 参考图兜底修复：老版本/导入的备份可能把整张 4K 原图以 base64 塞进 imageRefs，
+ * 结果 /api/state 变成几 MB，每 4 秒同步一次直接把带宽打满（「服务器卡了」多半是这个）。
+ * 启动后慢慢把它们压到 1024、上传成 @blob:，之后同步就只有几十字节。
+ */
+async function repairImageRefs() {
+  let dirty = false;
+  for (const f of state.friends || []) {
+    const refs = (f.settings && Array.isArray(f.settings.imageRefs)) ? f.settings.imageRefs : null;
+    if (!refs || !refs.length) continue;
+    const next = [];
+    let changed = false;
+    for (const ref of refs) {
+      if (typeof ref === 'string' && ref.startsWith('data:') && ref.length > 200000) {
+        try {
+          const small = await shrinkPhoto(ref, 1024, 0.9);
+          next.push((await uploadImage(small)) || small);
+          changed = true;
+        } catch (_) {
+          next.push(ref);
+        }
+      } else {
+        next.push(ref);
+      }
+    }
+    if (changed) {
+      f.settings = Object.assign({}, f.settings, { imageRefs: next });
+      rememberFriendEdit(f, { settings: { imageRefs: next } });
+      dirty = true;
+      console.warn('[photo] 修好了一张超大参考图：' + (f.name || ''));
+    }
+  }
+  if (dirty) persist();
+}
+
 function syncDiagSnapshot() {
   return {
     build: APP_BUILD,
@@ -8693,6 +8728,8 @@ async function init() {
     toast('界面渲染出错：' + ((e && e.message) || e));
   }
 
+  // 启动后顺手把历史遗留的超大参考图换成 blob（见 repairImageRefs）
+  setTimeout(() => { repairImageRefs().catch(() => {}); }, 2500);
   setInterval(proactiveTick, 30000);
   setInterval(clientSocialTick, 30000);
   // 已读等待到点就回复，避免额外多等一轮 15 秒。

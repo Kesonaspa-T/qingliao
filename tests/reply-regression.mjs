@@ -752,6 +752,24 @@ try {
     const ps = buildPhotoPrompt('窗边', f, cfg, { safe: true });
     return ps.includes('二次元画风') && ps.includes('粗描线');
   `);
+  await check('参考图太大：启动后压小并传成 blob，别把状态拖成几 MB', `
+    await resetCase();
+    f.settings = { imageRefs: ['data:image/png;base64,' + 'A'.repeat(300000), '@blob:ok.jpg'] };
+    const realShrink = shrinkPhoto; const realUpload = uploadImage; const realPersist = persist;
+    let uploaded = 0; let saved = 0;
+    shrinkPhoto = async () => 'data:image/jpeg;base64,SMALL';
+    uploadImage = async () => { uploaded += 1; return '@blob:new.jpg'; };
+    persist = () => { saved += 1; };
+    try {
+      await repairImageRefs();
+      await flush();
+      if (uploaded !== 1 || saved !== 1) return false;
+      if (f.settings.imageRefs[0] !== '@blob:new.jpg') return false;
+      if (f.settings.imageRefs[1] !== '@blob:ok.jpg') return false;
+      const pend = (pendingEdits.friends[f.id] || {}).settings || {};
+      return pend.imageRefs && pend.imageRefs[0] === '@blob:new.jpg';
+    } finally { shrinkPhoto = realShrink; uploadImage = realUpload; persist = realPersist; }
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();

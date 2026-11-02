@@ -494,6 +494,19 @@ def extract_blobs(uid, st):
                     m["image"] = conv(m["image"])
                 if m.get("thumb"):
                     m["thumb"] = conv(m["thumb"])
+    # 参考图（每个角色一套生图预设）也可能是 data URL：不转成 blob 的话，
+    # 每次 /api/state 都要拖着几 MB 走，带宽会被一张图吃满。
+    for c in st.get("friends") or []:
+        if not isinstance(c, dict):
+            continue
+        cfg = c.get("settings")
+        if not isinstance(cfg, dict):
+            continue
+        refs = cfg.get("imageRefs")
+        if not isinstance(refs, list):
+            continue
+        cfg["imageRefs"] = [conv(r) for r in refs]
+
     for m in st.get("moments") or []:
         if not isinstance(m, dict):
             continue
@@ -932,7 +945,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v49",
+                    "build": "v50",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
