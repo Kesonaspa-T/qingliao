@@ -247,10 +247,10 @@
             </select>
           </label>
           <p class="hint">清晰度对应接口的 <code>quality</code>（low / medium / high）；选「自动」就不发这个字段，有的中转不认它。</p>
-          <label class="field"><span>画风 / 长相</span><input id="fImgStyle" placeholder="写实摄影，22 岁女生，黑长直，米色毛衣"></label>
-          <p class="hint">写死每次生图都会带上的东西：画风、她的长相。留空就用内置的「真实感手机生活照」。</p>
-          <label class="field col"><span>生图提示词（什么时候该拍、拍成什么样）</span><textarea id="fImgPrompt" rows="6" placeholder="例：他说「拍张照」「看看你」才发照片；他说「画个」就画图，不拍照"></textarea></label>
-          <p class="hint">提示词负责「什么样的句子该拍、拍成什么样」；<b>让不让她发还是看下面的概率/关键词</b>——概率设 100 就是每条都按提示词自己判断（会多花点生图钱）。这里是<b>默认</b>提示词，每个角色可以在「朋友资料 → 她的照片」里写自己的一份，还能加最多 6 张参考图。</p>
+          <label class="field"><span>画风 / 长相</span><input id="fImgStyle" placeholder="二次元，粗描线，平涂 / 写实摄影，22 岁女生，黑长直"></label>
+          <p class="hint">直接给生图模型的主画风：要二次元就写「二次元，粗描线，平涂」；要写实就写「写实摄影，自然光」。留空就用内置的「真实感手机生活照」。</p>
+          <label class="field col"><span>生图提示词（什么时候拍 + 画风要求，两边都会看到）</span><textarea id="fImgPrompt" rows="6" placeholder="例：他想看的时候才发；必须是二次元画风，粗描线，平涂，背景可以写实"></textarea></label>
+          <p class="hint">这段<b>两边都会看到</b>：给她判断「什么时候该拍」，同时原样交给生图模型当额外要求（画风/画法以这段为准）。<b>让不让她发还是看下面的概率/关键词</b>——概率设 100 就是每条都按提示词自己判断。这里是<b>默认</b>提示词；每个角色可以在「朋友资料 → 她的照片」里写自己的一份，还能加最多 6 张参考图。</p>
           <label class="field"><span>发照片概率</span><input id="fImgChance" type="number" min="0" max="100" step="5" placeholder="0-100"></label>
           <p class="hint">百分比：0 = 不按概率发（只走关键词）；15 = 平均每 7 条里有 1 条给她一次拍照机会；100 = 每条都按上面的提示词自己判断。一张要真花钱，别设太高。</p>
           <label class="field"><span>关键词必发照片</span><input id="fImgTriggers" placeholder="自拍, 照片, 看看你"></label>
@@ -590,6 +590,6 @@
   </div>
 </div>
 
-<script src="app.js?v=91"></script>
+<script src="app.js?v=92"></script>
 </body>
 </html>

@@ -741,6 +741,17 @@ try {
       return __imgCalls.length === 1 && f.messages.some((m) => m.image);
     } finally { genImage = realGen; shrinkPhoto = realShrink; }
   `);
+  await check('生图：提示词里写的画风要求会真的进生图模型', `
+    await resetCase({ imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageModel: 'gpt-image-2' });
+    f.settings = { imagePrompt: '他想看的时候才发；必须是二次元画风，粗描线，平涂，背景可以写实' };
+    const cfg = photoCfgFor(f);
+    const p = buildPhotoPrompt('窗边', f, cfg);
+    if (!p.includes('二次元画风') || !p.includes('粗描线') || !p.includes('平涂')) return false;
+    if (!p.includes('额外要求')) return false;
+    const ps = buildPhotoPrompt('窗边', f, cfg, { safe: true });
+    return ps.includes('二次元画风') && ps.includes('粗描线');
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();

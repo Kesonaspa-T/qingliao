@@ -2429,10 +2429,16 @@ function buildPhotoPrompt(scene, friend, cfgIn, opts) {
     .join('，').slice(0, 240);
   const style = cfg.style
     || '真实感手机生活照，自然光，皮肤有细节；不要文字、水印、边框、拼图，不要插画和 3D 渲染';
+  // 设置里那段「生图提示词」也一起喂给生图模型：用户写的画风要求（二次元/粗描线/平涂…）
+  // 以后再也不用两边各写一遍。和上面的默认画风冲突时以这段为准。
+  const extra = String(cfg.prompt || '').trim().slice(0, 900);
   const lines = [
     '一张「' + name + '」发给他的照片。',
     '画风：' + style,
   ];
+  if (extra) {
+    lines.push('主人写的额外要求（只取其中和画风/画法/画面有关的部分）。如果这里写了画风，就完全按这里来，上面「画风」那行作废：\n' + extra);
+  }
   if (persona) lines.push('人物：' + name + '——' + persona);
   const ctx = safe ? '' : recentChatContext(friend, 5);
   if (ctx) lines.push('最近的对话（只用来对上上下文，不要把聊天原文画进图里）：\n' + ctx);
@@ -5589,8 +5595,8 @@ function renderFriendRhythm(target, isMe) {
     photoBox.innerHTML = '<div class="group-title">她的照片（生图 · 每个角色单独设）</div>'
       + '<label class="field row-inline"><span>这个角色会发照片</span><input id="rImgOn" type="checkbox" class="switch"></label>'
       + '<p class="hint">关掉就只有她不发照片（别的角色照常）。接口、Key、总开关在「设置 → 她会发照片」里。</p>'
-      + '<label class="field col"><span>生图提示词（什么时候拍、拍成什么样）</span>'
-      + '<textarea id="rImgPrompt" rows="6" placeholder="留空跟随全局。例：&#10;他说「拍张照」「看看你」才发照片；&#10;他说「画个」就画图，不拍照；&#10;只拍她此刻在做的具体的事"></textarea></label>'
+      + '<label class="field col"><span>生图提示词（什么时候拍 + 画风要求，两边都会看到）</span>'
+      + '<textarea id="rImgPrompt" rows="6" placeholder="留空跟随全局。例：&#10;他想看的时候才发；&#10;必须是二次元画风，粗描线，平涂；&#10;只拍她此刻在做的具体的事"></textarea></label>'
       + '<div class="field col"><span>参考图（最多 6 张，长相以这些为准）</span>'
       + '<div id="rImgRefs" class="sticker-grid"></div>'
       + '<p class="hint" id="rImgRefEmpty"></p>'
