@@ -213,8 +213,10 @@ html[data-theme="dark"][data-skin="paper"] {
 }
 .chat::-webkit-scrollbar { width: 0; }
 /* 每个会话的自定义背景（只存本机）：图片 + 一层半透明罩，保证字看得清 */
-.chat { --chat-bg-tint: rgba(255, 255, 255, .55); }
-html[data-theme="dark"] .chat { --chat-bg-tint: rgba(0, 0, 0, .55); }
+.chat { --chat-bg-tint: rgba(255, 255, 255, .16); }
+html[data-theme="dark"] .chat { --chat-bg-tint: rgba(0, 0, 0, .28); }
+/* 背景的柔化只用 inset shadow 叠在上面：把几 MB 的图拼进 linear-gradient 会被浏览器丢掉 */
+.chat.has-bg { box-shadow: inset 0 0 0 9999px var(--chat-bg-tint); }
 
 .time-divider {
   text-align: center;

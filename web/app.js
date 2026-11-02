@@ -769,22 +769,38 @@ const ChatBg = {
     let v = '';
     try {
       if (await IdbStore.available()) v = String((await IdbStore.get(k)) || '');
-      else v = localStorage.getItem('ql.' + k) || '';
     } catch (_) { v = ''; }
+    if (!v) { try { v = localStorage.getItem('ql.' + k) || ''; } catch (_) {} }
     this.cache.set(k, v);
     return v;
   },
   async set(kind, id, dataUrl) {
     const k = this.key(kind, id);
     const v = String(dataUrl || '');
-    this.cache.set(k, v);
-    const fallback = () => {
-      try { if (v) localStorage.setItem('ql.' + k, v); else localStorage.removeItem('ql.' + k); } catch (_) {}
+    const writeLs = (val) => {
+      try {
+        if (val) localStorage.setItem('ql.' + k, val); else localStorage.removeItem('ql.' + k);
+        return true;
+      } catch (_) { return false; }
     };
+    this.cache.set(k, v);
+    if (!v) {
+      try { if (await IdbStore.available()) await IdbStore.set(k, ''); } catch (_) {}
+      writeLs('');
+      return;
+    }
     try {
-      if (await IdbStore.available()) await IdbStore.set(k, v);
-      else fallback();
-    } catch (_) { fallback(); }
+      if (await IdbStore.available()) { await IdbStore.set(k, v); return; }
+    } catch (_) {}
+    if (writeLs(v)) return;
+    // 只有 localStorage（大约 5MB）又放不下：压一版再存，别让人以为没设上
+    let small = v;
+    for (const max of [2048, 1600, 1200]) {
+      small = await shrinkPhoto(v, max, 0.9);
+      if (small !== v && writeLs(small)) { this.cache.set(k, small); return; }
+    }
+    this.cache.delete(k);
+    throw new Error('这张背景太大，这台设备存不下');
   },
 };
 
@@ -796,13 +812,16 @@ async function applyChatBg() {
   const bg = await ChatBg.get(kind, conv.id);
   if (!state.conv || state.conv.kind !== kind || state.conv.id !== conv.id) return;
   if (bg) {
-    chatEl.style.backgroundImage = 'linear-gradient(var(--chat-bg-tint), var(--chat-bg-tint)), url("' + bg + '")';
+    // 只放 url：把 linear-gradient 和几 MB 的 url 拼在一个值里，浏览器会整条丢掉
+    chatEl.style.backgroundImage = 'url("' + bg + '")';
     chatEl.style.backgroundSize = 'cover';
     chatEl.style.backgroundPosition = 'center';
+    chatEl.classList.add('has-bg');
   } else {
     chatEl.style.backgroundImage = '';
     chatEl.style.backgroundSize = '';
     chatEl.style.backgroundPosition = '';
+    chatEl.classList.remove('has-bg');
   }
 }
 
@@ -835,7 +854,7 @@ function openBgSheet(kind, id, name) {
           <button type="button" class="ghost solid" id="btnBgPick">从相册选一张</button>
           <button type="button" class="ghost danger-text" id="btnBgClear">清除背景</button>
         </div>
-        <p class="hint">只存在这台设备（本地存储），不上传服务器，换手机或重装不会带过去。原图存原样、<b>不压缩画质</b>（只在太夸张的大图才会被浏览器自己缩放显示）。</p>
+        <p class="hint">只存在这台设备（本地存储），不上传服务器，换手机或重装不会带过去。原图原样存、<b>不压画质</b>；只有设备只能用 5MB 本地存储、图实在放不下时，才会自动压到 2048 保证能存下来。</p>
       </div>
     </div>`);
   if (!el.dataset.bound) {
@@ -851,7 +870,12 @@ function openBgSheet(kind, id, name) {
       if (e.target.id === 'btnBgPick') {
         const dataUrl = await pickOriginalImage();
         if (!dataUrl) return;
-        await ChatBg.set(bgTarget.kind, bgTarget.id, dataUrl);
+        try {
+          await ChatBg.set(bgTarget.kind, bgTarget.id, dataUrl);
+        } catch (err) {
+          toast((err && err.message) || '背景没存下来');
+          return;
+        }
         renderBgSheet();
         applyChatBg();
         toast('背景换好了（只存本机）');

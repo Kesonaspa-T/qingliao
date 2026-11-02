@@ -852,6 +852,19 @@ try {
     applyTheme();
     return document.documentElement.getAttribute('data-skin') === 'sakura';
   `);
+  await check('聊天背景：几 MB 的大图也能显示（不能拼进 gradient 被丢掉）', `
+    await resetCase();
+    const big = 'data:image/jpeg;base64,' + 'A'.repeat(300000);
+    await ChatBg.set('friend', 'f-test', big);
+    await applyChatBg();
+    const style = String(chatEl.style.backgroundImage);
+    if (!style.includes('AAAA')) return false;
+    if (style.length < 300000) return false;      // 以前这里会被浏览器整条丢掉 → 长度 0
+    if (!chatEl.classList.contains('has-bg')) return false;
+    await ChatBg.set('friend', 'f-test', '');
+    await applyChatBg();
+    return !chatEl.style.backgroundImage && !chatEl.classList.contains('has-bg');
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();
