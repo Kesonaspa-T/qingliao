@@ -541,6 +541,14 @@ def merge_state(old, new, *, background=False):
             settings.update(new.get("settings") or {})
     out["settings"] = settings
     out["deleted"] = deleted_ids
+    # 表情包按 id 并集：某台设备拿着旧的内存状态保存时（列表是空的），
+    # 不能把服务器上的表情包全清掉；删掉的走 deleted 墓碑。
+    dead_stk = set(deleted_ids)
+    merged_stk = {}
+    for it in (old.get("stickers") or []) + (new.get("stickers") or []):
+        if isinstance(it, dict) and it.get("id") and it["id"] not in dead_stk:
+            merged_stk[it["id"]] = it
+    out["stickers"] = list(merged_stk.values())
     # 版本由当前磁盘状态决定，不能被后台任务持有的旧 rev 拉低。
     out["rev"] = int(old.get("rev") or 0)
 
@@ -945,7 +953,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v50",
+                    "build": "v51",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })

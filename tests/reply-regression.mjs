@@ -770,6 +770,23 @@ try {
       return pend.imageRefs && pend.imageRefs[0] === '@blob:new.jpg';
     } finally { shrinkPhoto = realShrink; uploadImage = realUpload; persist = realPersist; }
   `);
+  await check('表情包：服务器有、这台设备没有的会补进来（旧设备保存不会清空）', `
+    await resetCase();
+    state.stickers = [];
+    const remote = JSON.parse(JSON.stringify(state));
+    remote.rev = 9;
+    remote.stickers = [
+      { id: 'st1', url: '@blob:a.png', tags: ['开心'], desc: '笑', ts: 1 },
+      { id: 'st2', url: '@blob:b.png', tags: ['难过'], ts: 2 },
+    ];
+    mergeRemote(remote);
+    if ((state.stickers || []).length !== 2) return false;
+    // 删掉的（墓碑）不要再补回来
+    state.stickers = [];
+    state.deleted = ['st2'];
+    mergeRemote(remote);
+    return state.stickers.length === 1 && state.stickers[0].id === 'st1';
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();

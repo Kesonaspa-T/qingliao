@@ -5206,6 +5206,7 @@ function renderStickers() {
     del.textContent = '×';
     del.addEventListener('click', () => {
       state.stickers = stickers().filter((x) => x.id !== it.id);
+      rememberDeleted([it.id]);          // 墓碑：别的设备/服务器也跟着删
       persist();
       renderStickers();
       renderStickerCount();
@@ -7838,10 +7839,20 @@ function mergeRemote(remote) {
   // 否则每次保存都把几十 MB 的 data URL 再传一遍（nginx 20MB 就是这么炸的）。
   if (Array.isArray(remote.stickers)) {
     const byId = new Map((state.stickers || []).map((x) => [x.id, x]));
+    const deadStk = new Set(state.deleted || []);
     for (const rs of remote.stickers) {
       if (!rs || !rs.id) continue;
       const ls = byId.get(rs.id);
-      if (!ls) continue;
+      if (!ls) {
+        // 服务器上有、这台设备上没有 → 补进来。以前这里直接 continue，
+        // 结果用旧内存状态的设备保存时会把服务器上的表情包列表覆盖成空。
+        if (!deadStk.has(rs.id) && rs.url) {
+          (state.stickers = state.stickers || []).push(rs);
+          byId.set(rs.id, rs);
+          changed = true;
+        }
+        continue;
+      }
       if (typeof rs.url === 'string' && rs.url.startsWith('@blob:') && ls.url !== rs.url) {
         ls.url = rs.url;
         changed = true;
