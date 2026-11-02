@@ -704,6 +704,7 @@ function pruneDeleted(s) {
     c.messages = filter(c.messages, (m) => !dead.has(m.id));
   }
   for (const f of s.friends) f.relations = filter(f.relations, (id) => !dead.has(id));
+  if (Array.isArray(s.stickers)) s.stickers = filter(s.stickers, (x) => !dead.has(x.id));
   for (const g of s.groups) g.members = filter(g.members, (id) => !dead.has(id));
   s.moments = filter(s.moments, (m) => !dead.has(m.id));
   s.pending = filter(s.pending, (p) =>
@@ -5890,6 +5891,17 @@ $('#btnPrReset').addEventListener('click', () => {
 $('#btnPrompts').addEventListener('click', () => { closeSheet(); openPromptSheet(); });
 
 $('#btnStClose').addEventListener('click', closeStickerSheet);
+$('#btnStClear').addEventListener('click', () => {
+  const list = stickers();
+  if (!list.length) return toast('还没有表情包');
+  if (!confirm('清空全部 ' + list.length + ' 个表情包？（聊天里已经发过的消息不会删）')) return;
+  rememberDeleted(list.map((x) => x.id));   // 墓碑：各端一起清，服务器并集也不会再拉回来
+  state.stickers = [];
+  persist();
+  renderStickers();
+  renderStickerCount();
+  toast('清空了');
+});
 $('#btnStAdd').addEventListener('click', () => $('#stFile').click());
 $('#btnStPick').addEventListener('click', () => $('#stFile').click());
 $('#stFile').addEventListener('change', (e) => {
