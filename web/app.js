@@ -4029,6 +4029,9 @@ let photoErrorAt = 0;
  * 十几秒到一分钟，所以不挡文字（文字先到，图好了再出现），失败只在当前聊天里提示一句。
  */
 const PHOTO_AFTERWORD_FALLBACK = ['拍好啦。', '喏，刚拍的。', '拍得不太好……'];
+// 模型偶尔整条只写 [[照片:…]]，剥完就没字了；补一句开场白，别报「没有可显示的内容」
+const PHOTO_LEAD_IN = ['等我一下，我拍一张。', '好，稍等，我找个角度。', '等一下下，马上。'];
+const STICKER_ONLY_FALLBACK = ['给你看个表情。', '呐。', '这个。'];
 
 function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterword) {
   const cfg = photoCfgFor(conv);
@@ -4220,6 +4223,17 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
 
   // 画了图就整条发：按行拆会把 <svg> 拆成两半，图就没了
   const parts = /<svg[\s>]/i.test(body) ? [body] : splitReply(body, limit);
+  // 剥完标记一个字不剩（常见于「只写了 [[照片:…]]」）：这一轮真抽中了照片，就补一句开场白再拍，
+  // 否则 deliver 会当成「没有可显示的内容」报错，照片也永远发不出来。
+  if (!parts.some((x) => String(x || '').trim())) {
+    if (photoScene && photoGate === true) {
+      parts.length = 0;
+      parts.push(PHOTO_LEAD_IN[Math.floor(Math.random() * PHOTO_LEAD_IN.length)]);
+    } else if (!photoScene && usedStickers.length) {
+      parts.length = 0;
+      parts.push(STICKER_ONLY_FALLBACK[Math.floor(Math.random() * STICKER_ONLY_FALLBACK.length)]);
+    }
+  }
   // 她会打错字：挑一条，先发错字版，再撤回、重发正确的
   const recallOn = state.settings.recallOn !== false;
   const recallChance = Math.max(0, Math.min(50, Number(state.settings.recallChance ?? 20)));
@@ -4342,6 +4356,8 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
   if (!canContinue()) return;
   // 清洗后没有可发送内容，也要给出可重试的错误，不能让输入气泡无声消失。
   if (!sentCount) {
+    // 留个证据：下次再出现能看出来模型到底回了什么
+    try { console.warn('[EMPTY-REPLY]', JSON.stringify(String(text || '')).slice(0, 500)); } catch (_) {}
     throw new Error('这次没收到可显示的内容，再试一次？');
   }
 

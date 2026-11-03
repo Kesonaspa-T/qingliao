@@ -248,7 +248,7 @@ try {
     Math.random = () => 0.75; const q3 = delayFor(f);
     Math.random = rnd;
     if (mid !== 6500 || q1 !== 4750 || q3 !== 8250) return false;
-    const seen = new Set(); let lo = 1e9, hi = -1, sum = 0; const N = 200;
+    const seen = new Set(); let lo = 1e9, hi = -1, sum = 0; const N = 600;   // 200 时偶发均值抖动，600 稳定
     for (let i = 0; i < N; i += 1) {
       const v = delayFor(f); seen.add(Math.round(v));
       lo = Math.min(lo, v); hi = Math.max(hi, v); sum += v;
@@ -881,6 +881,25 @@ try {
     f.persona = '你叫小满。他的英文名是 Charlton，在英文学术会议上认识的。';
     const sys = buildMessages(f, f, null, new Map())[0].content;
     return !sys.includes('【语言·最高优先级】');
+  `);
+  await check('她只写 [[照片:…]] 没写字：补开场白，照片照样发出来', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk-img', imageChance: 100, imageTriggers: '自拍' });
+    const realGen = genImage; const realShrink = shrinkPhoto;
+    window.__imgCalls = 0;
+    genImage = async () => { __imgCalls += 1; return 'data:image/png;base64,${PNG1}'; };
+    shrinkPhoto = async (d) => d;
+    try {
+      openChat('friend', f.id);
+      f.__photoThisTurn = true;
+      f.__photoTrigger = '自拍';
+      await deliver('friend', f, '[[照片:窗边，白衬衫，傍晚]]', f.id, 3);
+      await advance(6000);
+      const lead = f.messages.some((m) => /等我一下|稍等|等一下下/.test(m.text || ''));
+      const photo = f.messages.some((m) => m.photo);
+      const err = f.messages.some((m) => String(m.text || '').includes('没收到可显示的内容'));
+      return lead && photo && !err && __imgCalls === 1;
+    } finally { genImage = realGen; shrinkPhoto = realShrink; }
   `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
