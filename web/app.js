@@ -2681,6 +2681,39 @@ function buildPhotoPrompt(scene, friend, cfgIn, opts) {
   return lines.join('\n');
 }
 
+/**
+ * 人设里明确写了「必须用 English / 用英文」这类要求时，给一条高优先级规则。
+ * 不写这条时，模型会跟着中文聊天记录走——人设开头那句太容易被冲掉。
+ */
+function languageRuleFor(friend) {
+  const p = String((friend && friend.persona) || '');
+  if (!p) return '';
+  const langs = [
+    ['English', /english|英文|英语/i],
+    ['日本語', /japanese|日本語|日语|日文/i],
+    ['한국어', /korean|한국어|韩语|韩文/i],
+    ['français', /french|français|法语|法文/i],
+    ['Deutsch', /german|deutsch|德语|德文/i],
+    ['español', /spanish|español|西班牙语|西班牙文/i],
+    ['italiano', /italian|italiano|意大利语|意大利文/i],
+    ['русский', /russian|русский|俄语|俄文/i],
+  ];
+  const verbBefore = /(must|only|always|reply|respond|answer|speak|talk|write|use|using|in|say|说|讲|用|必须|只用|只准|回答|回复|不要|别)[^。.\n]{0,40}$/i;
+  const verbAfter = /^[^。.\n]{0,16}(で|を)?\s*(話|言|答|返|reply|speak|talk|answer|respond)/i;
+  for (const [name, re] of langs) {
+    const m = p.match(re);
+    if (!m) continue;
+    const before = p.slice(Math.max(0, m.index - 40), m.index);
+    const after = p.slice(m.index + m[0].length, m.index + m[0].length + 24);
+    if (!verbBefore.test(before) && !verbAfter.test(after)) continue;
+    return '\n\n【语言·最高优先级】她的人设里明确要求用 ' + name + ' 说话。'
+      + '她的每一条回复都必须用 ' + name + ' 写（连语气词也是），'
+      + '哪怕主人用中文提问、聊天记录全是中文，也不要切回中文；'
+      + '除非主人当场明确改口说要用中文。';
+  }
+  return '';
+}
+
 function buildMessages(friend, conv, nudge, imgMap) {
   const s = state.settings;
   const now = new Date();
@@ -2929,6 +2962,10 @@ function buildMessages(friend, conv, nudge, imgMap) {
   // 易变的内容（时间）放最后：前面的人设/规则/历史不变，前缀缓存就能一直命中。
   sys += envBlock;
 
+  // 语言要求必须放在系统提示词最后：放开头会被下面几千字和中文历史冲掉
+  const langRule = languageRuleFor(friend);
+  if (langRule) sys += langRule;
+
   const out = [{ role: 'system', content: sys }];
   const limit = Math.max(6, Number(s.contextLimit) || 60);
   const history = conv.messages
@@ -2964,6 +3001,11 @@ function buildMessages(friend, conv, nudge, imgMap) {
   for (const m of prepared) out.push(m);
   if (personaReminder) out.push({ role: 'system', content: personaReminder });
   if (nudge) out.push({ role: 'system', content: nudge });
+  // 再在最后补一句：模型最容易看的就是倒数第一条
+  if (langRule) {
+    const lang = (langRule.match(/用 ([^ ]+) 说话/) || [])[1] || 'English';
+    out.push({ role: 'system', content: '【语言】这一条回复也必须是 ' + lang + '，不要用中文。' });
+  }
   return out;
 }
 

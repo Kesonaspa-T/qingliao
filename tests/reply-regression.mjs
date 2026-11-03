@@ -865,6 +865,23 @@ try {
     await applyChatBg();
     return !chatEl.style.backgroundImage && !chatEl.classList.contains('has-bg');
   `);
+  await check('人设要求 English：系统提示词末尾强制语言（不能跟着中文跑）', `
+    await resetCase();
+    f.persona = 'You must Talk to me using English. 你叫 Ariadne，22 岁。';
+    const msgs = buildMessages(f, f, null, new Map());
+    const sys = msgs[0].content;
+    if (!sys.includes('【语言·最高优先级】')) return false;
+    if (!sys.includes('English')) return false;
+    if (!sys.trim().endsWith('除非主人当场明确改口说要用中文。')) return false;
+    const last = msgs[msgs.length - 1];
+    return last.role === 'system' && last.content.includes('English') && last.content.includes('不要用中文');
+  `);
+  await check('只是提到「英文名」不会误加语言规则', `
+    await resetCase();
+    f.persona = '你叫小满。他的英文名是 Charlton，在英文学术会议上认识的。';
+    const sys = buildMessages(f, f, null, new Map())[0].content;
+    return !sys.includes('【语言·最高优先级】');
+  `);
   console.log(`\n${count} browser regressions passed`);
 } finally {
   ws?.close();
