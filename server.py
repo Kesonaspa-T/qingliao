@@ -953,7 +953,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v52",
+                    "build": "v53",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1637,7 +1637,7 @@ def memory_block(friend):
                    + "\n".join("- " + n[:120] for n in notes[:30]))
     if f.get("memory") and not f.get("memoryOff"):
         out.append("【你记得的事（旁观记录：「他」= 和你聊天的人；里面若还出现「我」，指的也是他，不是你）】\n"
-                   + str(f.get("memory"))[:600])
+                   + str(f.get("memory"))[:1200])
     return ("\n\n" + "\n\n".join(out)) if out else ""
 
 
@@ -2504,6 +2504,7 @@ def gen_memory(friend, history_lines, settings, key, me_name="他"):
     """
     who = _safe_me_name(me_name, "他")
     role = _safe_me_name((friend or {}).get("name"), "她")
+    old_mem = str((friend or {}).get("memory") or "").strip()
     sys = (
         "下面是一个人和一个角色最近的聊天记录。请**以旁观者的视角**写 3~6 句，"
         "记下值得长期记住的事。\n"
@@ -2519,11 +2520,18 @@ def gen_memory(friend, history_lines, settings, key, me_name="他"):
         "「" + who + "想买尼康 Z7II；他纠正过 " + role + " 的像素是 2410 万（不是 2450 万）。"
         "小柔是" + who + "的妻子，是他自己画的 Q 版角色。" + role
         + " 是他的相机（相机娘），他明确说过没把她当工具。」\n\n"
-        + "\n".join(history_lines[-40:])
     )
+    if old_mem:
+        sys += ("【以前记下的（这些都是长期记忆，不要丢）】\n" + old_mem[:1000] + "\n\n"
+                "把以前的记忆和下面的新聊天**合并**：仍然有效的旧事继续保留（可以精简措辞），"
+                "新发生的重要事情补进去；人物关系、称呼、喜好、约定、忌讳不能因为最近没再提起就删掉。\n\n"
+                "【最近的聊天】\n")
+    else:
+        sys += "【最近的聊天】\n"
+    sys += "\n".join(history_lines[-80:])
     text = call_llm(settings.get("baseUrl"), key, settings.get("model"),
-                    [{"role": "system", "content": sys}], max_tokens=260, temperature=0.6)
-    return _clean(text, 500)
+                    [{"role": "system", "content": sys}], max_tokens=520, temperature=0.6)
+    return _clean(text, 1000)
 
 
 def social_tick(uid="local", force=False):
@@ -2678,7 +2686,7 @@ def social_tick(uid="local", force=False):
                 continue
             lines = []
             me_name = _safe_me_name((st.get("me") or {}).get("name"), "他")
-            for m in msgs[-40:]:
+            for m in msgs[-80:]:
                 # 这里也不能用「我」：摘要要旁观视角，喂进去的历史也按名字标
                 who = me_name if m.get("role") == "user" else (f.get("name") or "她")
                 if m.get("text"):

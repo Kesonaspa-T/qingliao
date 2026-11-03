@@ -3386,7 +3386,7 @@ function memorySysFor(f) {
   }
   if (f && f.memory && !f.memoryOff) {
     out += '\n\n【你记得的事（旁观记录：「他」= 和你聊天的人；里面若还出现「我」，指的也是他，不是你）】\n'
-      + String(f.memory).slice(0, 600);
+      + String(f.memory).slice(0, 1200);
   }
   const evs = ((f && f.events) || []).slice(-4)
     .map((e) => String((e && e.text) || '').trim()).filter(Boolean);

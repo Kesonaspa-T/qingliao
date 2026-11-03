@@ -82,6 +82,19 @@ _cap.clear()
 srv.gen_memory({"name": "R6II"}, ["我：想买 Z7II"], {}, "k", "我")
 _gsys2 = _cap.get("sys", "")
 ok("名字是「我」时提示词也不写「我」", "统一写「我」" not in _gsys2 and "统一写「他」" in _gsys2, _gsys2[:80])
+# 每次更新只喂最近 40 条、又覆盖旧记忆 → 30 条以前的事就没了。
+# 现在要：旧记忆一起带上、窗口放到 80 条、合并而不是覆盖。
+_cap.clear()
+srv.call_llm = _fake_call
+_lines = ["第%d条" % i for i in range(100)]
+srv.gen_memory({"name": "R6II", "memory": "他喜欢 Z7II；小柔是他妻子"},
+               _lines, {}, "k", "浩辰")
+_gsys3 = _cap.get("sys", "")
+ok("记忆更新会带上旧记忆", "小柔是他妻子" in _gsys3, _gsys3[:80])
+ok("记忆更新要求保留旧的、合并新的",
+   "不要丢" in _gsys3 and "合并" in _gsys3, _gsys3[-160:])
+ok("记忆窗口放到 80 条（第 30 条还在）",
+   "第30条" in _gsys3 and "第19条" not in _gsys3, _gsys3[-80:])
 srv.call_llm = _orig_call
 ok("生活事件进背景块", "三花猫" in srv.life_block(f_mem))
 
@@ -220,12 +233,23 @@ ok("免打扰时她不主动冒泡",
    st["friends"][0]["messages"][-3:])
 
 # 关掉免打扰 → 主动消息正常
+# 注意：这条用例以前是「看几点跑」的——深夜跑会走「晚安」那条固定问候，跟主动无关。
+# 这里把「她已经睡了」按住，只测免打扰开关。
 make_state("u_quiet2", proactive=True, quietOn=False)
 st = srv.load_state("u_quiet2")
 st["friends"][0]["messages"][0]["ts"] = int((time.time() - 7200) * 1000)
 srv.save_state(st, "u_quiet2")
 srv.gen_proactive = lambda *a, **k: "在干嘛呀"
+_orig_asleep = srv.friend_asleep
+srv.friend_asleep = lambda *a, **k: False
+# 22~23 点会先发「晚安」把主动挤掉（`last_ts` 变现在）：把早晚安标记成今天已发，
+# 这条用例就只测「关了免打扰会不会主动」，不再看几点跑。
+_hour = datetime.datetime.now().hour
+_slot = "morning" if 7 <= _hour <= 10 else ("night" if 22 <= _hour <= 23 else "none")
+st.setdefault("social", {})["lastGreet"] = datetime.date.today().isoformat() + ":" + _slot
+srv.save_state(st, "u_quiet2")
 srv.social_tick("u_quiet2")
+srv.friend_asleep = _orig_asleep
 st = srv.load_state("u_quiet2")
 ok("关了免打扰她会主动",
    any("在干嘛呀" in (m.get("text") or "") for m in st["friends"][0]["messages"]),

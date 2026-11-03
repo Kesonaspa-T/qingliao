@@ -314,6 +314,12 @@ try {
     // 记忆内容本身不能丢
     return sys.includes('小柔是我老婆，R6II 是我的相机');
   `);
+  await check('记忆注入上限放宽到 1200 字（以前 600 就截了）', `
+    await resetCase();
+    f.memory = '记'.repeat(900) + '尾巴在这里';
+    const sys = memorySysFor(f);
+    return sys.includes('尾巴在这里');
+  `);
   await check('分段回复第一段及时保存，停止后后续分段不再出现', `
     await resetCase({ delayOn: false, bursts: 2 }); await send('分两句说'); await advance(400);
     await complete(0, '第一段\\n第二段'); await advance(1500);
