@@ -3752,14 +3752,38 @@ const PHOTO_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** 生图请求的返回包成人话；/api/search 这类中转也走同一套。 */
 async function readPhotoJson(res) {
+  // 先读文本再解析：中转/网关挂掉时经常返回一整页 HTML，得把状态和标题带出来
+  const rawText = (typeof res.text === 'function') ? await res.text().catch(() => '') : '';
   let data = null;
-  try { data = await res.json(); } catch (_) { data = null; }
+  try { data = rawText ? JSON.parse(rawText) : null; } catch (_) { data = null; }
+  // 兼容测试/老环境里只给 json() 的 Response 替身
+  if (!data && !rawText && typeof res.json === 'function') {
+    try { data = await res.json(); } catch (_) { data = null; }
+  }
   const err = data && data.error;
+  const ctRaw = (res.headers && typeof res.headers.get === 'function')
+    ? (res.headers.get('Content-Type') || '') : '';
+  const ct = ctRaw.split(';')[0].trim();
+  const plain = String(rawText || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!res.ok || err) {
     const detail = err ? (typeof err === 'string' ? err : (err.message || JSON.stringify(err))) : '';
-    throw new Error(detail ? String(detail).slice(0, 200) : ('生图接口返回 ' + res.status));
+    if (detail) throw new Error(String(detail).slice(0, 200));
+    throw new Error(('生图接口返回 ' + res.status)
+      + (ct ? '（' + ct + '）' : '') + (plain ? '：' + plain.slice(0, 100) : ''));
   }
-  if (!data || typeof data !== 'object') throw new Error('生图接口返回的不是 JSON');
+  if (!data || typeof data !== 'object') {
+    // 不是 JSON：多半是中转/网关返回了网页（502、Cloudflare 验证、登录页）或空响应
+    const title = (String(rawText || '').match(/<title[^>]*>([^<]{1,80})<\/title>/i) || [])[1] || '';
+    let msg = '生图接口返回的不是 JSON';
+    msg += '（' + (ct || '无 Content-Type') + '，HTTP ' + res.status + '）';
+    msg += '：' + (String(title).trim() || plain.slice(0, 100) || '返回是空的');
+    throw new Error(msg.slice(0, 200));
+  }
   return data;
 }
 
@@ -3850,7 +3874,7 @@ function photoErrorText(e) {
   }
   if (/401|403|Key|余额/i.test(raw)) return '生图 Key 不对，或者没余额';
   if (/连不上|网络|超时|abort/i.test(raw)) return '连不上生图接口（或者超时了）';
-  return raw.slice(0, 120) || '未知原因';
+  return raw.slice(0, 180) || '未知原因';
 }
 
 /** 参考图是不是这个中转根本不支持（只有这种情况才退回纯文字生图）。 */
@@ -4029,9 +4053,6 @@ let photoErrorAt = 0;
  * 十几秒到一分钟，所以不挡文字（文字先到，图好了再出现），失败只在当前聊天里提示一句。
  */
 const PHOTO_AFTERWORD_FALLBACK = ['拍好啦。', '喏，刚拍的。', '拍得不太好……'];
-// 模型偶尔整条只写 [[照片:…]]，剥完就没字了；补一句开场白，别报「没有可显示的内容」
-const PHOTO_LEAD_IN = ['等我一下，我拍一张。', '好，稍等，我找个角度。', '等一下下，马上。'];
-const STICKER_ONLY_FALLBACK = ['给你看个表情。', '呐。', '这个。'];
 
 function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterword) {
   const cfg = photoCfgFor(conv);
@@ -4222,18 +4243,10 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
   }).trim();
 
   // 画了图就整条发：按行拆会把 <svg> 拆成两半，图就没了
-  const parts = /<svg[\s>]/i.test(body) ? [body] : splitReply(body, limit);
-  // 剥完标记一个字不剩（常见于「只写了 [[照片:…]]」）：这一轮真抽中了照片，就补一句开场白再拍，
-  // 否则 deliver 会当成「没有可显示的内容」报错，照片也永远发不出来。
-  if (!parts.some((x) => String(x || '').trim())) {
-    if (photoScene && photoGate === true) {
-      parts.length = 0;
-      parts.push(PHOTO_LEAD_IN[Math.floor(Math.random() * PHOTO_LEAD_IN.length)]);
-    } else if (!photoScene && usedStickers.length) {
-      parts.length = 0;
-      parts.push(STICKER_ONLY_FALLBACK[Math.floor(Math.random() * STICKER_ONLY_FALLBACK.length)]);
-    }
-  }
+  // 空行/空白段不能算一条消息：否则会发出一个空气泡，或者把「没有可显示的内容」吞掉
+  const parts = (/<svg[\s>]/i.test(body) ? [body] : splitReply(body, limit))
+    .filter((x) => String(x || '').trim());
+
   // 她会打错字：挑一条，先发错字版，再撤回、重发正确的
   const recallOn = state.settings.recallOn !== false;
   const recallChance = Math.max(0, Math.min(50, Number(state.settings.recallChance ?? 20)));
