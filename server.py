@@ -953,7 +953,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v51",
+                    "build": "v52",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1028,7 +1028,7 @@ class Handler(SimpleHTTPRequestHandler):
             if isinstance(diag, dict):
                 # 客户端同步自检：syncTick 卡住/一直失败时，这里能直接看出来。
                 print("[SYNC-DIAG] client=%s %s" % (
-                    build, json.dumps(diag, ensure_ascii=False, sort_keys=True)[:400]), flush=True)
+                    build, json.dumps(diag, ensure_ascii=False, sort_keys=True)[:900]), flush=True)
             if payload.get("_hint") == "social":
                 # 用户在群里刚说完话：不用等 20 秒的轮询，马上让她们接话。
                 threading.Thread(target=run_social_now, args=(uid,), daemon=True).start()

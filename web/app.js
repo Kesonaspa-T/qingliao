@@ -4053,12 +4053,14 @@ let photoErrorAt = 0;
  * 十几秒到一分钟，所以不挡文字（文字先到，图好了再出现），失败只在当前聊天里提示一句。
  */
 const PHOTO_AFTERWORD_FALLBACK = ['拍好啦。', '喏，刚拍的。', '拍得不太好……'];
+/** 最近一次「剥完标记什么都不剩」的模型原文（随 _diag 发一次，帮服务器侧排障） */
+let lastEmptyReply = '';
 
 function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterword) {
   const cfg = photoCfgFor(conv);
-  if (!cfg.on || !cfg.ready || kind !== 'friend') return;
+  if (!cfg.on || !cfg.ready || kind !== 'friend') return false;
   const key = convKey(kind, conv.id);
-  if (photoJobs.has(key)) return;          // 上一张还在生成：这一轮就不重复花钱了
+  if (photoJobs.has(key)) return false;    // 上一张还在生成：这一轮就不重复花钱了
   photoJobs.set(key, true);
   const ts = Date.now();
   if (isActive(kind, conv.id)) toast('她开始拍了，图好了会直接发到聊天里（要等一会儿）', 3000);
@@ -4137,6 +4139,7 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterw
       if (isActive(kind, conv.id)) renderReplyState(kind, conv);
     }
   })();
+  return true;
 }
 
 async function deliver(kind, conv, text, authorId, maxParts, canContinue = () => true) {
@@ -4275,9 +4278,10 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
   // 照片：这一轮真抽中了、且有文字兜底（不发光秃秃的图）才去生成。
   // 生成放在后台跑：十几秒到一分钟，文字先到，图好了再贴上来。
   const hasTextNow = parts.some((x) => String(x || '').trim());
-  if (photoGate === true && hasTextNow) {
-    startPhotoJob(kind, conv, authorId, photoScene, photoTrigger, canContinue, photoAfter);
-  }
+  // 她只写了 [[照片:…]] 没写字时也照发：加一句开场白太生硬，她直接发图就好
+  const photoStarted = (photoGate === true && (hasTextNow || !!photoScene))
+    ? startPhotoJob(kind, conv, authorId, photoScene, photoTrigger, canContinue, photoAfter)
+    : false;
 
   let sentCount = 0;
   let notifyText = '';
@@ -4339,9 +4343,8 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
     await sleep(180);
   }
 
-  // 她必须配一句话才发表情包；只剩表情包就不发（避免光秃秃一张图）
+  // 只剩表情包也照发：甩一张表情本来就不用配字，别因此报「没有可显示的内容」
   const hasText = parts.some((x) => String(x || '').trim());
-  if (!hasText) usedStickers.length = 0;
   // 骰子进了但模型自己没写标记：替她补一张（只补一张）。
   // 不补的话「发消息带表情包的概率」就只是「允许她发」，模型不发就等于没这个设置。
   if (stickerGate === true && hasText && usedStickers.length === 0 && pool.length) {
@@ -4368,8 +4371,9 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
 
   if (!canContinue()) return;
   // 清洗后没有可发送内容，也要给出可重试的错误，不能让输入气泡无声消失。
-  if (!sentCount) {
-    // 留个证据：下次再出现能看出来模型到底回了什么
+  if (!sentCount && !photoStarted) {
+    // 留个证据：下次再出现能看出来模型到底回了什么（控制台 + 随同步诊断发给服务器）
+    lastEmptyReply = String(text || '').slice(0, 220);
     try { console.warn('[EMPTY-REPLY]', JSON.stringify(String(text || '')).slice(0, 500)); } catch (_) {}
     throw new Error('这次没收到可显示的内容，再试一次？');
   }
@@ -4377,7 +4381,7 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
   // 有新消息：通知交给原生层判断窗口是否在前台（前台就不弹）。
   // 浏览器则只在页面隐藏时弹，不会打扰正在看的人。
   {
-    const fallback = usedStickers.length ? '[表情包]' : (files.length ? '[文件]' : '');
+    const fallback = usedStickers.length ? '[表情包]' : (photoStarted ? '[照片]' : (files.length ? '[文件]' : ''));
     const bodyText = plainText(notifyText).slice(0, 60) || fallback;
     if (bodyText) {
       const title = kind === 'group' ? (conv.name || '群聊') : nameOf(authorId);
@@ -4388,10 +4392,14 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
 
   if (isActive(kind, conv.id)) {
     setStatus('在线');
-    lastTs = conv.messages[conv.messages.length - 1].ts;
-    conv.unread = 0;
-    conv.readAt = Math.max(Number(conv.readAt) || 0, lastTs);
-    if (kind === 'friend') rememberFriendEdit(conv, { unread: 0, readAt: conv.readAt });
+    // 只发照片时这一轮还没有消息落库（照片是后台任务），别在这里取空数组的 ts
+    const lastMsg = conv.messages[conv.messages.length - 1];
+    if (lastMsg) {
+      lastTs = lastMsg.ts;
+      conv.unread = 0;
+      conv.readAt = Math.max(Number(conv.readAt) || 0, lastTs);
+      if (kind === 'friend') rememberFriendEdit(conv, { unread: 0, readAt: conv.readAt });
+    }
     markRead();
   }
   // 提醒收好了：把「到点我提醒你」记进她的待办，存在服务器上（关掉 App 也会响）
@@ -8426,6 +8434,8 @@ async function repairImageRefs() {
 }
 
 function syncDiagSnapshot() {
+  const emptyReply = lastEmptyReply;
+  lastEmptyReply = '';
   return {
     build: APP_BUILD,
     cloud: isCloud(),
@@ -8437,6 +8447,7 @@ function syncDiagSnapshot() {
     stale: syncStaleCount,
     lastOkAgo: syncLastOkAt ? Math.round((Date.now() - syncLastOkAt) / 1000) : -1,
     err: syncLastError,
+    empty: emptyReply || undefined,
     online: navigator.onLine !== false,
     hidden: document.hidden,
     // 生图排障：客户端这一侧到底开没开、接口填没填、关键词几个、概率多少

@@ -882,19 +882,35 @@ try {
     const sys = buildMessages(f, f, null, new Map())[0].content;
     return !sys.includes('【语言·最高优先级】');
   `);
-  await check('她只写 [[照片:…]] 不写字：就报错，不自动补开场白', `
-    await resetCase({ delayOn: false });
+  await check('她只写 [[照片:…]] 不写字：不加开场白，照片照发', `
+    await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk-img', imageChance: 100, imageTriggers: '自拍' });
+    const realGen = genImage; const realShrink = shrinkPhoto;
+    window.__imgCalls = 0;
+    genImage = async () => { __imgCalls += 1; return 'data:image/png;base64,${PNG1}'; };
+    shrinkPhoto = async (d) => d;
+    try {
+      openChat('friend', f.id);
+      f.__photoThisTurn = true;
+      f.__photoTrigger = '自拍';
+      await deliver('friend', f, '[[照片:窗边，白衬衫，傍晚]]', f.id, 3);
+      await advance(6000);
+      const lead = f.messages.some((m) => /等我一下|稍等|等一下下/.test(m.text || ''));
+      const photo = f.messages.some((m) => m.photo);
+      const err = f.messages.some((m) => String(m.text || '').includes('没收到可显示的内容'));
+      return !lead && photo && !err && __imgCalls === 1;
+    } finally { genImage = realGen; shrinkPhoto = realShrink; }
+  `);
+  await check('她只发 [[表情:…]] 不配字：照发这张表情，不报错', `
+    await resetCase();
     openChat('friend', f.id);
-    f.__photoThisTurn = true;
-    f.__photoTrigger = '自拍';
-    let err = '';
-    try { await deliver('friend', f, '[[照片:窗边，白衬衫，傍晚]]', f.id, 3); }
-    catch (e) { err = String((e && e.message) || ''); }
-    await advance(300);
+    state.stickers = [{ id: 'st-x', url: 'data:image/png;base64,${PNG1}', tags: ['开心'], desc: '', ts: 1 }];
+    const p = deliver('friend', f, '[[表情:开心]]', f.id, 3).catch(() => {});
+    await advance(3000);
+    await p;
     const texts = f.messages.map((m) => String(m.text || ''));
-    if (texts.some((t) => /等我一下|稍等|等一下下|给你看个表情/.test(t))) return false;
-    if (texts.some((t) => t.includes('[[照片'))) return false;
-    return err.includes('没收到可显示的内容');
+    if (texts.some((t) => t.includes('没收到可显示的内容'))) return false;
+    return f.messages.some((m) => m.sticker && m.image);
   `);
   await check('生图接口返回网页时，报错带状态和标题', `
     const res = new Response('<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>',
