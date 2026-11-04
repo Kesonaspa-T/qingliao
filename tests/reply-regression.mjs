@@ -916,6 +916,15 @@ try {
     const cfg = photoCfgFor(f);
     return cfg.triggers.includes('shoot me') && !cfg.triggers.includes('selfie');
   `);
+  await check('英文人设的照片提示词不给中文示例（不然她台词也是中文）', `
+    await resetCase({ imageOn: true, imageBaseUrl: 'https://x.test/v1', imageApiKey: 'sk',
+      imageChance: 100, imageTriggers: '' });
+    f.persona = 'You MUST speak ONLY in English.';
+    f.messages.push({ id: 'm-ph', role: 'user', text: 'selfie', ts: Date.now() });
+    const sys = buildMessages(f, f, null, new Map())[0].content;
+    if (!sys.includes('【照片】')) return false;
+    return !sys.includes('拍好啦') && sys.includes('English');
+  `);
   await check('她只写 [[照片:…]] 不写字：不加开场白，照片照发', `
     await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
       imageApiKey: 'sk-img', imageChance: 100, imageTriggers: '自拍' });
