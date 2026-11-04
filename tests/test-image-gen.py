@@ -182,7 +182,7 @@ try:
     TOKEN = j.get("token", "")
 
     st, j = api("GET", "/api/status")
-    ok("服务端 build 升到 v52", st == 200 and j.get("build") == "v52", j.get("build"))
+    ok("服务端 build 升到 v54", st == 200 and j.get("build") == "v54", j.get("build"))
 
     # 1) 正常 b64_json 转发 + Key 透传
     st, j = api("POST", "/api/image", {
