@@ -859,6 +859,32 @@ try {
     applyTheme();
     return document.documentElement.getAttribute('data-skin') === 'sakura';
   `);
+  // 加皮肤最容易漏的地方：选项加了、SKIN_IDS 忘了加（点了弹回默认），
+  // 或者 CSS 那一段没写/写错 id（选了没变化）。这里把三处对一遍。
+  await check('九套皮肤：选项、SKIN_IDS、CSS 三处对得上，且颜色各不相同', `
+    await resetCase();
+    const chips = [...document.querySelectorAll('#skinChips .chip[data-skin]')];
+    const ids = chips.map(c => c.dataset.skin);
+    const diag = [];
+    if (ids.length !== 9) diag.push('count=' + ids.length);
+    if (ids.join() !== SKIN_IDS.join()) diag.push('chips=' + ids.join() + ' || ids=' + SKIN_IDS.join());
+    // 浅色、深色各过一遍：主色撞了，或者深色那份忘了写（掉回默认蓝），都算错
+    for (const dark of [false, true]) {
+      const used = {};
+      for (const id of ids) {
+        state.settings.skin = id;
+        applyTheme();
+        if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+        const css = getComputedStyle(document.documentElement).getPropertyValue('--me').trim();
+        const tag = (dark ? 'dark-' : 'light-') + id;
+        if (!css) diag.push('NO-CSS ' + tag);
+        else if (used[css]) diag.push('DUP ' + tag + ' vs ' + used[css]);
+        used[css] = id;
+      }
+    }
+    if (diag.length) throw new Error(diag.join(' | '));
+    return true;
+  `);
   await check('聊天背景：几 MB 的大图也能显示（不能拼进 gradient 被丢掉）', `
     await resetCase();
     const big = 'data:image/jpeg;base64,' + 'A'.repeat(300000);
@@ -896,6 +922,54 @@ try {
     if (!p.includes('【语言】') || !p.includes('English')) return false;
     f.persona = '你叫小满，普通中文人设。';
     return personaLang(f) === f.persona;
+  `);
+  // 聊到一半改人设：不用清空聊天记录，下一句就得按新设定来。
+  // 走的是真 UI（编辑资料 → 保存），断言的是真正发出去的请求体。
+  await check('聊到一半改人设：下一句请求里立刻是新人设，并带「设定刚更新过」', `
+    await resetCase({ delayOn: false, contextLimit: 200 });
+    f.persona = '你叫林小满，22 岁，说话甜甜的，爱撒娇。';
+    await send('在吗'); await advance(400); await complete(0, '在呢'); await advance(20000);
+    await send('干嘛呢'); await advance(400); await complete(1, '发呆'); await advance(20000);
+    if (jobs.length !== 2) return false;
+    const oldSys = String(jobs[1].body.messages[0].content);
+    if (!oldSys.includes('爱撒娇')) return false;
+    if (oldSys.includes('设定刚更新过')) return false;        // 没改过就不该冒出这句
+    await advance(60000);                                     // 让旧消息的时间戳真的早于改动时间
+    openFriendSheet(f, 'edit');
+    $('#fFPersona').value = '你叫林小满，22 岁，说话很冲，爱顶嘴，烦撒娇那一套。';
+    $('#btnFSave').click(); await flush();
+    if (!String(f.persona).includes('爱顶嘴')) return false;   // 内存里已经是新人设
+    if (!(Number(f.personaChangedAt) > 0)) return false;      // 记下了改动时间
+    await send('你今天脾气好差');
+    await advance(400);
+    const body = jobs[jobs.length - 1].body;
+    const sys = String(body.messages[0].content);
+    if (!sys.includes('爱顶嘴')) return false;                 // 新人设进了系统提示词
+    if (sys.includes('爱撒娇')) return false;                  // 旧人设不能还留着
+    const last = body.messages[body.messages.length - 1];
+    return last.role === 'system' && last.content.includes('设定刚更新过');
+  `);
+  // 提醒不能一直挂在那里（否则每次请求都多几百字），但人设始终是新的。
+  await check('改完聊够之后不再重复提醒，人设仍然是新的', `
+    await resetCase({ delayOn: false, contextLimit: 6 });
+    f.persona = '你叫林小满，说话甜甜的。';
+    await send('在吗'); await advance(400); await complete(0, '在呢'); await advance(20000);
+    await advance(60000);
+    openFriendSheet(f, 'edit');
+    $('#fFPersona').value = '你叫林小满，说话很冲，爱顶嘴。';
+    $('#btnFSave').click(); await flush();
+    const sysOfLast = () => String(jobs[jobs.length - 1].body.messages[0].content);
+    const hasNote = () => jobs[jobs.length - 1].body.messages
+      .some(m => String(m.content).includes('设定刚更新过'));
+    await send('第一句'); await advance(400);
+    if (!hasNote()) return false;                              // 上下文里还有旧消息 → 要提醒
+    await complete(jobs.length - 1, '回你第一句'); await advance(20000);
+    for (let i = 0; i < 4; i++) {
+      await send('第' + i + '句'); await advance(400);
+      await complete(jobs.length - 1, '回你第' + i + '句'); await advance(20000);
+    }
+    if (!sysOfLast().includes('爱顶嘴')) return false;
+    return !hasNote();                                         // 窗口里全是新消息 → 不再重复
   `);
   await check('英文关键词也触发照片（中文列表 + selfie）', `
     await resetCase({ imageOn: true, imageBaseUrl: 'https://x.test/v1', imageApiKey: 'sk',
