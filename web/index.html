@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f7f8fa">
 <title>轻聊</title>
-<link rel="stylesheet" href="style.css?v=34">
+<link rel="stylesheet" href="style.css?v=35">
 <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
@@ -322,6 +322,13 @@
         </div>
 
         <div class="group">
+          <div class="group-title">输入</div>
+          <label class="field row-inline"><span>回车直接发送</span><input id="fEnterSend" type="checkbox" class="switch"></label>
+          <p class="hint">打开后按键盘的回车键就发出去（微信那种）；关掉时回车是换行，点「发送」才发。
+            手机上默认关。输入法正在拼字、或者敲回车是把候选字上屏的时候，不会误发。</p>
+        </div>
+
+        <div class="group">
           <div class="group-title">其他</div>
           <label class="field">
             <span>主题</span>
@@ -625,6 +632,6 @@
   </div>
 </div>
 
-<script src="app.js?v=110"></script>
+<script src="app.js?v=111"></script>
 </body>
 </html>

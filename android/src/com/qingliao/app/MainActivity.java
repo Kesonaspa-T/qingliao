@@ -96,6 +96,8 @@ public class MainActivity extends Activity {
         web.addJavascriptInterface(new StoreBridge(), "QingliaoStore");
         // 登录态另存一份原生文件：WebView 清 localStorage 也不会掉登录
         web.addJavascriptInterface(new SessionBridge(this), "QingliaoSession");
+        // 保存图片：WebView 里 <a download> 是无效的，图片要存进「下载」只能交给原生写
+        web.addJavascriptInterface(new SaveBridge(this), "QingliaoSave");
 
         // 换网（Wi-Fi ↔ 流量）时 WebView 有时压根不派发 online 事件：原生盯一层，
         // 网络一变就让网页立刻去重连，别等下一轮 30 秒退避。

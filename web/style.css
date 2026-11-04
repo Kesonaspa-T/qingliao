@@ -1522,6 +1522,23 @@ html[data-theme="dark"] .login { background: #0b0d10; }
   opacity: .9;
 }
 #lightbox .lightbox-hint:empty { display: none; }
+#lightbox .lightbox-save {
+  position: absolute;
+  right: 18px;
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  z-index: 2;
+  padding: 10px 20px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .94);
+  color: #111418;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
+}
+#lightbox .lightbox-save:active { transform: scale(.96); }
 
 /* 搜索框 */
 #searchBox {

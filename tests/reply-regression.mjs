@@ -759,6 +759,58 @@ try {
     const ps = buildPhotoPrompt('窗边', f, cfg, { safe: true });
     return ps.includes('二次元画风') && ps.includes('粗描线');
   `);
+  // 输入法：macOS 中文输入法下打英文，回车是「上屏」不是「发送」。
+  // Safari/WKWebView 这时 isComposing 常常已经是 false，只看它就会误发。
+  await check('回车：输入法上屏不发送，拼完字之后的回车才发送', `
+    await resetCase();
+    if (!isImeEnter({ key: 'Enter', isComposing: true })) return false;      // 正在拼字
+    if (!isImeEnter({ key: 'Enter', isComposing: false, keyCode: 229 })) return false;
+    inputEl.dispatchEvent(new CompositionEvent('compositionstart'));
+    if (!isImeEnter({ key: 'Enter', isComposing: false, keyCode: 13 })) return false;
+    inputEl.dispatchEvent(new CompositionEvent('compositionend'));
+    if (!isImeEnter({ key: 'Enter', isComposing: false, keyCode: 13 })) return false;  // 刚上屏那一下
+    await advance(200);                                                       // 保护窗过去
+    return !isImeEnter({ key: 'Enter', isComposing: false, keyCode: 13 });
+  `);
+  await check('回车发送开关：关掉后回车只换行，打开才发出去', `
+    await resetCase({ delayOn: false });
+    if (!enterSendOn()) return false;                                        // 桌面没设过默认开
+    state.settings.enterSend = false;
+    inputEl.value = '关掉时按回车';
+    inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await advance(600);
+    if (jobs.length) return false;                                           // 没发出去
+    if (inputEl.value !== '关掉时按回车') return false;                        // 字还在
+    state.settings.enterSend = true;
+    inputEl.value = '打开后按回车';
+    inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await advance(600);
+    return jobs.length === 1;                                                // 发出去了
+  `);
+  // 以前点开大图只能看，手机和 Mac 都没有「保存」入口
+  await check('保存图片：看大图有按钮，手机上走原生写文件', `
+    await resetCase();
+    openLightbox('data:image/jpeg;base64,AAA', '', { id: 'x', role: 'peer', authorId: 'f-test', ts: 1700000000000 });
+    const btn = document.getElementById('lightboxSave');
+    if (!btn) return false;
+    document.getElementById('lightbox').classList.remove('open');
+    if (!msgMenu.querySelector('[data-act="saveimg"]')) return false;        // 长按菜单也有
+    let called = null;
+    window.QingliaoSave = { save: (name, b64) => { called = { name, b64 }; return 'Download/' + name; } };
+    const realFetch = window.fetch; const realToast = toast; const said = [];
+    window.fetch = async () => ({ ok: true, blob: async () => new Blob(['x'], { type: 'image/jpeg' }) });
+    toast = (m) => said.push(m);
+    try {
+      const ok = await saveImageRef('data:image/jpeg;base64,AAA', '轻聊-测试');
+      if (!ok || !called) return false;
+      if (called.name !== '轻聊-测试.jpg') return false;                     // 名字带扩展名
+      if (!called.b64) return false;
+      if (!said.some((m) => String(m).indexOf('已保存') >= 0)) return false;
+    } finally {
+      delete window.QingliaoSave; window.fetch = realFetch; toast = realToast;
+    }
+    return true;
+  `);
   // 以前提示词里写死「单人出镜，像自拍」，于是她说什么都发同一个角度的自拍：
   // 说了脚受伤，发来的还是全身自拍。这里锁住「机位按描述走」这条。
   await check('拍照：说了脚上的伤，拍的是特写不是自拍', `

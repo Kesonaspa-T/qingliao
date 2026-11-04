@@ -1423,7 +1423,9 @@ function cacheBust(url, n) {
  * 以前这里直接把 ref 塞进 <img src>，@blob: 的图在手机上就是一张裂图的小图标；
  * 现在统一过 imgSrc()，失败先退回缩略图、再带缓存串重试，实在不行给一句人话。
  */
-function openLightbox(ref, fallbackRef) {
+let lightboxTarget = null;
+
+function openLightbox(ref, fallbackRef, msg) {
   let box = document.getElementById('lightbox');
   if (!box) {
     box = document.createElement('div');
@@ -1433,10 +1435,21 @@ function openLightbox(ref, fallbackRef) {
     img.alt = '';
     const hint = document.createElement('div');
     hint.className = 'lightbox-hint';
-    box.append(img, hint);
+    // 看大图时能存下来：以前点开只能看，手机和 Mac 都没有「保存」这个入口
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.id = 'lightboxSave';
+    save.className = 'lightbox-save';
+    save.textContent = '保存图片';
+    save.addEventListener('click', (e) => {
+      e.stopPropagation();                 // 别让「点哪儿都关掉」把这次点击吃掉
+      if (lightboxTarget) saveImageRef(lightboxTarget.ref, lightboxTarget.name);
+    });
+    box.append(img, hint, save);
     document.body.append(box);
     box.addEventListener('click', () => { box.classList.remove('open'); });
   }
+  lightboxTarget = { ref, name: msg ? imageSaveName(msg) : '轻聊图片' };
   const img = document.getElementById('lightboxImg');
   const hint = box.querySelector('.lightbox-hint');
   const full = imgSrc(ref) || imgSrc(fallbackRef);
@@ -1514,7 +1527,11 @@ function openReplyBox(m, c, card) {
   };
   send.addEventListener('click', submit);
   cancel.addEventListener('click', () => box.remove());
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || isImeEnter(e)) return;
+    e.preventDefault(); submit();
+  });
+  trackIme(input);
   box.append(input, send, cancel);
   card.appendChild(box);
   setTimeout(() => input.focus(), 30);
@@ -1540,8 +1557,10 @@ function toggleCommentBox(momentId, card) {
 
   btn.addEventListener('click', submit);
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); submit(); }
+    if (e.key !== 'Enter' || isImeEnter(e)) return;
+    e.preventDefault(); submit();
   });
+  trackIme(input);
 
   box.append(input, btn);
   card.append(box);
@@ -2148,7 +2167,7 @@ function renderMessage(msg, opts = {}) {
     img.addEventListener('click', (e) => {
       // 别让「点图看大图」顺手把消息菜单也打开（桌面上两个都会触发）
       e.stopPropagation();
-      openLightbox(msg.image, msg.thumb);
+      openLightbox(msg.image, msg.thumb, msg);
     });
     bubble.append(img);
   } else if (msg.file && msg.file.name) {
@@ -2685,8 +2704,11 @@ function photoShotLine(kind) {
   if (kind === 'selfie') {
     return '机位：这一张是自拍——手机举起来对着自己看镜头，画面里只有她一个人。';
   }
-  return '机位：按「画面」那句决定镜头对着什么、离多近；没写清楚就随手拍一张，'
-    + '不要默认拍成自拍，也不要每次都同一个角度（近景 / 特写 / 侧脸 / 俯拍都行）。';
+  return '机位：按「画面」那句决定镜头对着什么、离多近，**不要默认拍成自拍**——\n'
+    + '- 画面里是某样具体的东西或地方（桌上在吃什么、新买的东西、窗外、路边遇到的、屏幕、宠物）→ '
+    + '就拍那样东西，第一人称视角、近景或特写，她本人可以不在画面里；\n'
+    + '- 画面里是她在做什么、穿了什么、她想让你看她的样子 → 才拍她本人（自拍还是别人拍，按描述来）；\n'
+    + '- 没写清楚就随手拍一张，也别每次都同一个角度（近景 / 特写 / 侧脸 / 俯拍都行）。';
 }
 
 /** 一张照片最终发给生图模型的提示词：画风 + 人物 + 最近聊的 + 这一幕。 */
@@ -2718,7 +2740,7 @@ function buildPhotoPrompt(scene, friend, cfgIn, opts) {
   const sceneText = String(scene || '').replace(/\s+/g, ' ').trim().slice(0, 400);
   lines.push('画面：' + (sceneText || '随手拍一张'));
   lines.push(photoShotLine(photoShotKind(sceneText)));
-  lines.push('要求：画面里只有她一个人（不要出现第二个人），像用手机当场拍的，构图自然、有生活气；画面里不要出现文字、logo、水印。');
+  lines.push('要求：不要出现第二个人（画面里只有她，或者只有她拍的那样东西），像用手机当场拍的，构图自然、有生活气；画面里不要出现文字、logo、水印。');
   if (safe) {
     lines.push('另外：日常、干净的生活照，衣着完整，正常室内/室外场景；不要裸露、不要性暗示、不要亲密接触。');
   }
@@ -2955,11 +2977,12 @@ function buildMessages(friend, conv, nudge, imgMap) {
       + '\n规矩：\n'
       // 这一条最容易被忽略：以前描述只要求写「你在哪、穿什么、什么表情」，
       // 于是不管聊什么，写出来都是自拍。现在先让她决定「这张拍的是什么」。
-      + '- 写之前先想清楚**这张拍的是什么**：\n'
-      + '　· 他要看你的样子 / 你自己想发张自拍 → 写明是自拍（举着手机对着自己）；\n'
-      + '　· 你要给他看某个具体的东西（脚上的伤、手上的口子、桌上的饭、窗外的雨、你养的猫）→ '
-      + '就写那个东西的特写和机位，例如「坐在床边低头拍脚踝侧面，红了一小块」，**不要又写成自拍**；\n'
-      + '　· 别每张都同一个机位：上一张是自拍，这一张就换个角度（近景、特写、侧脸、俯拍）\n'
+      + '- 写之前先想清楚**这张拍的是什么、镜头对着谁**（这是最容易偷懒的地方）：\n'
+      + '　· 他要看你的样子、问你在干嘛、你想发张自拍 → 写清是自拍，举着手机对着自己；\n'
+      + '　· 你要给他看**任何一样具体的东西**——桌上在吃什么、刚买的东西、窗外的天气、路边遇到的猫狗、\n'
+      + '　　手机屏幕、手上的口子、脚上的淤青…… → 就写那样东西的特写和机位（镜头对着它），\n'
+      + '　　**不要又写成你自己**，比如「坐在床边低头拍脚踝侧面，红了一小块」「桌上摊开的书和半杯冷掉的咖啡」；\n'
+      + '　· 别每张都同一个机位：上一张是自拍，这一张就换个角度（近景、特写、俯拍、第一人称视角）\n'
       + '- 拍的内容要接得上你刚说的话；不是你眼前的东西就别硬编\n'
       + '- **文字一定要有**：先说一句话，再把 [[照片:…]] 另起一行；不要只发一张光秃秃的照片\n'
       + '- 只写「给你看」不算发出，必须写 [[照片:…]] 才会真的发出去\n'
@@ -4106,8 +4129,8 @@ async function genPhotoScene(friend, trigger) {
   try {
     const text = await quickChat([
       { role: 'system', content: '你在帮一个角色决定「这一张照片拍什么」，写给文生图模型用。\n'
-        + '只输出一句中文描述（不超过 80 字）：先说清这张拍的是什么（她自己，还是某个东西 / 部位的特写），'
-        + '再说在哪、什么机位、什么光。\n'
+        + '只输出一句中文描述（不超过 80 字）：先说清这张拍的是什么（她自己，还是某样具体的东西 / 某个地方），'
+        + '再说在哪、什么机位、什么光；如果他刚才问的是某件事/某个东西，就拍那个，别拍成自拍。\n'
         + '不要引号、不要解释、不要编号。' },
       { role: 'user', content: '角色：' + ((friend && friend.name) || '她') + '\n人设：'
         + String((friend && friend.persona) || '').slice(0, 300) + '\n最近聊的：\n' + (recent || '（没聊什么）')
@@ -4962,14 +4985,57 @@ inputEl.addEventListener('keyup', (e) => {
   if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) updateMentionPicker();
 });
 
+/* ---------------- 回车：输入法上屏 ≠ 发送 ---------------- */
+
+/**
+ * 这一下回车是「发送」，还是「输入法在确认候选字」？
+ *
+ * macOS 中文输入法下打英文，按回车是「把字母原样上屏」——Safari/WKWebView 这时
+ * 派发的 keydown 经常 isComposing 已经是 false（compositionend 先到一步），
+ * 只看 isComposing 就会把上屏当成发送：别家软件能上屏，这里一敲回车就直接发出去了。
+ * 所以自己再记一份拼字状态，并给 compositionend 之后留一个很短的窗口。
+ */
+let imeComposing = false;
+let imeEndedAt = 0;
+function trackIme(el) {
+  if (!el) return;
+  el.addEventListener('compositionstart', () => { imeComposing = true; });
+  el.addEventListener('compositionend', () => { imeComposing = false; imeEndedAt = Date.now(); });
+}
+function isImeEnter(e) {
+  if (e && (e.isComposing || e.keyCode === 229)) return true;
+  return imeComposing || (Date.now() - imeEndedAt) < 150;
+}
+
+/** 回车直接发消息？设置里能改；没设过的时候桌面开、手机关（手机默认点「发送」）。 */
+function enterSendOn() {
+  const v = state.settings.enterSend;
+  return v === undefined || v === null ? !COARSE : !!v;
+}
+
+let lastEnterSendAt = 0;
+
 inputEl.addEventListener('keydown', (e) => {
   if (mentionKeydown(e)) return;
   if (e.key !== 'Enter') return;
-  if (e.isComposing || e.shiftKey) return;
-  if (COARSE) return;
+  if (e.shiftKey) return;              // Shift + 回车永远是换行
+  if (isImeEnter(e)) return;           // 输入法上屏：让字进输入框，不要发
+  if (!enterSendOn()) return;          // 设置里关掉了：回车换行，点「发送」才发
   e.preventDefault();
+  lastEnterSendAt = Date.now();
   send();
 });
+// 有些手机输入法点「回车」根本不派发 keydown，只发一个换行输入事件：
+// 这种情况下也按设置里的开关处理，不然手机上开了「回车发送」还是没反应。
+inputEl.addEventListener('beforeinput', (e) => {
+  if (!e || e.inputType !== 'insertLineBreak') return;
+  if (!enterSendOn() || isImeEnter(e)) return;
+  if (Date.now() - lastEnterSendAt < 300) return;   // 上面那条 keydown 已经发过了
+  e.preventDefault();
+  lastEnterSendAt = Date.now();
+  send();
+});
+trackIme(inputEl);
 
 sendBtn.addEventListener('click', () => {
   const conv = currentConv();
@@ -5069,6 +5135,8 @@ function openMenu(row, x, y) {
   regen.style.display = idx === conv.messages.length - 1 && msg.role === 'peer' ? '' : 'none';
   const stkBtn = msgMenu.querySelector('[data-act="sticker"]');
   if (stkBtn) stkBtn.style.display = msg.image ? '' : 'none';
+  const saveBtn = msgMenu.querySelector('[data-act="saveimg"]');
+  if (saveBtn) saveBtn.style.display = msg.image ? '' : 'none';
 
   const rect = phone.getBoundingClientRect();
   msgMenu.hidden = false;
@@ -5139,6 +5207,13 @@ if (!msgMenu.querySelector('[data-act="speak"]')) {
   b.textContent = '朗读';
   msgMenu.insertBefore(b, msgMenu.querySelector('[data-act="del"]'));
 }
+// 她发的图 / 表情包 → 存到手机相册 / 电脑「下载」
+if (!msgMenu.querySelector('[data-act="saveimg"]')) {
+  const b = document.createElement('button');
+  b.dataset.act = 'saveimg';
+  b.textContent = '保存图片';
+  msgMenu.insertBefore(b, msgMenu.querySelector('[data-act="copy"]'));
+}
 // 她发的图 / 表情包 → 一键收进自己的表情包库（自动打标签）
 if (!msgMenu.querySelector('[data-act="sticker"]')) {
   const b = document.createElement('button');
@@ -5182,6 +5257,9 @@ msgMenu.addEventListener('click', async (e) => {
   }
   else if (act === 'sticker') {
     saveMsgAsSticker(msg);
+  }
+  else if (act === 'saveimg') {
+    await saveImageRef(msg.image, imageSaveName(msg));
   }
   else if (act === 'del') {
     conv.messages.splice(idx, 1);
@@ -5257,6 +5335,7 @@ function fillForm() {
   const freq = Number(s.momentInterval) || 43200;
   $('#fMomentFreq').value = Math.max(1, Math.round(freq / 60));
   $('#fProactive').checked = !!s.proactive;
+  if ($('#fEnterSend')) $('#fEnterSend').checked = enterSendOn();
   $('#fIdle').value = s.idleMin ?? 20;
   if ($('#fRecall')) $('#fRecall').checked = s.recallOn !== false;
   if ($('#fRecallChance')) $('#fRecallChance').value = Number(s.recallChance ?? 20);
@@ -5362,6 +5441,7 @@ function saveForm() {
   s.theme = $('#fTheme').value;
   s.momentInterval = Math.max(60, (Number($('#fMomentFreq').value) || 720) * 60);
   s.proactive = $('#fProactive').checked;
+  if ($('#fEnterSend')) s.enterSend = $('#fEnterSend').checked;
   s.idleMin = Math.max(3, Number($('#fIdle').value) || 20);
   if ($('#fRecall')) s.recallOn = $('#fRecall').checked;
   if ($('#fRecallChance')) s.recallChance = Math.max(0, Math.min(50, Number($('#fRecallChance').value) || 0));
@@ -6794,7 +6874,7 @@ function ensureSheet(id, html) {
   return el;
 }
 
-/** 通用「存成文件」：mac 壳走原生保存，其它走浏览器下载。 */
+/** 通用「存成文件」：mac 壳 / 手机壳走原生保存，其它走浏览器下载。 */
 async function downloadBlob(blob, name) {
   const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveFile;
   if (bridge) {
@@ -6802,6 +6882,16 @@ async function downloadBlob(blob, name) {
       bridge.postMessage({ name, base64: await blobToBase64(blob) });
       toast('已保存到「下载」文件夹：' + name);
       return true;
+    } catch (_) { /* 掉到浏览器下载 */ }
+  }
+  // Android：WebView 里 <a download> 点了没反应（没有下载管理器接），必须交给原生写进「下载」目录
+  const android = window.QingliaoSave && window.QingliaoSave.save;
+  if (android) {
+    try {
+      const where = android(name, await blobToBase64(blob));
+      if (where) { toast('已保存：' + where); return true; }
+      toast('保存失败：手机没让写文件');
+      return false;
     } catch (_) { /* 掉到浏览器下载 */ }
   }
   try {
@@ -6817,6 +6907,33 @@ async function downloadBlob(blob, name) {
     return true;
   } catch (_) {
     toast('这台设备不让下载，换浏览器打开试试');
+    return false;
+  }
+}
+
+/** 存她发来的图时用的文件名：轻聊-她-20261104-223001 */
+function imageSaveName(msg) {
+  const who = (msg && msg.role === 'user') ? (state.me.name || '我') : nameOf(msg && msg.authorId);
+  const d = new Date(Number(msg && msg.ts) || Date.now());
+  const p2 = (n) => String(n).padStart(2, '0');
+  return '轻聊-' + (who || '她') + '-' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate())
+    + '-' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
+}
+
+/** 把一张图（@blob: 或 data:）取成 blob 存下去。手机上走原生，Mac 写「下载」，网页走浏览器下载。 */
+async function saveImageRef(ref, baseName) {
+  const url = imgSrc(ref);
+  if (!url) return toast('这张图没取到地址，存不了');
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const type = String(blob.type || 'image/jpeg');
+    const ext = type.indexOf('png') >= 0 ? 'png' : type.indexOf('webp') >= 0 ? 'webp'
+      : type.indexOf('gif') >= 0 ? 'gif' : 'jpg';
+    return await downloadBlob(blob, (baseName || '轻聊图片') + '.' + ext);
+  } catch (e) {
+    toast('保存失败：' + ((e && e.message) || e));
     return false;
   }
 }
