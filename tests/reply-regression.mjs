@@ -888,6 +888,14 @@ try {
     const sys = buildMessages(f, f, null, new Map())[0].content;
     return !sys.includes('【语言·最高优先级】');
   `);
+  await check('签名/朋友圈/日记这些也带上语言要求', `
+    await resetCase();
+    f.persona = 'You must Talk to me using English.';
+    const p = personaLang(f);
+    if (!p.includes('【语言】') || !p.includes('English')) return false;
+    f.persona = '你叫小满，普通中文人设。';
+    return personaLang(f) === f.persona;
+  `);
   await check('英文关键词也触发照片（中文列表 + selfie）', `
     await resetCase({ imageOn: true, imageBaseUrl: 'https://x.test/v1', imageApiKey: 'sk',
       imageChance: 0, imageTriggers: '自拍' });

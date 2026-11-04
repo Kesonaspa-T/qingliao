@@ -953,7 +953,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v53",
+                    "build": "v54",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
@@ -1561,6 +1561,41 @@ PERSONA_FRESH_NOTE = (
 )
 
 
+_LANG_NAMES = (
+    ("English", r"english|英文|英语"),
+    ("日本語", r"japanese|日本語|日语|日文"),
+    ("한국어", r"korean|한국어|韩语|韩文"),
+    ("français", r"french|français|法语|法文"),
+    ("Deutsch", r"german|deutsch|德语|德文"),
+    ("español", r"spanish|español|西班牙语|西班牙文"),
+    ("italiano", r"italian|italiano|意大利语|意大利文"),
+    ("русский", r"russian|русский|俄语|俄文"),
+)
+_LANG_BEFORE = re.compile(r"(must|only|always|reply|respond|answer|speak|talk|write|use|using|in|say|说|讲|用|必须|只用|只准|回答|回复|不要|别)[^。.\n]{0,40}$", re.I)
+_LANG_AFTER = re.compile(r"^[^。.\n]{0,16}(で|を)?\s*(話|言|答|返|reply|speak|talk|answer|respond)", re.I)
+
+
+def lang_tag(friend):
+    """人设里明确要求用某种语言时，返回一句给所有「她写的字」用的语言要求。
+
+    聊天有客户端那套，但签名、朋友圈、评论、主动消息、日记这些是服务端生成的，
+    不带上这句就会中英混着来。
+    """
+    persona = str((friend or {}).get("persona") or "")
+    if not persona:
+        return ""
+    for name, pat in _LANG_NAMES:
+        m = re.search(pat, persona, re.I)
+        if not m:
+            continue
+        before = persona[max(0, m.start() - 40):m.start()]
+        after = persona[m.end():m.end() + 24]
+        if not _LANG_BEFORE.search(before) and not _LANG_AFTER.search(after):
+            continue
+        return "【语言】你写的所有文字都必须用 " + name + "，不要用中文。"
+    return ""
+
+
 def persona_fresh_note(friend, msgs=None, limit=30):
     """人设刚改过、而上下文里还有改之前的消息 → 给模型一句明确的「换人设」指令。
 
@@ -1727,7 +1762,7 @@ def gen_moment_text(friend, settings, key, chat_lines=None, recent_msgs=None):
     wd = "一二三四五六日"[now.weekday()]
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
-        + (friend.get("persona") or "") + "\n\n"
+        + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + persona_fresh_note(friend, recent_msgs)
         + _notes_for_prompt(friend)
     )
@@ -1785,7 +1820,7 @@ def vision_part(image, hint, settings):
 def gen_comment_text(friend, author_name, moment_text, thread, settings, key, image=""):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
-        + (friend.get("persona") or "") + "\n\n"
+        + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + _notes_for_prompt(friend) + "\n"
         + author_name + " 发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
     )
@@ -1820,7 +1855,7 @@ def gen_comment_text(friend, author_name, moment_text, thread, settings, key, im
 def gen_reply_text(friend, commenter_name, moment_text, comment_text, thread, settings, key, image=""):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
-        + (friend.get("persona") or "") + "\n\n"
+        + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + _notes_for_prompt(friend) + "\n"
         + "你发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
     )
@@ -1848,7 +1883,7 @@ def gen_dm_text(friend, owner_name, moment_text, settings, key, image=""):
     custom = prompt_extra(settings, "dm")
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
-        + (friend.get("persona") or "") + "\n\n"
+        + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + _notes_for_prompt(friend) + "\n"
         + owner_name + " 刚发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
     )
@@ -1876,7 +1911,7 @@ def group_prompt_text(group_prompt):
 def gen_group_line(friend, author_name, moment_text, prev_lines, settings, key, group_prompt="", recent_msgs=None):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
-        + (friend.get("persona") or "") + "\n\n"
+        + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + _notes_for_prompt(friend) + "\n"
         + "你们在一个群里聊天。" + author_name + " 刚发了条朋友圈：\n「" + (moment_text or "") + "」\n\n"
         + persona_fresh_note(friend, recent_msgs)
@@ -1900,7 +1935,7 @@ def gen_group_line(friend, author_name, moment_text, prev_lines, settings, key, 
 def gen_proactive_text(friend, last_text, settings, key):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
-        + (friend.get("persona") or "") + "\n\n"
+        + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         "你们在私聊。你最后一条说的是「" + (last_text or "") + "」，之后对方就没动静了。\n"
         "你想再发一条，很短，别用“在吗”“干嘛呢”这种套话。10~20 字，口语。只输出这一句。"
     )
@@ -1914,7 +1949,7 @@ def gen_proactive_text(friend, last_text, settings, key):
 def gen_group_smalltalk(friend, group_name, recent_lines, settings, key, group_prompt="", recent_msgs=None):
     sys = (
         "你就是" + (friend.get("name") or "") + "。\n"
-        + (friend.get("persona") or "") + "\n\n"
+        + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + _notes_for_prompt(friend) + "\n"
         "你们在一个叫「" + (group_name or "群") + "」的群里。\n"
         + persona_fresh_note(friend, recent_msgs)
@@ -1975,7 +2010,7 @@ def gen_essay(friend, me_name, recent_lines, settings, key, recent_msgs=None):
     """很偶尔的一篇「小作文」：主动发一段 300~600 字的长消息。"""
     name = friend.get("name") or ""
     sys = (
-        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        "你就是" + name + "。\n" + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + persona_fresh_note(friend, recent_msgs)
         + _notes_for_prompt(friend) + "\n"
         + "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n"
@@ -2003,7 +2038,7 @@ def gen_proactive(friend, me_name, recent_lines, settings, key, directive="", al
     """她主动找他说话：跟前文只沾一点点，多为中性，绝不替他说话。"""
     name = friend.get("name") or ""
     sys = (
-        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        "你就是" + name + "。\n" + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + persona_fresh_note(friend, recent_msgs)
         + _notes_for_prompt(friend) + "\n"
         + "【身份】「我」是你自己，「" + (me_name or "对方") + "」是他。你不是他，不要替他说，也不要假装是他。\n"
@@ -2046,7 +2081,7 @@ def gen_diary(friend, me_name, recent_lines, settings, key, recent_msgs=None):
     """她自己的一页日记：写给自己看的，不发给对方。"""
     name = friend.get("name") or ""
     sys = (
-        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        "你就是" + name + "。\n" + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + _notes_for_prompt(friend) + "\n"
         + persona_fresh_note(friend, recent_msgs)
         + env_now_text() + "\n" + CONSISTENCY_RULE + "\n"
@@ -2073,7 +2108,7 @@ def gen_life_event(friend, settings, key):
     """她生活里刚发生的一件小事，一句话。"""
     name = friend.get("name") or ""
     sys = (
-        "你就是" + name + "。\n" + (friend.get("persona") or "")[:800] + "\n\n"
+        "你就是" + name + "。\n" + (((friend.get("persona") or "") + lang_tag(friend))[:800] + lang_tag(friend)) + "\n\n"
         + _notes_for_prompt(friend) + "\n"
         + env_now_text() + "\n"
         + "写一句今天你生活里刚发生的小事，就一句，20~45 字，具体（什么声音、什么味道、谁说的话），"
@@ -2088,7 +2123,7 @@ def gen_anniversary(friend, me_name, occasion, settings, key):
     """纪念日/认识第 N 天，主动说一句。"""
     name = friend.get("name") or ""
     sys = (
-        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        "你就是" + name + "。\n" + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + _notes_for_prompt(friend) + "\n"
         + env_now_text() + "\n" + CONSISTENCY_RULE + "\n"
         + "【身份】「我」是你自己，「" + (me_name or "他") + "」是他。\n"
@@ -2106,7 +2141,7 @@ def gen_reminder(friend, me_name, what, settings, key):
     """用户让她记着的事，到点了由她开口提醒。"""
     name = friend.get("name") or ""
     sys = (
-        "你就是" + name + "。\n" + (friend.get("persona") or "") + "\n\n"
+        "你就是" + name + "。\n" + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
         + env_now_text() + "\n"
         + "【身份】「我」是你自己，「" + (me_name or "他") + "」是他。\n"
         + "他之前让你到点提醒他一件事：「" + (what or "") + "」。现在时间到了。\n"
@@ -2121,7 +2156,7 @@ def gen_reminder(friend, me_name, what, settings, key):
 def gen_chat_reply(friend, conv_name, history_lines, settings, key, in_group=False,
                    reply_to="", group_prompt="", being_called=False, images=None,
                    recent_msgs=None):
-    sys = ("你就是" + (friend.get("name") or "") + "。\n" + (friend.get("persona") or "") + "\n\n"
+    sys = ("你就是" + (friend.get("name") or "") + "。\n" + ((friend.get("persona") or "") + lang_tag(friend)) + "\n\n"
            + persona_fresh_note(friend, recent_msgs)
            + _notes_for_prompt(friend)
            + env_now_text() + "\n" + CONSISTENCY_RULE)
@@ -2823,7 +2858,7 @@ def social_tick(uid="local", force=False):
                     try:
                         txt = call_llm(s.get("baseUrl"), s.get("apiKey") or s.get("key") or "", s.get("model"),
                                        [{"role": "system", "content":
-                                         "你就是" + (f.get("name") or "") + "。\n" + (f.get("persona") or "")[:400] +
+                                         "你就是" + (f.get("name") or "") + "。\n" + ((f.get("persona") or "")[:400] + lang_tag(f)) +
                                          "\n\n现在" + ("早上" if slot == "morning" else "晚上") +
                                          "，你想给「我」发一句" + ("早安" if slot == "morning" else "晚安") +
                                          "。10~20 字，口语，符合你的性格。只输出这一句。"}],

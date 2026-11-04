@@ -96,6 +96,16 @@ ok("记忆更新要求保留旧的、合并新的",
 ok("记忆窗口放到 80 条（第 30 条还在）",
    "第30条" in _gsys3 and "第19条" not in _gsys3, _gsys3[-80:])
 srv.call_llm = _orig_call
+# 英文人设：签名、朋友圈、评论、主动消息、日记这些是服务端生成的，也得跟着用英文
+ok("英文人设能识别语言", "English" in srv.lang_tag({"persona": "You must Talk to me using English."}))
+ok("只是提到英文名不误判", srv.lang_tag({"persona": "他的英文名是 Charlton。"}) == "")
+_cap.clear()
+srv.call_llm = _fake_call
+srv.gen_moment_text({"name": "Ariadne", "persona": "You must Talk to me using English."}, {}, "k")
+_gsys4 = _cap.get("sys", "")
+ok("朋友圈提示词带上语言要求", "都必须用 English" in _gsys4, _gsys4[:120])
+_save = srv.call_llm
+srv.call_llm = _orig_call
 ok("生活事件进背景块", "三花猫" in srv.life_block(f_mem))
 
 f_ann = {"createdAt": int((time.time() - 99 * 86400) * 1000)}

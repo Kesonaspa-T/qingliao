@@ -2722,6 +2722,15 @@ function languageRuleFor(friend) {
   return '';
 }
 
+/** 人设要求别的语言时，给所有「她写的字」（签名/朋友圈/评论/私聊/日记…）都补一句 */
+function personaLang(f) {
+  const p = String((f && f.persona) || '');
+  const rule = languageRuleFor(f);
+  if (!rule) return p;
+  const lang = (rule.match(/用 ([^ ]+) 说话/) || [])[1] || 'English';
+  return p + '\n\n【语言】你写的所有文字都必须用 ' + lang + '，不要用中文。';
+}
+
 function buildMessages(friend, conv, nudge, imgMap) {
   const s = state.settings;
   const now = new Date();
@@ -5902,7 +5911,7 @@ async function writeSignatureByAi() {
   toast('让她想想…');
   try {
     const text = cleanLine(await quickChat([
-      { role: 'system', content: (f.persona || '') + '\n\n用你自己的口吻写一句个性签名，写在个人主页上的那种。'
+      { role: 'system', content: personaLang(f) + '\n\n用你自己的口吻写一句个性签名，写在个人主页上的那种。'
         + '12~24 字，第一人称，像随口说的，可以用一个 emoji，不要引号，不要解释，只输出这一句。' },
       { role: 'user', content: '你的个性签名会写什么？' },
     ]), 40);
@@ -7706,7 +7715,7 @@ function threadText(m, limit = 10) {
 /* 以下四个生成函数：APK 里没有服务器，朋友圈全靠这里长出来 */
 
 async function genComment(f, authorName, momentText, thread) {
-  let sys = `${f.persona}\n\n${authorName} 发了条朋友圈：\n「${momentText}」\n\n`;
+  let sys = `${personaLang(f)}\n\n${authorName} 发了条朋友圈：\n「${momentText}」\n\n`;
   // 设置里 ⑤ 写了就整段替换「注意」那几条；输出协议（只发一句、不加名字）始终由代码保证。
   const custom = promptExtra('comment');
   if (thread) {
@@ -7724,7 +7733,7 @@ async function genComment(f, authorName, momentText, thread) {
 }
 
 async function genReply(f, commenterName, momentText, commentText, thread) {
-  let sys = `${f.persona}\n\n你发了条朋友圈：\n「${momentText}」\n\n`;
+  let sys = `${personaLang(f)}\n\n你发了条朋友圈：\n「${momentText}」\n\n`;
   if (thread) sys += `评论区：\n${thread}\n\n`;
   const custom = promptExtra('reply');
   sys += `${commenterName} 刚评论了：\n「${commentText}」\n\n`;
@@ -7737,7 +7746,7 @@ async function genReply(f, commenterName, momentText, commentText, thread) {
 
 async function genDm(f, ownerName, momentText) {
   const custom = promptExtra('dm');
-  const sys = `${f.persona}\n\n${ownerName} 刚发了条朋友圈：\n「${momentText}」\n\n`
+  const sys = `${personaLang(f)}\n\n${ownerName} 刚发了条朋友圈：\n「${momentText}」\n\n`
     + (custom
       ? `你想私聊跟他说一句，就为这事儿。要求：\n${custom}\n`
       : '你想私聊跟他说一句，就为这事儿。10~25 字，口语，像微信上随手发的。不要提“朋友圈”三个字。\n')
@@ -7746,7 +7755,7 @@ async function genDm(f, ownerName, momentText) {
 }
 
 async function genGroupLine(f, authorName, momentText, prev) {
-  let sys = `${f.persona}\n\n你们在一个群里聊天。${authorName} 刚发了条朋友圈：\n「${momentText}」\n\n`;
+  let sys = `${personaLang(f)}\n\n你们在一个群里聊天。${authorName} 刚发了条朋友圈：\n「${momentText}」\n\n`;
   if (prev && prev.length) sys += `群里已经有人说：\n${prev.join('\n')}\n\n`;
   const custom = promptExtra('groupChat');
   sys += custom
@@ -7761,7 +7770,7 @@ async function genEssayLocal(f) {
   const chatLines = (f.messages || []).slice(-6)
     .filter((m) => (m.text || '').trim())
     .map((m) => `${m.role === 'user' ? meName : '我'}：${String(m.text).slice(0, 50)}`);
-  const sys = `${f.persona || ''}\n\n`
+  const sys = `${personaLang(f)}\n\n`
     + `【身份】「我」是你自己，「${meName}」是他。你不是他，不要替他说，也不要假装是他。\n`
     + `【环境】现在是 ${timeOf(Date.now())}，${weekday(new Date())}。\n`
     + '【说话要讲道理】\n- 时间、地点、正在做的事，要和【环境】以及前面说过的话对得上；拿不准就别提具体时间\n'
@@ -7796,7 +7805,7 @@ function anniversaryToday(f) {
 }
 
 async function genLifeLocal(f) {
-  const sys = `${f.persona || ''}\n\n${memorySysFor(f)}\n现在是 ${timeOf(Date.now())}。`
+  const sys = `${personaLang(f)}\n\n${memorySysFor(f)}\n现在是 ${timeOf(Date.now())}。`
     + '写一句今天你生活里刚发生的小事，就一句，20~45 字，具体（什么声音、什么味道、谁说的话），'
     + '不要感想、不要升华、不要跟他有关、不要提问、不加引号。只输出这一句。';
   return cleanLine(await quickChat([{ role: 'system', content: sys }]), 80);
@@ -7804,7 +7813,7 @@ async function genLifeLocal(f) {
 
 async function genAnnivLocal(f, occasion) {
   const meName = state.me.name || '他';
-  const sys = `${f.persona || ''}\n\n${memorySysFor(f)}\n`
+  const sys = `${personaLang(f)}\n\n${memorySysFor(f)}\n`
     + `【身份】「我」是你自己，「${meName}」是他。\n`
     + `今天是「${occasion}」。你想起来这件事，主动发一条消息给他。\n`
     + '要求：1~3 句，短，口语；可以甜、可以嘴硬、可以假装不在意；说一件具体的旧事'
@@ -7814,7 +7823,7 @@ async function genAnnivLocal(f, occasion) {
 
 async function genReminderLocal(f, what) {
   const meName = state.me.name || '他';
-  const sys = `${f.persona || ''}\n\n现在是 ${timeOf(Date.now())}。\n`
+  const sys = `${personaLang(f)}\n\n现在是 ${timeOf(Date.now())}。\n`
     + `【身份】「我」是你自己，「${meName}」是他。\n`
     + `他之前让你到点提醒他一件事：「${what}」。现在时间到了。\n`
     + '用你自己的语气提醒他，1~2 句，20~40 字，直接说事；不要写「提醒您」「温馨提示」，不要加引号。只输出这句话。';
@@ -7826,7 +7835,7 @@ async function genDiaryLocal(f) {
   const lines = (f.messages || []).slice(-6)
     .filter((m) => (m.text || '').trim())
     .map((m) => `${m.role === 'user' ? meName : '我'}：${String(m.text).slice(0, 50)}`);
-  const sys = `${f.persona || ''}\n\n${memorySysFor(f)}\n`
+  const sys = `${personaLang(f)}\n\n${memorySysFor(f)}\n`
     + `现在是 ${weekday(new Date())} ${timeOf(Date.now())}。\n`
     + `【身份】「我」是你自己，「${meName}」是他。你只写自己的日记，不要替他说话。\n`
     + (lines.length ? `你们最近聊过这些（只当背景，别抄原话）：\n${lines.join('\n')}\n\n` : '')
@@ -7876,7 +7885,7 @@ async function autoMomentBy(author) {
       + '不写配图说明，不加引号，不提“朋友圈”三个字，不提问；最多一个 emoji；直接输出正文，最多两段。';
   try {
     const text = cleanBlock(await quickChat([
-      { role: 'system', content: `${author.persona}\n\n`
+      { role: 'system', content: `${personaLang(author)}\n\n`
         + (chatLines.length
           ? `你和他的私聊最近是这样（可以当素材，但不要写成流水账，也别提“他跟我说”“刚才聊到”）：\n${chatLines.join('\n')}\n\n`
           : '')
