@@ -749,7 +749,8 @@ darkMedia.addEventListener('change', () => {
 
 
 /** 图片地址：新格式是 @blob:<文件>，走服务器；老数据还是 data: 直接内联。 */
-const SKIN_IDS = ['default', 'sakura', 'forest', 'ocean', 'paper'];
+const SKIN_IDS = ['default', 'sakura', 'forest', 'ocean', 'paper',
+  'grape', 'peach', 'teal', 'moon'];
 
 function renderSkinChips() {
   const cur = state.settings.skin || 'default';
