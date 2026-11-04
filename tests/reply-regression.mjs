@@ -888,6 +888,25 @@ try {
     const sys = buildMessages(f, f, null, new Map())[0].content;
     return !sys.includes('【语言·最高优先级】');
   `);
+  await check('英文关键词也触发照片（中文列表 + selfie）', `
+    await resetCase({ imageOn: true, imageBaseUrl: 'https://x.test/v1', imageApiKey: 'sk',
+      imageChance: 0, imageTriggers: '自拍' });
+    f.messages.push({ id: 'm-en', role: 'user', text: 'Send me a SELFIE please', ts: Date.now() });
+    buildMessages(f, f, null, new Map());
+    if (f.__photoThisTurn !== true) return false;
+    // 普通英文句子不该触发
+    await resetCase({ imageOn: true, imageBaseUrl: 'https://x.test/v1', imageApiKey: 'sk',
+      imageChance: 0, imageTriggers: '自拍' });
+    f.messages.push({ id: 'm-en2', role: 'user', text: 'how are you today', ts: Date.now() });
+    buildMessages(f, f, null, new Map());
+    return f.__photoThisTurn !== true;
+  `);
+  await check('自定义英文关键词时不再塞内置词', `
+    await resetCase({ imageOn: true, imageBaseUrl: 'https://x.test/v1', imageApiKey: 'sk',
+      imageChance: 0, imageTriggers: 'shoot me, 拍我' });
+    const cfg = photoCfgFor(f);
+    return cfg.triggers.includes('shoot me') && !cfg.triggers.includes('selfie');
+  `);
   await check('她只写 [[照片:…]] 不写字：不加开场白，照片照发', `
     await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
       imageApiKey: 'sk-img', imageChance: 100, imageTriggers: '自拍' });

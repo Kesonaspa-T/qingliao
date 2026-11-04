@@ -2604,8 +2604,15 @@ function photoCfgFor(friend) {
     .filter((x) => typeof x === 'string' && x)
     .slice(0, 6);
   let triggers = String(has('imageTriggers') ? own.imageTriggers : (state.settings.imageTriggers || ''))
-    .split(/[,，、;；\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20);
+    // 只按逗号/分号拆：英文关键词可能是词组（shoot me），按空格拆就废了
+    .split(/[,，、;；]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20);
   if (!triggers.length) triggers = PHOTO_DEFAULT_TRIGGERS.slice();
+  // 只填了中文关键词时，把英文的默认词也带上：跟她说英文时「selfie」也得能触发。
+  // 想完全自己控制英文词，就往列表里加任意一个英文词即可。
+  else if (!triggers.some((w) => /[a-z]/i.test(w))) {
+    triggers = triggers.concat(PHOTO_EN_TRIGGERS);
+  }
+  triggers = [...new Set(triggers)].slice(0, 20);
   const globalChance = Number((state.settings || {}).imageChance ?? 15);
   return {
     // 全局总开关 + 这个角色自己的开关（false = 这个角色不发照片）
@@ -2623,8 +2630,9 @@ function photoCfgFor(friend) {
   };
 }
 
-/** 关键词一个都没填时的兜底：他说要看照片就该发，不用先教一遍关键词。 */
-const PHOTO_DEFAULT_TRIGGERS = ['自拍', '照片', '看看你', '拍一张'];
+/** 关键词一个都没填时的兜底：他说要看照片就该发，不用先教一遍关键词（中英文都认）。 */
+const PHOTO_DEFAULT_TRIGGERS = ['自拍', '照片', '看看你', '拍一张', 'selfie', 'photo', 'pic', 'picture'];
+const PHOTO_EN_TRIGGERS = ['selfie', 'photo', 'pic', 'picture'];
 
 /** 他这一句是不是在让她「画」（画画走简笔画，和生图是两件事）。 */
 function wantsDoodleText(text) {
@@ -2861,7 +2869,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
   let photoOk = false;
   let photoTrigger = '';
   if (photoCfg.on && photoCfg.ready && !askedToDraw) {
-    photoTrigger = photoCfg.triggers.find((w) => w && lastUserText.includes(w)) || '';
+    const lowText = String(lastUserText || '').toLowerCase();
+    photoTrigger = photoCfg.triggers.find((w) => w && lowText.includes(String(w).toLowerCase())) || '';
     const photoRoll = Math.random() * 100 < photoCfg.chance;
     photoOk = !!(photoTrigger || (photoCfg.chance > 0 && photoRoll));
   }
