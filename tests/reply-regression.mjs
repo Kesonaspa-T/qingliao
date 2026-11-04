@@ -692,7 +692,7 @@ try {
       return peers.slice(0, iPic).every((m) => !String(m.text || '').includes('[[照片'));
     } finally { genImage = realGen; shrinkPhoto = realShrink; }
   `);
-  await check('她发照片：模型没补话就兜底一句，别光秃秃挂张图', `
+  await check('她发照片：模型没补话就不硬加预设台词（图就图）', `
     await resetCase({ delayOn: false, imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
       imageApiKey: 'sk', imageChance: 0, imageTriggers: '自拍' });
     const realGen = genImage; const realShrink = shrinkPhoto;
@@ -705,7 +705,8 @@ try {
       const iPic = peers.findIndex((m) => m.image);
       if (iPic < 0) return false;
       const after = peers[iPic + 1];
-      return !!after && !!after.text && after.text.length <= 20;
+      // 以后只发模型自己写的那句；没写就不补「拍好啦」这种预设
+      return !after || !/拍好啦|喏，刚拍的|拍得不太好/.test(after.text || '');
     } finally { genImage = realGen; shrinkPhoto = realShrink; }
   `);
   await check('她发照片：生图的时候也能照常聊天，状态是「正在拍照…」', `

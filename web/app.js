@@ -4070,7 +4070,6 @@ let photoErrorAt = 0;
  * 她要真的发一张照片：后台调生图接口 → 压成 2048 的 JPEG 存进消息 → 贴到聊天里。
  * 十几秒到一分钟，所以不挡文字（文字先到，图好了再出现），失败只在当前聊天里提示一句。
  */
-const PHOTO_AFTERWORD_FALLBACK = ['拍好啦。', '喏，刚拍的。', '拍得不太好……'];
 /** 最近一次「剥完标记什么都不剩」的模型原文（随 _diag 发一次，帮服务器侧排障） */
 let lastEmptyReply = '';
 
@@ -4117,10 +4116,9 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterw
       };
       if (active) redraw();
       persist();
-      // 照片落地之后，她再补一句：「拍好啦」「头发有点乱」。模型写在标记后面就用它的，
-      // 没写就随便补一句，别让照片光秃秃地挂在那儿。
-      const say = String(afterword || '').trim()
-        || PHOTO_AFTERWORD_FALLBACK[Math.floor(Math.random() * PHOTO_AFTERWORD_FALLBACK.length)];
+      // 照片落地之后，她再补一句——只用模型自己写在标记后面的那句。
+      // 没写就不补：生硬的预设台词（尤其语言不对）比沉默更突兀。
+      const say = String(afterword || '').trim();
       if (say && alive()) {
         await sleep(600 + Math.random() * 600);
         insert({ id: uid('m'), role: 'peer', authorId, text: say.slice(0, 80), ts: ts + 1 + Math.floor(Math.random() * 400) });
