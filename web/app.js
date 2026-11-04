@@ -2653,6 +2653,42 @@ function recentChatContext(friend, limit = 5) {
   }).join('\n');
 }
 
+/**
+ * 这张照片「拍的是什么」——决定机位。
+ *
+ * 以前提示词里写死「单人出镜，像自拍」，所以她说什么都发一张自拍；
+ * 说了脚受伤，发的还是同一个角度的全身自拍。这里按描述判断三类：
+ *   selfie 她自己；detail 某个具体的东西/部位的特写；casual 没说清，随手拍。
+ * 中英文都认：人设是英文的角色，描述本来就是英文写的。
+ */
+const PHOTO_SELFIE_RE = /自拍|对着镜头|看镜头|镜头前|比耶|举着手机|\bselfie\b|\bfront[- ]camera\b|\blooking at the camera\b|\bfacing the camera\b/i;
+// 只认「明确在说某个部位 / 伤」，或者干脆写明了特写、近景、第一人称视角。
+// 收窄是有意的：把「在街上」「花了二十块」这种也判成特写，会拍出没有人的图。
+const PHOTO_DETAIL_ZH = /脚|足踝|脚踝|脚趾|腿|膝盖|小腿|手|手指|手腕|手掌|胳膊|手臂|肩|腰|肚子|脖子|锁骨|伤|淤青|淤血|红印|抓痕|疤|绷带|创可贴|膏药|指甲|特写|近景|俯拍/;
+const PHOTO_DETAIL_EN = /\b(foot|feet|heel|ankle|toes?|legs?|knees?|thighs?|calf|hands?|fingers?|wrist|palm|arms?|shoulders?|waist|belly|stomach|neck|collarbone|injur\w*|wounds?|bruis\w*|scratch\w*|scars?|bandag\w*|plaster|close[- ]?ups?|pov|first[- ]person)\b/i;
+
+function photoShotKind(scene) {
+  const t = String(scene || '');
+  if (!t.trim()) return 'casual';
+  if (PHOTO_SELFIE_RE.test(t)) return 'selfie';
+  if (PHOTO_DETAIL_ZH.test(t) || PHOTO_DETAIL_EN.test(t)) return 'detail';
+  return 'casual';
+}
+
+/** 给生图模型的「机位」那一行：不许默认自拍，也不许每张都同一个角度。 */
+function photoShotLine(kind) {
+  if (kind === 'detail') {
+    return '机位：这一张不是自拍——手机就对着「画面」里说的那个东西（部位 / 东西 / 地方），'
+      + '近距离特写或近景，第一人称视角（像自己低头、举起手机去拍它）；'
+      + '她的脸不要占画面主体，也不要为了拍它摆成全身站姿；画面里不要出现第二个人。';
+  }
+  if (kind === 'selfie') {
+    return '机位：这一张是自拍——手机举起来对着自己看镜头，画面里只有她一个人。';
+  }
+  return '机位：按「画面」那句决定镜头对着什么、离多近；没写清楚就随手拍一张，'
+    + '不要默认拍成自拍，也不要每次都同一个角度（近景 / 特写 / 侧脸 / 俯拍都行）。';
+}
+
 /** 一张照片最终发给生图模型的提示词：画风 + 人物 + 最近聊的 + 这一幕。 */
 function buildPhotoPrompt(scene, friend, cfgIn, opts) {
   const cfg = cfgIn || photoCfgFor(friend);
@@ -2679,13 +2715,19 @@ function buildPhotoPrompt(scene, friend, cfgIn, opts) {
   if (persona) lines.push('人物：' + name + '——' + persona);
   const ctx = safe ? '' : recentChatContext(friend, 5);
   if (ctx) lines.push('最近的对话（只用来对上上下文，不要把聊天原文画进图里）：\n' + ctx);
-  lines.push('画面：' + String(scene || '对着镜头自拍').slice(0, 400));
-  lines.push('要求：单人出镜，像用手机随手拍／自拍的，构图自然、有生活气；画面里不要出现文字、logo、水印。');
+  const sceneText = String(scene || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+  lines.push('画面：' + (sceneText || '随手拍一张'));
+  lines.push(photoShotLine(photoShotKind(sceneText)));
+  lines.push('要求：画面里只有她一个人（不要出现第二个人），像用手机当场拍的，构图自然、有生活气；画面里不要出现文字、logo、水印。');
   if (safe) {
     lines.push('另外：日常、干净的生活照，衣着完整，正常室内/室外场景；不要裸露、不要性暗示、不要亲密接触。');
   }
   if (cfg.refs && cfg.refs.length) {
-    lines.push('参考图里就是她本人：只换场景、动作和衣服，脸型、五官、发型、肤色、年龄必须和参考图一致。');
+    // 参考图最容易带偏的地方：模型会把参考图里的站姿、机位、构图一起抄过来，
+    // 于是每张都是同一个姿势的自拍。这里把「参考图只定长相」说死。
+    lines.push('参考图里就是她本人，但只用它来定「长什么样」：脸型、五官、发型、发色、肤色、年龄、身材比例要和参考图一致。'
+      + '参考图里的姿势、动作、站姿、机位、构图、背景、衣服一律不要照抄，这些全部按上面「画面」和「机位」重新来；'
+      + '「画面」写的是特写或局部时，不要把参考图里的全身站姿搬过来。');
   }
   return lines.join('\n');
 }
@@ -2895,21 +2937,29 @@ function buildMessages(friend, conv, nudge, imgMap) {
       + (photoTrigger
         ? `他这一句提到了「${photoTrigger}」，这一条你发一张照片给他。`
         : '这一条你可以发一张照片。')
-      + '\n格式：先说一句话，另起一行写 [[照片:画面描述]]（描述写具体：你在哪、穿什么、在做什么、什么表情、什么光）。'
+      + '\n格式：先说一句话，另起一行写 [[照片:画面描述]]（描述写具体：镜头对着什么、你在哪、穿什么、在做什么、什么光）。'
       + (photoLang
         ? ('\n照片要等一会儿才真的发到他那儿：所以前面先用 ' + photoLang + ' 说一句“等一下 / 马上拍”，**别说“发给你了”“拍好了”**。'
           + '\n标记后面一定要再补一句（也用 ' + photoLang + '，写你自己会说的话），那句会等照片到了之后才发出去。')
         : ('\n照片要等一会儿才真的发到他那儿：所以前面先说「等我一下」「我这就拍」，**别说「发给你了」「拍好了」**。'
           + '\n标记后面一定要再补一句（「拍好啦」「头发有点乱」），那句会等照片到了之后才发出去。'))
-      + '\n例：[[照片:傍晚在书店柜台后面，米白色粗针织开衫，头发用夹子夹起来，捧着热可可，侧头看镜头，暖光]]'
+      + '\n例（只学写法，不要照抄内容）：[[照片:傍晚在书店柜台后面，米白色粗针织开衫，头发用夹子夹起来，捧着热可可，侧头看镜头，暖光]]'
       + (photoCfg.prompt
         ? '\n【主人写的生图规则（怎么判断该发、发什么，按这个来）】\n' + String(photoCfg.prompt).slice(0, 1500)
         : '')
       + (photoCfg.refs.length
         ? `\n【参考图】这次会把你之前存的 ${photoCfg.refs.length} 张参考图一起交给生图模型。`
-          + '描述里只写这一张要换成的场景、动作、衣服；长相、发型、肤色要和参考图一致，不要重新编长相。'
+          + '描述里只写这一张要换成的场景、动作、衣服和机位；长相、发型、肤色要和参考图一致，不要重新编长相，'
+          + '也不要把参考图里那个姿势再写一遍（她会一直摆同一个姿势，就是这里没写清）。'
         : '')
       + '\n规矩：\n'
+      // 这一条最容易被忽略：以前描述只要求写「你在哪、穿什么、什么表情」，
+      // 于是不管聊什么，写出来都是自拍。现在先让她决定「这张拍的是什么」。
+      + '- 写之前先想清楚**这张拍的是什么**：\n'
+      + '　· 他要看你的样子 / 你自己想发张自拍 → 写明是自拍（举着手机对着自己）；\n'
+      + '　· 你要给他看某个具体的东西（脚上的伤、手上的口子、桌上的饭、窗外的雨、你养的猫）→ '
+      + '就写那个东西的特写和机位，例如「坐在床边低头拍脚踝侧面，红了一小块」，**不要又写成自拍**；\n'
+      + '　· 别每张都同一个机位：上一张是自拍，这一张就换个角度（近景、特写、侧脸、俯拍）\n'
       + '- 拍的内容要接得上你刚说的话；不是你眼前的东西就别硬编\n'
       + '- **文字一定要有**：先说一句话，再把 [[照片:…]] 另起一行；不要只发一张光秃秃的照片\n'
       + '- 只写「给你看」不算发出，必须写 [[照片:…]] 才会真的发出去\n'
@@ -4056,7 +4106,8 @@ async function genPhotoScene(friend, trigger) {
   try {
     const text = await quickChat([
       { role: 'system', content: '你在帮一个角色决定「这一张照片拍什么」，写给文生图模型用。\n'
-        + '只输出一句中文描述（不超过 80 字）：她在哪、穿什么、在做什么、什么表情、什么光。\n'
+        + '只输出一句中文描述（不超过 80 字）：先说清这张拍的是什么（她自己，还是某个东西 / 部位的特写），'
+        + '再说在哪、什么机位、什么光。\n'
         + '不要引号、不要解释、不要编号。' },
       { role: 'user', content: '角色：' + ((friend && friend.name) || '她') + '\n人设：'
         + String((friend && friend.persona) || '').slice(0, 300) + '\n最近聊的：\n' + (recent || '（没聊什么）')
@@ -4099,7 +4150,7 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterw
     try {
       let desc = String(scene || '').trim();
       if (!desc) desc = await genPhotoScene(conv, trigger);
-      if (!desc) desc = trigger || '对着镜头自拍';
+      if (!desc) desc = trigger || '随手拍一张，画面自然';
       const dataUrl = await genPhoto(desc, conv, cfg);
       if (!alive()) return;                 // 这一轮被取消/替换了：图就不发了
       const thumb = await shrinkPhoto(dataUrl, 420, 0.72);

@@ -759,6 +759,42 @@ try {
     const ps = buildPhotoPrompt('窗边', f, cfg, { safe: true });
     return ps.includes('二次元画风') && ps.includes('粗描线');
   `);
+  // 以前提示词里写死「单人出镜，像自拍」，于是她说什么都发同一个角度的自拍：
+  // 说了脚受伤，发来的还是全身自拍。这里锁住「机位按描述走」这条。
+  await check('拍照：说了脚上的伤，拍的是特写不是自拍', `
+    await resetCase({ imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageModel: 'gpt-image-2' });
+    f.settings = { imageOn: true, refs: [], imageRefs: ['@blob:ref.jpg'] };
+    const cfg = photoCfgFor(f); cfg.refs = ['@blob:ref.jpg'];
+    const hurt = buildPhotoPrompt('坐在床边低头拍脚踝侧面，红了一小块，暖光', f, cfg);
+    if (!hurt.includes('不是自拍')) return false;                 // 明确不许拍成自拍
+    if (!hurt.includes('特写')) return false;
+    if (hurt.includes('像用手机随手拍／自拍的')) return false;      // 那句写死自拍的话必须没了
+    const en = buildPhotoPrompt('close-up of my heel, red bruise', f, cfg);
+    if (!en.includes('不是自拍')) return false;                   // 英文描述也要认
+    // 明说要自拍时，还是要自拍
+    const selfie = buildPhotoPrompt('举着手机在健身房自拍，运动背心', f, cfg);
+    if (!selfie.includes('这一张是自拍')) return false;
+    if (selfie.includes('不是自拍')) return false;
+    // 没说清就别默认自拍，也别每次都一个角度
+    const vague = buildPhotoPrompt('在厨房煮面', f, cfg);
+    return vague.includes('不要默认拍成自拍') && vague.includes('同一个角度');
+  `);
+  await check('拍照：有参考图时不照抄参考图的姿势和机位', `
+    await resetCase({ imageOn: true, imageBaseUrl: ${JSON.stringify(site + '/v1')},
+      imageApiKey: 'sk', imageModel: 'gpt-image-2' });
+    f.settings = { imageOn: true, imageRefs: ['@blob:ref1.jpg', '@blob:ref2.jpg'] };
+    const cfg = photoCfgFor(f);
+    const p = buildPhotoPrompt('在窗边站着', f, cfg);
+    if (!p.includes('姿势')) return false;                        // 不许照抄姿势
+    if (!p.includes('机位')) return false;                        // 机位要按描述重新来
+    if (!p.includes('构图')) return false;
+    if (!/长什么样/.test(p)) return false;                        // 参考图只用来定长相
+    // 没有参考图时不该出现这段（别把「参考图」三个字塞给纯文字生图）
+    f.settings = {};
+    const plain = buildPhotoPrompt('在窗边站着', f, photoCfgFor(f));
+    return !plain.includes('参考图里就是她本人');
+  `);
   await check('参考图太大：启动后压小并传成 blob，别把状态拖成几 MB', `
     await resetCase();
     f.settings = { imageRefs: ['data:image/png;base64,' + 'A'.repeat(700000), '@blob:ok.jpg'] };
