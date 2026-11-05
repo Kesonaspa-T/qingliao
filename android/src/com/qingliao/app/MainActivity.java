@@ -66,6 +66,7 @@ public class MainActivity extends Activity {
                 // 原生壳里不要网页自带的模拟状态栏（真机本来就有）
                 view.evaluateJavascript(
                         "document.documentElement.classList.add('native');", null);
+                maybeOpenPendingConv();
             }
         });
 
@@ -98,6 +99,8 @@ public class MainActivity extends Activity {
         web.addJavascriptInterface(new SessionBridge(this), "QingliaoSession");
         // 保存图片：WebView 里 <a download> 是无效的，图片要存进「下载」只能交给原生写
         web.addJavascriptInterface(new SaveBridge(this), "QingliaoSave");
+        // 系统通知：WebView 里没有 Web Notification，她发来消息只能由原生弹
+        web.addJavascriptInterface(new NotifyBridge(this), "QingliaoNotify");
 
         // 换网（Wi-Fi ↔ 流量）时 WebView 有时压根不派发 online 事件：原生盯一层，
         // 网络一变就让网页立刻去重连，别等下一轮 30 秒退避。
@@ -247,6 +250,68 @@ public class MainActivity extends Activity {
                         }
                     }
                 });
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        NotifyBridge.setForeground(true);
+        // 从后台切回来（可能是点通知进来的）：把待打开的聊处理掉
+        readIntentConv(getIntent());
+        maybeOpenPendingConv();
+    }
+
+    @Override
+    protected void onPause() {
+        NotifyBridge.setForeground(false);
+        super.onPause();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        NotifyBridge.setForeground(true);
+        readIntentConv(intent);
+        maybeOpenPendingConv();
+    }
+
+    /** 通知带过来的 kind / conv：点通知要直接进那个聊天。 */
+    private String pendingKind = "";
+    private String pendingConv = "";
+
+    private void readIntentConv(Intent intent) {
+        if (intent == null) return;
+        String kind = intent.getStringExtra("ql_kind");
+        String conv = intent.getStringExtra("ql_conv");
+        if (conv != null && !conv.isEmpty()) {
+            pendingKind = kind == null ? "friend" : kind;
+            pendingConv = conv;
+        }
+    }
+
+    private void maybeOpenPendingConv() {
+        final String conv = pendingConv;
+        if (conv == null || conv.isEmpty() || web == null) return;
+        pendingConv = "";
+        final String kind = pendingKind == null || pendingKind.isEmpty() ? "friend" : pendingKind;
+        // 页面可能还没初始化完：等一小会儿再调，调用失败的下一轮 onResume 也没了，所以重试几次
+        web.post(new Runnable() {
+            @Override
+            public void run() {
+                if (web == null) return;
+                String js = "window.qingliaoOpenConv && window.qingliaoOpenConv("
+                        + jsStr(kind) + "," + jsStr(conv) + ");";
+                web.evaluateJavascript("(function(){var t=0;var h=setInterval(function(){"
+                        + "if(window.qingliaoOpenConv){clearInterval(h);" + js + "}"
+                        + "else if(++t>20){clearInterval(h);}},250);})();", null);
+            }
+        });
+    }
+
+    private static String jsStr(String s) {
+        if (s == null) return "''";
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
     }
 
     @Override

@@ -2550,7 +2550,7 @@ function toApiMessage(m, allowImage, imgMap) {
     // 她自己照的/拍的 AI 照片：留一句画面描述，下一轮她才知道刚才发的是什么
     if (m.photo) {
       return { role, content: (m.text ? m.text + ' ' : '')
-        + (isUser ? '（他发了一张照片：' : '（你刚发了一张照片：')
+        + (isUser ? '（他发了一张照片：' : '（你发了一张照片：')
         + String(m.photo).slice(0, 90) + '）' };
     }
     // 只有用户消息能带图：接口明确不支持 assistant 里的 image_url
@@ -2989,7 +2989,7 @@ function buildMessages(friend, conv, nudge, imgMap) {
       + '- 这是手机拍的真实照片，不是画：描述里不要写「插画」「动漫」，也不要加解释和引号\n'
       + '- 描述要干净、能过审：不要裸露、性暗示、亲密接触、床上或浴室；就拍日常的样子\n'
       + '- 这一条只发照片，不要再画简笔画（<svg>）；他要「画」的时候是画图，不是拍照\n'
-      + '- 历史里的「（你刚发了一张照片：…）」是系统标注，你绝对不要照抄或输出';
+      + '- 历史里的「（你发了一张照片：…）」是系统标注，你绝对不要照抄或输出';
   }
 
   if (canDraw && !photoOk) {
@@ -3813,6 +3813,14 @@ function notifyPeer(name, text, convId, kind) {
       return;
     } catch (_) {}
   }
+  // Android 壳：WebView 里没有 Web Notification，只能交给原生弹（App 在前台时不弹）
+  const android = window.QingliaoNotify;
+  if (android && typeof android.show === 'function') {
+    try {
+      const inFront = typeof android.foreground === 'function' ? !!android.foreground() : false;
+      if (!inFront && android.show(name || '轻聊', body, kind || 'friend', convId || '')) return;
+    } catch (_) {}
+  }
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   if (!document.hidden) return;
   try { new Notification(name, { body: body.slice(0, 60) }); } catch (_) {}
@@ -3947,6 +3955,8 @@ async function readPhotoResponse(data) {
   const list = Array.isArray(data && data.data) ? data.data : [];
   const item = (list[0] && typeof list[0] === 'object') ? list[0] : {};
   const str = (x) => (typeof x === 'string' ? x : '');
+  // 有的中转会把它实际用的提示词回给我们：她之后要「记得」这张长什么样，这个比她自己写的准
+  lastPhotoRevised = str(item.revised_prompt);
   let out = str(item.b64_json) || str(item.b64) || str(item.base64) || str(item.image_base64);
   if (out && !/^data:/i.test(out)) {
     const fmt = String(item.output_format || item.format || 'png').toLowerCase();
@@ -4069,8 +4079,12 @@ async function photoEditRequest(url, key, body, images) {
 }
 
 /** 一次生图：返回 data:image/...；这个角色有参考图就走 edits，没有就走 generations。 */
+/** 生图接口回的 revised_prompt（没有就是空串）。 */
+let lastPhotoRevised = '';
+
 async function genImage(prompt, cfg) {
   const c = cfg || photoConfig();
+  lastPhotoRevised = '';
   if (!String(c.base || '').trim()) throw new Error('还没填生图接口地址');
   const body = { model: c.model, prompt: String(prompt || '').slice(0, 4000), n: 1 };
   if (c.size && c.size !== 'auto') body.size = c.size;
@@ -4095,6 +4109,33 @@ async function genImage(prompt, cfg) {
   }
   const data = await photoRequest(imagesEndpoint(c.base), c.key, body);
   return await readPhotoResponse(data);
+}
+
+/**
+ * 让她看一下自己刚生成的那张图，写一句「这张拍的是什么」。
+ *
+ * 聊天接口不支持 assistant 角色带图片，所以她本来只能记住自己写的画面描述——
+ * 万一图和她想的不一样（比如又拍成自拍），她说的话就和图对不上。
+ * 开着「让她看图」时，用同一个模型先看一眼，把这句话存进消息，下一轮她就知道自己发了什么。
+ * 失败就退回她自己写的描述，不影响发图。
+ */
+async function describeOwnPhoto(dataUrl, friend) {
+  if (!state.settings.vision) return '';
+  const key = (state.settings.apiKey || '').trim();
+  if (!key || !state.settings.model || !dataUrl) return '';
+  try {
+    const text = await quickChat([
+      { role: 'system', content: '你在看一张照片，用一句话说清这张照片拍的是什么（谁/什么东西、在哪、在做什么、镜头对着什么），'
+        + '不超过 40 字，不要引号、不要解释。' },
+      { role: 'user', content: [
+        { type: 'text', text: '这张照片拍的是什么？' },
+        { type: 'image_url', image_url: { url: dataUrl } },
+      ] },
+    ]);
+    return cleanLine(text, 60);
+  } catch (_) {
+    return '';
+  }
 }
 
 /** 生图返回的 PNG 动辄两三 MB：统一转 JPEG 再存，状态文件才不会被照片撑大。 */
@@ -4172,15 +4213,19 @@ function startPhotoJob(kind, conv, authorId, scene, trigger, canContinue, afterw
   (async () => {
     try {
       let desc = String(scene || '').trim();
+      lastPhotoRevised = '';                 // 上一次的 revised_prompt 不能漏到这一张
       if (!desc) desc = await genPhotoScene(conv, trigger);
       if (!desc) desc = trigger || '随手拍一张，画面自然';
       const dataUrl = await genPhoto(desc, conv, cfg);
       if (!alive()) return;                 // 这一轮被取消/替换了：图就不发了
+      // 她「看见」的版本：模型自己看图的描述 > 中转回的 revised_prompt > 她自己写的画面
+      const looked = await describeOwnPhoto(dataUrl, conv);
+      const caption = String(looked || lastPhotoRevised || desc).slice(0, 160);
       const thumb = await shrinkPhoto(dataUrl, 420, 0.72);
       // 落盘按 2048 存（和用户发的图一个标准）：中转出更大的图时聊天里也能点开看清
       const stored = await shrinkPhoto(dataUrl, 2048, 0.9);
       const msg = { id: uid('m'), role: 'peer', authorId, text: '',
-        image: stored, thumb, photo: String(desc).slice(0, 160), ts };
+        image: stored, thumb, photo: caption, ts };
       // 照片的时间戳取「决定要发」的那一刻：中间他插话了也不会插到他后面去
       const insert = (m) => {
         const at = conv.messages.findIndex((x) => Number(x.ts) > Number(m.ts));
@@ -9435,4 +9480,15 @@ window.addEventListener('unhandledrejection', (e) => {
   if (syncRunning && Date.now() - syncStartedAt > SYNC_STALE_MS) syncWake('unhandledrejection');
 });
 
-init();
+// Android 13+：通知权限得用户点一次同意。等页面起来一会儿再问，别一进来就弹系统框。
+async function askAndroidNotify() {
+  try {
+    const n = window.QingliaoNotify;
+    if (!n || typeof n.requestPermission !== 'function') return;
+    if (typeof n.allowed === 'function' && n.allowed()) return;
+    await new Promise((r) => setTimeout(r, 2500));
+    try { n.requestPermission(); } catch (_) {}
+  } catch (_) {}
+}
+
+init().then(askAndroidNotify).catch(() => {});

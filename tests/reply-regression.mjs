@@ -376,8 +376,8 @@ try {
       if (__imgCalls.length !== 1) return false;                              // 只花一张的钱
       if (!__imgCalls[0].includes('书店柜台后面') || !__imgCalls[0].includes('测试朋友')) return false;
       if (f.__photoThisTurn !== undefined) return false;                       // 这一轮的闸门用完要清掉
-      // 下一轮她要看得到「你刚发了一张照片：…」，不然她会忘了自己发过
-      return toApiMessage(pic).content.includes('你刚发了一张照片');
+      // 下一轮她要看得到「你发了一张照片：…」，不然她会忘了自己发过
+      return toApiMessage(pic).content.includes('你发了一张照片');
     } finally { genImage = realGen; shrinkPhoto = realShrink; }
   `);
   await check('她发照片：概率 0 且没关键词就不发，模型硬写标记也会被剥掉', `
@@ -810,6 +810,40 @@ try {
       delete window.QingliaoSave; window.fetch = realFetch; toast = realToast;
     }
     return true;
+  `);
+  // 她发完图，下一轮要「记得」自己发的是什么：以前只有她自己写的画面，这次起优先用她看到的那句。
+  await check('她能记得自己发的图：照片描述进上下文', `
+    await resetCase();
+    f.messages = [
+      { id: 'm1', role: 'user', text: '给我看看', ts: 1 },
+      { id: 'm2', role: 'peer', text: '喏', image: 'data:image/jpeg;base64,AAA', photo: '低头拍脚踝侧面，红了一小块', ts: 2 },
+      { id: 'm3', role: 'user', text: '怎么弄的', ts: 3 },
+    ];
+    const msgs = buildMessages(f, f, null, new Map());
+    const asst = msgs.filter((m) => m.role === 'assistant').map((m) => String(m.content)).join('\\n');
+    if (!asst.includes('你发了一张照片：低头拍脚踝侧面')) return false;
+    // 「让她看图」关着的时候不去打扰模型
+    state.settings.vision = false;
+    return (await describeOwnPhoto('data:image/jpeg;base64,AAA', f)) === '';
+  `);
+  // 安卓通知：App 在前台不弹（跟微信一样），切后台才交给原生
+  await check('通知：安卓前台不弹，后台才交给原生弹', `
+    await resetCase();
+    const said = [];
+    window.QingliaoNotify = { foreground: () => true, show: (t, b, k, c) => { said.push([t, b, k, c]); return true; } };
+    try {
+      notifyLast.clear();
+      notifyPeer('林小满', '在呢', 'f-test', 'friend');
+      if (said.length) return false;                       // 前台不弹
+      window.QingliaoNotify.foreground = () => false;
+      notifyLast.clear();
+      notifyPeer('林小满', '在呢', 'f-test', 'friend');
+      if (said.length !== 1) return false;                 // 后台弹
+      if (said[0][0] !== '林小满' || said[0][2] !== 'friend' || said[0][3] !== 'f-test') return false;
+      // 15 秒内同一个会话不重复弹
+      notifyPeer('林小满', '又一条', 'f-test', 'friend');
+      return said.length === 1;
+    } finally { delete window.QingliaoNotify; }
   `);
   // 以前提示词里写死「单人出镜，像自拍」，于是她说什么都发同一个角度的自拍：
   // 说了脚受伤，发来的还是全身自拍。这里锁住「机位按描述走」这条。
