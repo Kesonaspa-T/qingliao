@@ -1619,7 +1619,11 @@ html[data-theme="dark"] .row.me .quote-block { color: #fff; background: rgba(255
 }
 
 /* ---------------- 文件卡片（她生成的文档 / 代码） ---------------- */
-.bubble.file-bubble { background: transparent; padding: 0; box-shadow: none; }
+.bubble.file-bubble {
+  background: transparent; padding: 0; box-shadow: none;
+  /* 自己的气泡是白字、卡片是白底：不继承回来文件名就看不见了 */
+  color: var(--text);
+}
 .file-card {
   display: flex;
   align-items: center;
@@ -1629,9 +1633,11 @@ html[data-theme="dark"] .row.me .quote-block { color: #fff; background: rgba(255
   padding: 10px 12px;
   border-radius: 12px;
   background: #fff;
+  /* 自己的气泡里字是白的：卡片自带底色，字色必须自己定，否则文件名白底白字看不见 */
+  color: var(--text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
 }
-html[data-theme="dark"] .file-card { background: #232629; }
+html[data-theme="dark"] .file-card { background: #232629; color: var(--text); }
 .file-ico {
   flex: 0 0 auto;
   width: 40px; height: 40px;

@@ -920,6 +920,28 @@ try {
     const plain = buildMessages(f, f, null, null).map((m) => String(m.content)).join('\\n');
     return plain.includes('读不出文字') && !plain.includes('文件内容开始');
   `);
+  // 她只答应「我慢慢给你写」却没给文件 → 自动再要一次；真写了就不再要
+  await check('她只答应不写文件时，会自动再要一次', `
+    await resetCase({ delayOn: false });
+    const NL = String.fromCharCode(10);
+    f.messages.push({ id: 'u1', role: 'user', text: '把这篇论文写成总结文档', ts: Date.now() });
+    // 1) 只答应：应该自动再发一次请求
+    maybeWritePromisedFile('friend', f, '知道了，我看完给你写。', 'f-test', () => true);
+    await flush();
+    if (jobs.length !== 1) return false;
+    if (!JSON.stringify(jobs[0].body).includes('这一条必须把文件给出来')) return false;
+    // 2) 已经给了文件块：不再要
+    f.__fileNudgeAt = 0;
+    maybeWritePromisedFile('friend', f, '[[文件:a.md]]' + NL + '内容' + NL + '[[/文件]]', 'f-test', () => true);
+    await flush();
+    if (jobs.length !== 1) return false;
+    // 3) 他这条根本没要文件：不问
+    f.__fileNudgeAt = 0;
+    f.messages[f.messages.length - 1] = { id: 'u2', role: 'user', text: '今天好累', ts: Date.now() };
+    maybeWritePromisedFile('friend', f, '那就早点睡。', 'f-test', () => true);
+    await flush();
+    return jobs.length === 1;
+  `);
   // 以前提示词里写死「单人出镜，像自拍」，于是她说什么都发同一个角度的自拍：
   // 说了脚受伤，发来的还是全身自拍。这里锁住「机位按描述走」这条。
   await check('拍照：说了脚上的伤，拍的是特写不是自拍', `

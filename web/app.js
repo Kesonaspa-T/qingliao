@@ -3097,6 +3097,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
     + '\n- 扩展名用 .md .txt .docx .py .js .html .css .json .csv：作文 / 文章 / 报告优先 .docx（用「# 」开头写标题），'
     + '纯文本用 .txt 或 .md，代码用对应扩展名'
     + '\n- 他说「我要个文件」「发我文件」「给我个文件」时，也按这个来'
+    + '\n- **说到做到**：你要是说了「我给你写」「马上写」「慢慢写」「等我看完给你写」，就必须在这一条里把文件写出来；'
+    + '只答应、只解释「论文太长我慢慢写」而没给文件，等于没写，他最讨厌这个'
     + '\n- 内容必须完整，不许写「省略」「同上」，代码要能直接跑'
     + (wantsFile
       ? '\n- 他这次已经在要文件了：这一条回复里就要把文件给出来，不要只说「我写就写」「马上写」「写短一点」。'
@@ -3354,6 +3356,45 @@ async function prepareLinkDoc(conv) {
   } catch (e) {
     conv.__linkDoc = { url, error: String((e && e.message) || e).slice(0, 80) };
   }
+}
+
+/**
+ * 她说了「我给你写/马上写/慢慢写」然后就没了 —— 自动再要一次。
+ *
+ * 只在三个条件同时成立时才补：
+ *   1. 他这条消息确实在要东西（文档/总结/文章/报告/清单…）；
+ *   2. 她这条回复里没有文件块，而且很短（明显是拖延）；
+ *   3. 同一个会话 10 分钟内只补一次。
+ * 补出来的东西如果还是没有文件块，就安静地放弃，不要刷她的话。
+ */
+async function maybeWritePromisedFile(kind, conv, rawText, authorId, alive) {
+  try {
+    if (kind !== 'friend' || !conv) return;
+    const ask = convLastUserText(conv) || '';
+    if (!/(文档|文件|总结|摘要|文章|作文|报告|清单|教程|整理|导出|写一份|写一篇|写个|写一下|帮我写|写成)/.test(ask)) return;
+    if (/\[\[文件[:：]/.test(String(rawText || ''))) return;
+    if (String(rawText || '').length > 240) return;
+    const now = Date.now();
+    if (conv.__fileNudgeAt && now - conv.__fileNudgeAt < 10 * 60 * 1000) return;
+    conv.__fileNudgeAt = now;
+    const key = (state.settings.apiKey || '').trim();
+    if (!key) return;
+    const ctx = buildMessages(conv, conv,
+      '【系统】你刚说要给他写，但这一条里没有文件。现在直接把完整内容写出来：'
+      + '另起一行写 [[文件:文件名.扩展名]]，把完整内容写在下面，最后一行 [[/文件]]。'
+      + '不要再解释、不要再答应「马上写」，这一条必须把文件给出来。', null);
+    let job = null;
+    try {
+      job = streamOnce({ url: chatUrl(), key, body: buildBody(ctx, false) });
+      const res = await job.promise;
+      const out = String((res && res.content) || '').trim();
+      if (!out || !/\[\[文件[:：]/.test(out)) return;
+      if (typeof alive === 'function' && !alive()) return;
+      await deliver(kind, conv, out, authorId, undefined, alive);
+    } catch (_) {
+      // 补写失败就算了，别在聊天里留一堆错误
+    }
+  } catch (_) {}
 }
 
 async function runChat(friend, conv, r, nudge) {
@@ -3740,6 +3781,9 @@ async function startReply(kind, conv) {
     await deliver(kind, conv, text, authorId, undefined,
       () => !job.cancelled && rt.get(key) === r && convById(kind, conv.id) === conv);
     r.answeredUpTo = job.inputId;
+    // 光答应没给文件：再要一次（只在要文件、回复很短的时候）
+    await maybeWritePromisedFile(kind, conv, text, authorId,
+      () => !job.cancelled && rt.get(key) === r && convById(kind, conv.id) === conv);
     if (r.proactive && friend && friend.settings && friend.settings.nextProactive) {
       delete friend.settings.nextProactive;
       rememberFriendEdit(friend, { settings: { nextProactive: null } });
