@@ -152,6 +152,12 @@
               <path d="M4.6 17.4l4.5-4.3 3.1 2.9 2.6-2.1 4.6 3.9"/>
             </svg>
           </button>
+          <button class="tool" id="btnFile" aria-label="文件">
+            <svg viewBox="0 0 24 24" class="ic">
+              <path d="M13.6 3.6H7.2a2 2 0 0 0-2 2v12.8a2 2 0 0 0 2 2h9.6a2 2 0 0 0 2-2V8.8z"/>
+              <path d="M13.4 3.8v5h5"/>
+            </svg>
+          </button>
           <button class="send" id="btnSend">发送</button>
         </footer>
       </section>
@@ -179,6 +185,11 @@
     </nav>
 
     <input type="file" id="fileInput" accept="image/*" hidden>
+    <!-- 发文件给模型看：pdf / docx / csv / 表格 / 代码 / 纯文本 -->
+    <input type="file" id="fileDocInput" hidden
+      accept=".pdf,.docx,.doc,.csv,.tsv,.txt,.md,.json,.xml,.yaml,.yml,.html,.htm,.log,.ini,.sql,
+              .xlsx,.xls,.pptx,.ppt,.py,.js,.mjs,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.php,.sh,.toml,
+              text/*,application/pdf,application/json">
 
     <!-- 设置 -->
     <section class="sheet" id="sheet" aria-hidden="true">
@@ -632,6 +643,6 @@
   </div>
 </div>
 
-<script src="app.js?v=113"></script>
+<script src="app.js?v=114"></script>
 </body>
 </html>

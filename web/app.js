@@ -1881,9 +1881,13 @@ function fileCardEl(file) {
   nm.textContent = file.name || '文件';
   const meta = document.createElement('div');
   meta.className = 'file-meta';
-  let size = 0;
-  try { size = new Blob([file.text || '']).size; } catch (_) { size = (file.text || '').length; }
-  meta.textContent = humanSize(size) + (ext === 'docx' ? ' · Word 文档' : ' · ' + (ext || '文本'));
+  let size = Number(file.size) || 0;
+  if (!size) {
+    try { size = new Blob([file.text || '']).size; } catch (_) { size = (file.text || '').length; }
+  }
+  const label = { docx: 'Word 文档', doc: 'Word 文档', pdf: 'PDF', csv: '表格', xlsx: '表格',
+    xls: '表格', pptx: '幻灯片', ppt: '幻灯片', txt: '文本', md: '文本', json: 'JSON' }[ext] || (ext || '文本');
+  meta.textContent = humanSize(size) + ' · ' + label;
   main.append(nm, meta);
 
   const btns = document.createElement('div');
@@ -1892,17 +1896,33 @@ function fileCardEl(file) {
   save.type = 'button';
   save.className = 'file-btn primary';
   save.textContent = '保存';
-  save.addEventListener('click', (e) => { e.stopPropagation(); saveGeneratedFile(file); });
-  const copy = document.createElement('button');
-  copy.type = 'button';
-  copy.className = 'file-btn';
-  copy.textContent = '复制';
-  copy.addEventListener('click', (e) => {
+  save.addEventListener('click', async (e) => {
     e.stopPropagation();
-    copyText(file.text || '');
-    toast('内容已复制');
+    // 他发上来的真文件：从 blob / 本地库取回原文件再存
+    if (file.ref && !file.text) {
+      const url = await fileRefToDataUrl(file.ref, file.mime);
+      if (!url) return toast('这个文件没取到，再点一次试试');
+      try {
+        const res = await fetch(url);
+        const blob = await res.blob();
+        return downloadBlob(blob, file.name || '文件');
+      } catch (_) { return toast('保存失败'); }
+    }
+    saveGeneratedFile(file);
   });
-  btns.append(save, copy);
+  btns.append(save);
+  if (file.text) {
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'file-btn';
+    copy.textContent = '复制';
+    copy.addEventListener('click', (e) => {
+      e.stopPropagation();
+      copyText(file.text || '');
+      toast('内容已复制');
+    });
+    btns.append(copy);
+  }
   box.append(ico, main, btns);
   return box;
 }
@@ -2576,7 +2596,8 @@ function toApiMessage(m, allowImage, imgMap) {
     return { role, content: (m.text ? m.text + ' ' : '') + '（发了一张图片）' };
   }
   if (m.file && m.file.name) {
-    return { role, content: (m.text ? m.text + ' ' : '') + '（你发给他一个文件：' + m.file.name + '）' };
+    return { role, content: (m.text ? m.text + ' ' : '')
+      + (isUser ? '（他发来一个文件：' : '（你发给他一个文件：') + m.file.name + '）' };
   }
   return { role, content: m.text };
 }
@@ -2832,7 +2853,7 @@ function attachHerPhoto(prepared) {
   return true;
 }
 
-function buildMessages(friend, conv, nudge, imgMap) {
+function buildMessages(friend, conv, nudge, imgMap, fileMap) {
   const s = state.settings;
   const now = new Date();
   const isGroup = conv.members && Array.isArray(conv.members);
@@ -3102,7 +3123,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
   const out = [{ role: 'system', content: sys }];
   const limit = Math.max(6, Number(s.contextLimit) || 60);
   const history = conv.messages
-    .filter((m) => (m.text || m.image) && !m.recalled && m.role !== 'system')
+    // 只有文件、没有文字的消息也要进上下文（不然模型根本看不到这个文件）
+    .filter((m) => (m.text || m.image || m.file) && !m.recalled && m.role !== 'system')
     .slice(-limit);
 
   let imageBudget = 2;
@@ -3125,7 +3147,20 @@ function buildMessages(friend, conv, nudge, imgMap) {
       }
     } else {
       if (m.role === 'user' && typeof base.content === 'string') {
-        prepared.unshift({ role: 'user', content: '【' + meName + '】' + base.content });
+        const txt = '【' + meName + '】' + base.content;
+        const docUrl = (m.file && m.file.ref && fileMap) ? (fileMap.get(m.id) || '') : '';
+        if (docUrl) {
+          // 他发来的文件：真文件交给模型（DeepSeek 支持 file 内容块），模型自己读内容
+          prepared.unshift({
+            role: 'user',
+            content: [
+              { type: 'text', text: txt },
+              { type: 'file', file_data: docUrl, filename: String(m.file.name || '文件') },
+            ],
+          });
+        } else {
+          prepared.unshift({ role: 'user', content: txt });
+        }
       } else {
         // 她自己发的那张照片：先在这条 assistant 消息上做个记号，等历史拼完再按位置插图
         // （接口不收 assistant 带图，只能借一条 user 消息把图带进来）
@@ -3324,15 +3359,36 @@ async function prepareLinkDoc(conv) {
   }
 }
 
+function hasFileParts(convo) {
+  return (convo || []).some((m) => Array.isArray(m.content)
+    && m.content.some((p) => p && p.type === 'file'));
+}
+
+/** 把 file 内容块换成一句文字：中转不收文件时至少还能聊。 */
+function dropFileParts(convo) {
+  for (const m of (convo || [])) {
+    if (!Array.isArray(m.content)) continue;
+    const kept = m.content
+      .map((p) => (!p ? '' : p.type === 'text' ? String(p.text || '') : ''))
+      .filter(Boolean);
+    const hadFile = m.content.some((p) => p && p.type === 'file');
+    m.content = kept.join('\n').trim()
+      || (hadFile ? '（他发来一个文件，这个模型读不了文件内容）' : '');
+  }
+}
+
 async function runChat(friend, conv, r, nudge) {
   const check = () => { if (r.cancelled) throw new Error('回复已取消'); };
   check();
   if (!nudge) await prepareLinkDoc(conv);
   check();
   const imgMap = state.settings.vision ? await resolveImagesForModel(conv, 2) : null;
+  // 没有文件就别多一次异步跳转（会拖慢首字）
+  const hasDoc = (conv.messages || []).some((m) => m.role === 'user' && m.file && m.file.ref);
+  const fileMap = hasDoc ? await resolveFilesForModel(conv, 1) : null;
   check();
   r.inputId = lastUserId(conv);
-  const convo = buildMessages(friend, conv, nudge, imgMap);
+  const convo = buildMessages(friend, conv, nudge, imgMap, fileMap);
   const useTools = searchEnabled();
   const key = (state.settings.apiKey || '').trim();
   let text = '';
@@ -3348,6 +3404,7 @@ async function runChat(friend, conv, r, nudge) {
   };
 
   let netTries = 0;
+  let fileTries = 0;
   for (let round = 0; round < 3; round += 1) {
     check();
     painted = '';
@@ -3369,6 +3426,14 @@ async function runChat(friend, conv, r, nudge) {
         continue;
       }
       if (isNetError(e) && painted) { text = trimPartial(painted); break; }
+      // 中转不认 file 内容块（有的中转只转发图片）：把文件降级成文字标注再试一次，
+      // 至少别让整条消息发不出去。
+      if (!fileTries && hasFileParts(convo) && !isNetError(e)) {
+        fileTries += 1;
+        dropFileParts(convo);
+        round -= 1;
+        continue;
+      }
       throw e;
     }
     check();
@@ -5212,6 +5277,124 @@ $('#btnCoin').addEventListener('click', openCoinSheet);
 $('#btnImage').addEventListener('click', async () => {
   const data = await pickImage({ max: 1024, quality: 0.8 });
   if (data) sendImage(data);
+});
+
+/* ---------------- 发文件（给模型看） ---------------- */
+
+const DOC_MAX_BYTES = 8 * 1024 * 1024;   // 8MB：再大就 base64 塞不进请求了
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ''));
+    fr.onerror = () => reject(fr.error || new Error('读不了这个文件'));
+    fr.readAsDataURL(file);
+  });
+}
+
+/** 文件存哪：连服务器就传成 @blob:（不进 state，别把状态撑成几 MB）；单机放 IndexedDB。 */
+async function storeDocFile(dataUrl, mime) {
+  if (isCloud()) {
+    const ref = await uploadImage(dataUrl);          // 同一个 /api/blob 接口，服务端现在收任何类型
+    if (ref && ref.startsWith('@blob:')) return ref;
+    return dataUrl;
+  }
+  try {
+    if (await IdbStore.available()) {
+      const key = 'doc:' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      await IdbStore.set(key, dataUrl);
+      return '@idb:' + key;
+    }
+  } catch (_) {}
+  return dataUrl;
+}
+
+/** @blob: / @idb: / data: 一律取回 data URL，交给模型当 file 内容块。 */
+async function fileRefToDataUrl(ref, mime) {
+  const r = String(ref || '');
+  if (!r) return '';
+  if (r.startsWith('data:')) return r;
+  if (r.startsWith('@idb:')) {
+    try { return String((await IdbStore.get(r.slice(5))) || ''); } catch (_) { return ''; }
+  }
+  if (r.startsWith('@blob:')) {
+    try {
+      const res = await apiFetch('/api/blob/' + encodeURIComponent(r.slice(6)), { timeout: 30000 });
+      if (!res.ok) return '';
+      const blob = await res.blob();
+      const buf = await blobToDataUrl(blob);
+      if (!buf) return '';
+      // 服务器按扩展名给的类型可能不准，用消息里记的 mime 覆盖一下
+      const want = String(mime || '').trim();
+      if (want && !buf.startsWith('data:' + want)) return buf.replace(/^data:[^;]*/, 'data:' + want);
+      return buf;
+    } catch (_) { return ''; }
+  }
+  return '';
+}
+
+/** 最近 1 个用户发来的文件（文件大，不重复塞） */
+async function resolveFilesForModel(conv, budget = 1) {
+  const map = new Map();
+  const list = (conv && conv.messages) || [];
+  let left = budget;
+  for (let i = list.length - 1; i >= 0 && left > 0; i -= 1) {
+    const m = list[i];
+    if (m.role !== 'user' || !m.file || !m.file.ref) continue;
+    if (Number(m.file.size) > DOC_MAX_BYTES) continue;    // 太大的不给模型，别把请求撑爆
+    left -= 1;
+    const url = await fileRefToDataUrl(m.file.ref, m.file.mime);
+    if (url) map.set(m.id, url);
+  }
+  return map;
+}
+
+async function sendDocFile(file) {
+  const conv = currentConv();
+  if (!conv || !file) return;
+  if (file.size > DOC_MAX_BYTES) {
+    toast('文件太大了（上限 8 MB），换个小点的');
+    return;
+  }
+  let dataUrl = '';
+  try {
+    dataUrl = await fileToDataUrl(file);
+  } catch (_) {
+    toast('这个文件读不了');
+    return;
+  }
+  if (!dataUrl) return toast('这个文件读不了');
+  const kind = state.conv.kind;
+  const msg = {
+    id: uid('m'), role: 'user', text: '', ts: Date.now(),
+    file: {
+      name: String(file.name || '文件').slice(0, 120),
+      size: Number(file.size) || 0,
+      mime: String(file.type || '').slice(0, 80),
+      ref: await storeDocFile(dataUrl, file.type),
+    },
+  };
+  conv.messages.push(msg);
+  clearReadMark();
+  renderMessage(msg, { conv, kind });
+  scrollBottom(true);
+  lastActivity = Date.now();
+  if (kind === 'group' && isCloud()) saveHint = 'social';
+  persist();
+  renderConversations();
+  afterUserMessage(kind, conv);
+}
+
+$('#btnFile').addEventListener('click', () => {
+  const input = $('#fileDocInput');
+  if (!input) return;
+  input.value = '';
+  input.click();
+});
+$('#fileDocInput').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (f) sendDocFile(f);
 });
 
 /* ---------------- 消息菜单 ---------------- */

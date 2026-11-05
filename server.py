@@ -406,15 +406,63 @@ BLOB_DIR = os.path.join(DATA_DIR, "blobs")
 
 
 def _b64_part(data_url):
+    """只认图片：给「参考图 multipart」那条路用。"""
     m = re.match(r"^data:image/([a-zA-Z0-9+.-]+);base64,(.+)$", data_url or "", re.S)
     if not m:
         return None, None
     return m.group(1).lower(), m.group(2)
 
 
+_EXT_BY_MIME = {
+    "image/jpeg": "jpg", "image/png": "png",
+    "image/webp": "webp", "image/gif": "gif",
+    "application/pdf": "pdf",
+    "application/json": "json",
+    "text/plain": "txt", "text/csv": "csv", "text/markdown": "md",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.ms-powerpoint": "ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "application/zip": "zip",
+}
+_SAFE_MIME_EXT = re.compile(r"^[a-z0-9]{2,8}$")
+
+
+def _data_url_parts(data_url):
+    """拆任意 data:<mime>;base64,<...>；返回 (mime, b64)。"""
+    m = re.match(r"^data:([a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+)?;base64,(.+)$", data_url or "", re.S)
+    if not m:
+        return None, None
+    mime = (m.group(1) or "application/octet-stream").lower()
+    return mime, m.group(2)
+
+
+def _ext_for_mime(mime, fallback="bin"):
+    mime = (mime or "").split(";")[0].strip().lower()
+    if mime in _EXT_BY_MIME:
+        return _EXT_BY_MIME[mime]
+    if mime.startswith("image/"):
+        ext = mime.split("/", 1)[1].replace("jpeg", "jpg")
+        return ext if _SAFE_MIME_EXT.match(ext) else "png"
+    if mime.startswith("text/"):
+        ext = mime.split("/", 1)[1]
+        return ext if _SAFE_MIME_EXT.match(ext) else "txt"
+    return fallback
+
+
+_MIME_BY_EXT = {v: k for k, v in _EXT_BY_MIME.items() if k.startswith(("image/", "text/", "application/"))}
+
+
 def save_blob(uid, data_url):
-    """把 data:image/... 存成文件，返回 @blob:<sha1>.<ext>；失败返回 None。"""
-    ext, b64 = _b64_part(data_url)
+    """把 data:<任意类型>;base64,... 存成文件，返回 @blob:<sha1>.<ext>；失败返回 None。
+
+    以前只收图片（聊天里的图）；现在也收用户发来的文件（pdf / docx / csv…），
+    所以类型按 data URL 里的 mime 推断。
+    """
+    mime, b64 = _data_url_parts(data_url)
+    ext = _ext_for_mime(mime) if mime else None
     if not ext or not b64:
         return None
     try:
@@ -423,7 +471,7 @@ def save_blob(uid, data_url):
         return None
     if not raw or len(raw) > 40 * 1024 * 1024:
         return None
-    name = hashlib.sha1(raw).hexdigest() + "." + ("jpg" if ext == "jpeg" else ext)
+    name = hashlib.sha1(raw).hexdigest() + "." + ext
     d = os.path.join(BLOB_DIR, uid)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, name)
@@ -436,7 +484,7 @@ def save_blob(uid, data_url):
 def blob_path(uid, name):
     if not name or not name.isascii() or len(name) > 64:
         return None
-    if not re.match(r"^[0-9a-f]{40}\.[a-z0-9]{2,4}$", name):
+    if not re.match(r"^[0-9a-f]{40}\.[a-z0-9]{2,8}$", name):
         return None
     path = os.path.join(BLOB_DIR, uid, name)
     return path if os.path.exists(path) else None
@@ -920,9 +968,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(404, {"error": "not found"})
             with open(fp, "rb") as fh:
                 data = fh.read()
-            ctype = "image/gif" if name.endswith(".gif") else (
-                "image/png" if name.endswith(".png") else (
-                    "image/webp" if name.endswith(".webp") else "image/jpeg"))
+            ext = name.rsplit(".", 1)[-1].lower()
+            ctype = _MIME_BY_EXT.get(ext) or {
+                "jpg": "image/jpeg", "gif": "image/gif", "png": "image/png",
+                "webp": "image/webp", "pdf": "application/pdf", "txt": "text/plain",
+                "csv": "text/csv", "md": "text/markdown", "json": "application/json",
+            }.get(ext, "application/octet-stream")
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
@@ -953,7 +1004,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "messages": counts,
                     "last_social_at": st.get("social", {}).get("lastTickAt"),
                     "version": st.get("version"),
-                    "build": "v54",
+                    "build": "v55",
                     "groupUsage": {g.get("id"): {"total": group_usage(g)[0], "counts": group_usage(g)[1],
                                    "limits": group_limits(st.get("settings") or {})} for g in st.get("groups") or []},
                 })
