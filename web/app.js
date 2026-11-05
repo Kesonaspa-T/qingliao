@@ -2596,8 +2596,9 @@ function toApiMessage(m, allowImage, imgMap) {
     return { role, content: (m.text ? m.text + ' ' : '') + '（发了一张图片）' };
   }
   if (m.file && m.file.name) {
+    const unread = (isUser && m.file.unread) ? '（这个文件读不出文字，你只看到文件名，别假装看过内容）' : '';
     return { role, content: (m.text ? m.text + ' ' : '')
-      + (isUser ? '（他发来一个文件：' : '（你发给他一个文件：') + m.file.name + '）' };
+      + (isUser ? '（他发来一个文件：' : '（你发给他一个文件：') + m.file.name + '）' + unread };
   }
   return { role, content: m.text };
 }
@@ -2853,7 +2854,7 @@ function attachHerPhoto(prepared) {
   return true;
 }
 
-function buildMessages(friend, conv, nudge, imgMap, fileMap) {
+function buildMessages(friend, conv, nudge, imgMap) {
   const s = state.settings;
   const now = new Date();
   const isGroup = conv.members && Array.isArray(conv.members);
@@ -3147,20 +3148,16 @@ function buildMessages(friend, conv, nudge, imgMap, fileMap) {
       }
     } else {
       if (m.role === 'user' && typeof base.content === 'string') {
-        const txt = '【' + meName + '】' + base.content;
-        const docUrl = (m.file && m.file.ref && fileMap) ? (fileMap.get(m.id) || '') : '';
-        if (docUrl) {
-          // 他发来的文件：真文件交给模型（DeepSeek 支持 file 内容块），模型自己读内容
-          prepared.unshift({
-            role: 'user',
-            content: [
-              { type: 'text', text: txt },
-              { type: 'file', file_data: docUrl, filename: String(m.file.name || '文件') },
-            ],
-          });
-        } else {
-          prepared.unshift({ role: 'user', content: txt });
+        let txt = '【' + meName + '】' + base.content;
+        // 他发来的文件：内容已经在发的时候抽成文字了，这里直接当正文给它
+        const docText = (m.file && m.file.text) ? String(m.file.text) : '';
+        if (docText) {
+          const cut = docText.length > 30000
+            ? docText.slice(0, 30000) + '\n……（文件太长，后面省略了）'
+            : docText;
+          txt += '\n\n【文件内容开始｜' + String(m.file.name || '文件') + '】\n' + cut + '\n【文件内容结束】';
         }
+        prepared.unshift({ role: 'user', content: txt });
       } else {
         // 她自己发的那张照片：先在这条 assistant 消息上做个记号，等历史拼完再按位置插图
         // （接口不收 assistant 带图，只能借一条 user 消息把图带进来）
@@ -3359,36 +3356,15 @@ async function prepareLinkDoc(conv) {
   }
 }
 
-function hasFileParts(convo) {
-  return (convo || []).some((m) => Array.isArray(m.content)
-    && m.content.some((p) => p && p.type === 'file'));
-}
-
-/** 把 file 内容块换成一句文字：中转不收文件时至少还能聊。 */
-function dropFileParts(convo) {
-  for (const m of (convo || [])) {
-    if (!Array.isArray(m.content)) continue;
-    const kept = m.content
-      .map((p) => (!p ? '' : p.type === 'text' ? String(p.text || '') : ''))
-      .filter(Boolean);
-    const hadFile = m.content.some((p) => p && p.type === 'file');
-    m.content = kept.join('\n').trim()
-      || (hadFile ? '（他发来一个文件，这个模型读不了文件内容）' : '');
-  }
-}
-
 async function runChat(friend, conv, r, nudge) {
   const check = () => { if (r.cancelled) throw new Error('回复已取消'); };
   check();
   if (!nudge) await prepareLinkDoc(conv);
   check();
   const imgMap = state.settings.vision ? await resolveImagesForModel(conv, 2) : null;
-  // 没有文件就别多一次异步跳转（会拖慢首字）
-  const hasDoc = (conv.messages || []).some((m) => m.role === 'user' && m.file && m.file.ref);
-  const fileMap = hasDoc ? await resolveFilesForModel(conv, 1) : null;
   check();
   r.inputId = lastUserId(conv);
-  const convo = buildMessages(friend, conv, nudge, imgMap, fileMap);
+  const convo = buildMessages(friend, conv, nudge, imgMap);
   const useTools = searchEnabled();
   const key = (state.settings.apiKey || '').trim();
   let text = '';
@@ -3404,7 +3380,6 @@ async function runChat(friend, conv, r, nudge) {
   };
 
   let netTries = 0;
-  let fileTries = 0;
   for (let round = 0; round < 3; round += 1) {
     check();
     painted = '';
@@ -3426,14 +3401,6 @@ async function runChat(friend, conv, r, nudge) {
         continue;
       }
       if (isNetError(e) && painted) { text = trimPartial(painted); break; }
-      // 中转不认 file 内容块（有的中转只转发图片）：把文件降级成文字标注再试一次，
-      // 至少别让整条消息发不出去。
-      if (!fileTries && hasFileParts(convo) && !isNetError(e)) {
-        fileTries += 1;
-        dropFileParts(convo);
-        round -= 1;
-        continue;
-      }
       throw e;
     }
     check();
@@ -5295,6 +5262,434 @@ $('#btnImage').addEventListener('click', async () => {
   if (data) sendImage(data);
 });
 
+/* ---------------- 读文件：把内容抽成文字 ---------------- */
+
+/**
+ * 模型读文件的正确做法。
+ *
+ * DeepSeek 的 `file` 内容块只支持**图片**（JPEG / PNG / GIF / WebP），不解析 PDF / docx，
+ * 把文档塞进去只会 400 或者被忽略。所以这里在客户端把文件抽成纯文本，再当普通文字交给模型——
+ * 这样任何模型、任何中转都能「看」到文件内容，也不再依赖服务端存 blob。
+ */
+
+/** 解压一段 deflate（raw 或 zlib）。老浏览器没有 DecompressionStream 时返回空。 */
+async function inflateBytes(bytes, raw) {
+  if (typeof DecompressionStream !== 'function') return null;
+  try {
+    const ds = new DecompressionStream(raw ? 'deflate-raw' : 'deflate');
+    const stream = new Blob([bytes]).stream().pipeThrough(ds);
+    const buf = await new Response(stream).arrayBuffer();
+    return new Uint8Array(buf);
+  } catch (_) {
+    return null;
+  }
+}
+
+/** 极简 zip 读取（docx / xlsx / pptx 都是 zip）：返回 Map<文件名, Uint8Array>。 */
+async function unzipAll(buf) {
+  const bytes = new Uint8Array(buf);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // 找 End of Central Directory
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= 0 && i > bytes.length - 65558; i -= 1) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) return new Map();
+  const count = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const out = new Map();
+  for (let n = 0; n < count && p + 46 <= bytes.length; n += 1) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true);
+    const compSize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true);
+    const extraLen = dv.getUint16(p + 30, true);
+    const commentLen = dv.getUint16(p + 32, true);
+    const localOff = dv.getUint32(p + 42, true);
+    const name = new TextDecoder('utf-8').decode(bytes.subarray(p + 46, p + 46 + nameLen));
+    p += 46 + nameLen + extraLen + commentLen;
+    if (!compSize) continue;
+    // 本地文件头
+    if (dv.getUint32(localOff, true) !== 0x04034b50) continue;
+    const lName = dv.getUint16(localOff + 26, true);
+    const lExtra = dv.getUint16(localOff + 28, true);
+    const start = localOff + 30 + lName + lExtra;
+    const raw = bytes.subarray(start, start + compSize);
+    let data = null;
+    if (method === 0) data = raw;
+    else if (method === 8) data = await inflateBytes(raw, true);
+    if (data) out.set(name, data);
+  }
+  return out;
+}
+
+function xmlText(xml) {
+  return String(xml || '')
+    .replace(/<w:p[ >]/g, '\n<w:p ')          // Word 段落
+    .replace(/<a:p[ >]/g, '\n<a:p ')          // PPT 段落
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'").replace(/&amp;/g, '&')
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+const zipDecoder = (u8) => new TextDecoder('utf-8').decode(u8);
+
+async function docxToText(buf) {
+  const files = await unzipAll(buf);
+  const doc = files.get('word/document.xml');
+  if (!doc) return '';
+  return xmlText(zipDecoder(doc));
+}
+
+async function pptxToText(buf) {
+  const files = await unzipAll(buf);
+  const slides = [...files.keys()].filter((k) => /^ppt\/slides\/slide\d+\.xml$/.test(k))
+    .sort((a, b) => Number(a.match(/(\d+)/)[1]) - Number(b.match(/(\d+)/)[1]));
+  const parts = [];
+  for (const k of slides) {
+    const t = xmlText(zipDecoder(files.get(k)));
+    if (t) parts.push('【第 ' + (parts.length + 1) + ' 页】\n' + t);
+  }
+  return parts.join('\n\n');
+}
+
+async function xlsxToText(buf) {
+  const files = await unzipAll(buf);
+  const sharedRaw = files.get('xl/sharedStrings.xml');
+  const shared = [];
+  if (sharedRaw) {
+    const s = zipDecoder(sharedRaw);
+    s.replace(/<si>([\s\S]*?)<\/si>/g, (_, inner) => {
+      shared.push(xmlText(inner));
+      return '';
+    });
+  }
+  const sheets = [...files.keys()].filter((k) => /^xl\/worksheets\/sheet\d+\.xml$/.test(k))
+    .sort((a, b) => Number(a.match(/(\d+)/)[1]) - Number(b.match(/(\d+)/)[1]));
+  const out = [];
+  for (let si = 0; si < sheets.length; si += 1) {
+    const s = zipDecoder(files.get(sheets[si]));
+    const rows = [];
+    s.replace(/<row[^>]*>([\s\S]*?)<\/row>/g, (_, rowXml) => {
+      const cells = [];
+      rowXml.replace(/<c([^>]*)>([\s\S]*?)<\/c>/g, (__, attrs, cellXml) => {
+        const isShared = /t="s"/.test(attrs);
+        const inline = /<is>([\s\S]*?)<\/is>/.exec(cellXml);
+        const v = /<v>([\s\S]*?)<\/v>/.exec(cellXml);
+        let val = '';
+        if (inline) val = xmlText(inline[1]);
+        else if (v) val = isShared ? (shared[Number(v[1])] || '') : String(v[1]);
+        if (val) cells.push(val.replace(/\s+/g, ' ').trim());
+        return '';
+      });
+      if (cells.length) rows.push(cells.join('\t'));
+      return '';
+    });
+    if (rows.length) out.push('【工作表 ' + (si + 1) + '】\n' + rows.join('\n'));
+  }
+  return out.join('\n\n');
+}
+
+/** 从一段 PDF 字典文本里取出某个键的子字典（正确处理嵌套的 << >>）。 */
+function pdfSubDict(text, key) {
+  const i = String(text || '').search(new RegExp('\\/' + key + '\\s*<<'));
+  if (i < 0) return '';
+  const start = text.indexOf('<<', i);
+  let depth = 0;
+  for (let p = start; p < text.length - 1; p += 1) {
+    if (text[p] === '<' && text[p + 1] === '<') { depth += 1; p += 1; continue; }
+    if (text[p] === '>' && text[p + 1] === '>') {
+      depth -= 1;
+      p += 1;
+      if (depth === 0) return text.slice(start + 2, p - 1);
+    }
+  }
+  return '';
+}
+
+/** 解析 PDF 的 ToUnicode CMap：beginbfchar / beginbfrange → Map<码值, 字符>。 */
+function parseCMap(text) {
+  const map = new Map();
+  if (!text) return map;
+  // 一个字符占几个字节：<00> <FF> 是 1，<0000> <FFFF> 是 2（Type0/CID 一般是 2）
+  const cs = /begincodespacerange\s*<([0-9A-Fa-f]+)>/.exec(text);
+  map.width = cs ? Math.max(1, Math.round(cs[1].length / 2)) : 2;
+  text.replace(/beginbfchar([\s\S]*?)endbfchar/g, (_, body) => {
+    body.replace(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g, (___, src, dst) => {
+      map.set(parseInt(src, 16), hexToStr(dst));
+      return '';
+    });
+    return '';
+  });
+  text.replace(/beginbfrange([\s\S]*?)endbfrange/g, (_, body) => {
+    body.replace(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<([0-9A-Fa-f]+)>|\[([^\]]*)\])/g,
+      (___, a, b, _c, base, list) => {
+        const from = parseInt(a, 16);
+        const to = parseInt(b, 16);
+        if (list != null) {
+          list.replace(/<([0-9A-Fa-f]+)>/g, (h) => {
+            map.set(from + (map.size % 100000), hexToStr(h));
+            return h;
+          });
+          let k = from;
+          list.replace(/<([0-9A-Fa-f]+)>/g, (h) => {
+            map.set(k, hexToStr(h)); k += 1; return h;
+          });
+          return '';
+        }
+        const start = parseInt(base || '0', 16);
+        for (let j = from; j <= to && j - from < 65535; j += 1) {
+          map.set(j, String.fromCharCode(start + (j - from)));
+        }
+        return '';
+      });
+    return '';
+  });
+  return map;
+}
+
+/** PDF：把页面内容流里的文字取出来。以「能用」为准，不追求排版。 */
+async function pdfToText(buf) {
+  const bytes = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer);
+  const latin = new TextDecoder('latin1').decode(bytes);
+  const objRe = /(\d+)\s+(\d+)\s+obj\b/g;
+  const objs = [];
+  let m;
+  while ((m = objRe.exec(latin))) objs.push({ num: Number(m[1]), start: objRe.lastIndex });
+  for (let i = 0; i < objs.length; i += 1) {
+    objs[i].end = i + 1 < objs.length ? objs[i + 1].start : latin.length;
+  }
+  const byNum = new Map();
+  for (const o of objs) if (!byNum.has(o.num)) byNum.set(o.num, o);
+
+  const dictText = (o) => {
+    const body = latin.slice(o.start, o.end);
+    const sIdx = body.indexOf('stream');
+    return sIdx >= 0 ? body.slice(0, sIdx) : body;
+  };
+
+  const streamOf = (o) => {
+    const body = latin.slice(o.start, o.end);
+    const sIdx = body.indexOf('stream');
+    if (sIdx < 0) return null;
+    let p = o.start + sIdx + 6;
+    if (latin[p] === '\r') p += 1;
+    if (latin[p] === '\n') p += 1;
+    const eIdx = latin.indexOf('endstream', p);
+    if (eIdx < 0) return null;
+    const dict = body.slice(0, sIdx);
+    // 优先按 /Length 精确切：DecompressionStream 对多出来的尾巴会直接报「Junk found」
+    let end = eIdx;
+    const lm = /\/Length\s+(\d+)(?!\s+\d+\s+R)/.exec(dict);
+    if (lm) {
+      const n = Number(lm[1]);
+      if (n > 0 && p + n <= bytes.length) end = p + n;
+    }
+    while (end > p && (bytes[end - 1] === 0x0a || bytes[end - 1] === 0x0d
+      || bytes[end - 1] === 0x20 || bytes[end - 1] === 0x00
+      || bytes[end - 1] === 0x09 || bytes[end - 1] === 0x0c)) end -= 1;
+    const data = bytes.subarray(p, end);
+    if (/\/FlateDecode/.test(dict)) return { dict, raw: data };
+    return { dict, raw: null, plain: data };
+  };
+
+  const streamText = new Map();
+  const textOfObj = async (o) => {
+    if (!o) return null;
+    if (streamText.has(o.num)) return streamText.get(o.num);
+    const st = streamOf(o);
+    let txt = null;
+    if (st && st.raw) {
+      const un = await inflateBytes(st.raw, false);
+      txt = un ? new TextDecoder('latin1').decode(un) : null;
+    } else if (st && st.plain) {
+      txt = new TextDecoder('latin1').decode(st.plain);
+    }
+    streamText.set(o.num, txt);
+    return txt;
+  };
+
+  const cmapCache = new Map();
+  const cmapOf = async (num) => {
+    if (cmapCache.has(num)) return cmapCache.get(num);
+    const map = parseCMap(await textOfObj(byNum.get(num)));
+    cmapCache.set(num, map);
+    return map;
+  };
+
+  const fontCmap = async (fontNum) => {
+    const o = byNum.get(fontNum);
+    if (!o) return new Map();
+    const tu = /\/ToUnicode\s+(\d+)\s+0\s+R/.exec(dictText(o));
+    return tu ? await cmapOf(Number(tu[1])) : new Map();
+  };
+
+  // 页面资源里的 /Font << /F1 5 0 R >>（可能是间接的 /Resources N 0 R）
+  const resourcesOf = (d) => {
+    const inline = pdfSubDict(d, 'Resources');
+    if (inline) return inline;
+    const ref = /\/Resources\s+(\d+)\s+0\s+R/.exec(d);
+    if (ref) {
+      const ro = byNum.get(Number(ref[1]));
+      if (ro) return dictText(ro);
+    }
+    return '';
+  };
+  const fontResOf = (res) => {
+    const map = new Map();
+    let body = pdfSubDict(res, 'Font');
+    if (!body) {
+      const ref = /\/Font\s+(\d+)\s+0\s+R/.exec(res);
+      if (ref) {
+        const fo = byNum.get(Number(ref[1]));
+        if (fo) body = dictText(fo);
+      }
+    }
+    body.replace(/\/([A-Za-z0-9]+)\s+(\d+)\s+0\s+R/g, (_, nm, num) => {
+      map.set(nm, Number(num));
+      return '';
+    });
+    return map;
+  };
+
+  const runContent = (content, fontRes) => {
+    let out = '';
+    let cur = null;
+    const re = /\/([A-Za-z0-9]+)\s+[\d.]+\s+Tf|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f\s]+)>\s*Tj|\(((?:\\.|[^\\()])*)\)\s*Tj|(T\*|Td|TD|ET)/g;
+    let mm;
+    while ((mm = re.exec(content))) {
+      const [, fname, arr, hex, lit, brk] = mm;
+      if (fname) {
+        const num = fontRes.get(fname);
+        cur = num != null ? fontCmapCache.get(num) || null : null;
+        continue;
+      }
+      if (brk) { out += '\n'; continue; }
+      if (arr != null) {
+        arr.replace(/<([0-9A-Fa-f\s]+)>|\(((?:\\.|[^\\()])*)\)/g, (_, h, l) => {
+          out += h ? decodeBytes(h.replace(/\s+/g, ''), cur, true) : decodeBytes(l, cur, false);
+          return h || l || '';
+        });
+        continue;
+      }
+      if (hex) out += decodeBytes(hex.replace(/\s+/g, ''), cur, true);
+      else if (lit != null) out += decodeBytes(lit, cur, false);
+    }
+    return out;
+  };
+
+  // 先把所有字体的 ToUnicode 都算好（内容流里是同步用的）
+  const fontCmapCache = new Map();
+  for (const o of objs) {
+    if (/\/ToUnicode\s+\d+\s+0\s+R/.test(dictText(o))) {
+      fontCmapCache.set(o.num, await fontCmap(o.num));
+    }
+  }
+
+  let out = '';
+  const pages = objs.filter((o) => /\/Type\s*\/Page\b/.test(dictText(o)));
+  const targets = pages.length ? pages : objs;
+  for (const o of targets) {
+    const d = dictText(o);
+    const fontRes = fontResOf(resourcesOf(d));
+    // 内容：/Contents N 0 R 或 /Contents [a 0 R b 0 R]
+    const nums = [];
+    const single = /\/Contents\s+(\d+)\s+0\s+R/.exec(d);
+    const many = /\/Contents\s*\[([^\]]*)\]/.exec(d);
+    if (single) nums.push(Number(single[1]));
+    else if (many) {
+      many[1].replace(/(\d+)\s+0\s+R/g, (_, n) => { nums.push(Number(n)); return ''; });
+    } else {
+      continue;
+    }
+    for (const n of nums) {
+      const txt = await textOfObj(byNum.get(n));
+      if (!txt) continue;
+      if (!/\bBT\b/.test(txt)) continue;
+      out += runContent(txt, fontRes) + '\n';
+    }
+  }
+  // 有些 PDF 的 ToUnicode 给的是「康熙部首」这种兼容字（⽂/⼤/⻆），归一化成正常汉字
+  return out.normalize('NFKC').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function hexToStr(hex) {
+  let s = '';
+  for (let i = 0; i + 3 < hex.length + 1 && i < hex.length; i += 4) {
+    const code = parseInt(hex.slice(i, i + 4), 16);
+    if (!isNaN(code)) s += String.fromCharCode(code);
+  }
+  return s;
+}
+
+/** PDF 里的字符串：有 ToUnicode 就按 2 字节码查表，否则按 1 字节 ASCII。 */
+function decodeBytes(src, cmap, isHex) {
+  if (cmap && cmap.size) {
+    const width = cmap.width || 2;
+    let s = '';
+    if (isHex) {
+      const step = width * 2;
+      for (let i = 0; i + step <= src.length; i += step) {
+        const code = parseInt(src.slice(i, i + step), 16);
+        if (!isNaN(code)) s += cmap.get(code) || '';
+      }
+      return s;
+    }
+    const bytes = unescapePdfString(src);
+    for (let i = 0; i + width <= bytes.length; i += width) {
+      let code = 0;
+      for (let k = 0; k < width; k += 1) code = (code << 8) | bytes.charCodeAt(i + k);
+      s += cmap.get(code) || '';
+    }
+    return s;
+  }
+  if (isHex) {
+    let s = '';
+    for (let i = 0; i < src.length; i += 2) {
+      const code = parseInt(src.slice(i, i + 2), 16);
+      if (!isNaN(code)) s += String.fromCharCode(code);
+    }
+    return s;
+  }
+  return unescapePdfString(src)
+    .replace(/[\u0000-\u0008\u000b-\u001f]/g, '')
+    .replace(/\u0009/g, ' ');
+}
+
+function unescapePdfString(s) {
+  return String(s || '')
+    .replace(/\\([nrtbf()\\])/g, (_, c) => ({ n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' }[c] || c))
+    .replace(/\\([0-7]{1,3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
+}
+
+const DOC_TEXT_EXT = /^(txt|md|markdown|csv|tsv|json|jsonl|xml|yaml|yml|html?|css|scss|js|mjs|cjs|ts|jsx|tsx|vue|py|java|c|h|cpp|hpp|cs|go|rs|rb|php|sh|bash|zsh|sql|log|ini|toml|conf|cfg|env|gitignore|makefile|dockerfile)$/;
+
+/** 入口：文件 → 纯文本。读不出来返回空串。 */
+async function extractDocText(file) {
+  const name = String((file && file.name) || '').toLowerCase();
+  const ext = name.indexOf('.') >= 0 ? name.split('.').pop() : '';
+  const type = String((file && file.type) || '');
+  let buf = null;
+  try { buf = await file.arrayBuffer(); } catch (_) { return ''; }
+  try {
+    if (DOC_TEXT_EXT.test(ext) || /^text\//.test(type) || ext === 'pdf2txt') {
+      return new TextDecoder('utf-8', { fatal: false }).decode(buf);
+    }
+    if (ext === 'docx') return await docxToText(buf);
+    if (ext === 'pptx') return await pptxToText(buf);
+    if (ext === 'xlsx') return await xlsxToText(buf);
+    if (ext === 'pdf') return await pdfToText(buf);
+  } catch (_) {
+    return '';
+  }
+  return '';
+}
+
 /* ---------------- 发文件（给模型看） ---------------- */
 
 const DOC_MAX_BYTES = 8 * 1024 * 1024;   // 8MB：再大就 base64 塞不进请求了
@@ -5349,22 +5744,6 @@ async function fileRefToDataUrl(ref, mime) {
   return '';
 }
 
-/** 最近 1 个用户发来的文件（文件大，不重复塞） */
-async function resolveFilesForModel(conv, budget = 1) {
-  const map = new Map();
-  const list = (conv && conv.messages) || [];
-  let left = budget;
-  for (let i = list.length - 1; i >= 0 && left > 0; i -= 1) {
-    const m = list[i];
-    if (m.role !== 'user' || !m.file || !m.file.ref) continue;
-    if (Number(m.file.size) > DOC_MAX_BYTES) continue;    // 太大的不给模型，别把请求撑爆
-    left -= 1;
-    const url = await fileRefToDataUrl(m.file.ref, m.file.mime);
-    if (url) map.set(m.id, url);
-  }
-  return map;
-}
-
 async function sendDocFile(file) {
   const conv = currentConv();
   if (!conv || !file) return;
@@ -5372,24 +5751,32 @@ async function sendDocFile(file) {
     toast('文件太大了（上限 8 MB），换个小点的');
     return;
   }
-  let dataUrl = '';
-  try {
-    dataUrl = await fileToDataUrl(file);
-  } catch (_) {
-    toast('这个文件读不了');
-    return;
-  }
-  if (!dataUrl) return toast('这个文件读不了');
   const kind = state.conv.kind;
+  toast('正在读文件…', 1500);
+  // 模型不解析文档（DeepSeek 的 file 块只收图片），所以这里先把内容抽成文字
+  let docText = '';
+  try { docText = await extractDocText(file); } catch (_) { docText = ''; }
+  docText = String(docText || '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
+  const shown = docText.slice(0, 40000);
   const msg = {
     id: uid('m'), role: 'user', text: '', ts: Date.now(),
     file: {
       name: String(file.name || '文件').slice(0, 120),
       size: Number(file.size) || 0,
       mime: String(file.type || '').slice(0, 80),
-      ref: await storeDocFile(dataUrl, file.type),
+      text: shown,
+      chars: docText.length,
+      unread: !docText,
     },
   };
+  // 原文件也存一份（点「保存」能拿回来）；抽不出文字不影响发出去
+  try {
+    const dataUrl = await fileToDataUrl(file);
+    if (dataUrl) msg.file.ref = await storeDocFile(dataUrl, file.type);
+  } catch (_) {}
+  if (!docText) {
+    toast('这个文件读不出文字（可能是扫描件/图片型 PDF），她只能看到文件名', 4000);
+  }
   conv.messages.push(msg);
   clearReadMark();
   renderMessage(msg, { conv, kind });

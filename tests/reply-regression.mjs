@@ -893,32 +893,32 @@ try {
       return said.length === 1;
     } finally { delete window.QingliaoNotify; }
   `);
-  // 发文件：消息里只存引用（别把几 MB 塞进 state），模型那边要变成 file 内容块
-  await check('发文件：带 ref 的消息，模型能收到 file 内容块', `
+  // 发文件：模型不解析文档，所以在发的时候把内容抽成文字，当正文给它
+  await check('发文件：内容抽成文字进上下文，读不出来要说实话', `
     await resetCase({ delayOn: false });
+    const realExtract = extractDocText;
     const realStore = storeDocFile;
+    extractDocText = async () => '这是论文正文。\\n第二段。';
     storeDocFile = async () => '@blob:abc123.pdf';
     try {
       const file = new File([new Uint8Array([37, 80, 68, 70])], 'report.pdf', { type: 'application/pdf' });
       await sendDocFile(file);
-    } finally { storeDocFile = realStore; }
+    } finally { extractDocText = realExtract; storeDocFile = realStore; }
     const msg = f.messages[f.messages.length - 1];
     if (!msg || !msg.file) return false;
-    if (msg.file.name !== 'report.pdf' || msg.file.ref !== '@blob:abc123.pdf') return false;
-    if (Number(msg.file.size) !== 4) return false;
-    if (JSON.stringify(msg).indexOf('data:application/pdf') >= 0) return false;   // 不能把文件本体塞进消息
-    // 有图/文件给模型时：user 消息带 file 内容块
-    const fileMap = new Map([[msg.id, 'data:application/pdf;base64,JVBERg==']]);
-    const msgs = buildMessages(f, f, null, null, fileMap);
-    const holders = msgs.filter((m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'file'));
-    if (holders.length !== 1) return false;
-    const part = holders[0].content.find((p) => p.type === 'file');
-    if (part.filename !== 'report.pdf') return false;
-    if (String(part.file_data).indexOf('data:application/pdf') !== 0) return false;
-    // 取不到文件时退回文字标注，别让消息变成空
-    const plain = buildMessages(f, f, null, null, null);
-    return plain.every((m) => typeof m.content === 'string')
-      && plain.some((m) => String(m.content).includes('report.pdf'));
+    if (msg.file.name !== 'report.pdf') return false;
+    if (msg.file.text !== '这是论文正文。\\n第二段。') return false;   // 内容存进消息（能同步）
+    if (msg.file.unread) return false;
+    // 上下文里要出现文件正文
+    const msgs = buildMessages(f, f, null, null);
+    const joined = msgs.map((m) => String(m.content)).join('\\n');
+    if (!joined.includes('文件内容开始') || !joined.includes('这是论文正文')) return false;
+    if (!joined.includes('report.pdf')) return false;
+    // 读不出文字时：要提醒模型「别假装看过」，不能让它编
+    f.messages[f.messages.length - 1].file.text = '';
+    f.messages[f.messages.length - 1].file.unread = true;
+    const plain = buildMessages(f, f, null, null).map((m) => String(m.content)).join('\\n');
+    return plain.includes('读不出文字') && !plain.includes('文件内容开始');
   `);
   // 以前提示词里写死「单人出镜，像自拍」，于是她说什么都发同一个角度的自拍：
   // 说了脚受伤，发来的还是全身自拍。这里锁住「机位按描述走」这条。
