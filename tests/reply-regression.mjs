@@ -760,17 +760,59 @@ try {
     return ps.includes('二次元画风') && ps.includes('粗描线');
   `);
   // 输入法：macOS 中文输入法下打英文，回车是「上屏」不是「发送」。
-  // Safari/WKWebView 这时 isComposing 常常已经是 false，只看它就会误发。
-  await check('回车：输入法上屏不发送，拼完字之后的回车才发送', `
-    await resetCase();
-    if (!isImeEnter({ key: 'Enter', isComposing: true })) return false;      // 正在拼字
-    if (!isImeEnter({ key: 'Enter', isComposing: false, keyCode: 229 })) return false;
-    inputEl.dispatchEvent(new CompositionEvent('compositionstart'));
-    if (!isImeEnter({ key: 'Enter', isComposing: false, keyCode: 13 })) return false;
+  // 不能只看 isComposing/keyCode（WKWebView 上两者都不可靠），改成「先记着，看这一 tick 有没有上屏事件」。
+  await check('回车：真回车发送，输入法上屏不发送', `
+    await resetCase({ delayOn: false });
+    inputEl.value = '在吗';
+    inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await advance(600);
+    if (jobs.length !== 1) return false;                       // 真回车：发出去了
+    await complete(0, '在呢'); await advance(20000);
+    // 上屏：keydown 之后紧跟着 compositionend → 撤销这次发送，字留在输入框
+    inputEl.value = 'hello';
+    inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     inputEl.dispatchEvent(new CompositionEvent('compositionend'));
-    if (!isImeEnter({ key: 'Enter', isComposing: false, keyCode: 13 })) return false;  // 刚上屏那一下
-    await advance(200);                                                       // 保护窗过去
-    return !isImeEnter({ key: 'Enter', isComposing: false, keyCode: 13 });
+    await advance(600);
+    return jobs.length === 1 && inputEl.value === 'hello';
+  `);
+  // 她自己发的照片：要像用户发的图一样，真的把图给模型看
+  await check('她发的照片会真的给模型看（vision 开着时）', `
+    await resetCase({ vision: true });
+    f.messages = [
+      { id: 'm1', role: 'user', text: '给我看看', ts: 1 },
+      { id: 'm2', role: 'peer', text: '喏', image: 'data:image/png;base64,AAAA', photo: '脚踝特写', ts: 2 },
+      { id: 'm3', role: 'user', text: '怎么弄的', ts: 3 },
+    ];
+    const imgMap = new Map([['m2', 'data:image/jpeg;base64,ZZZ']]);
+    const msgs = buildMessages(f, f, null, imgMap);
+    const withImg = msgs.filter((m) => Array.isArray(m.content));
+    if (withImg.length !== 1) return false;
+    if (withImg[0].role !== 'user') return false;              // 接口不收 assistant 带图，只能放 user
+    const parts = withImg[0].content;
+    const note = parts.find((p) => p && p.type === 'text' && String(p.text).includes('不是他发来的'));
+    if (!note) return false;                                   // 必须说清「这是她自己发的」
+    if (!String(note.text).includes('你')) return false;
+    if (!parts.some((p) => p && p.type === 'image_url' && p.image_url.url === 'data:image/jpeg;base64,ZZZ')) return false;
+    // 图要排在她那条消息后面，不能跑到她的回复前面去（那会变成「用户发的图」）
+    const herIdx = msgs.findIndex((m) => m.role === 'assistant' && String(m.content).includes('你发了一张照片'));
+    if (herIdx < 0) return false;
+    if (msgs.indexOf(withImg[0]) <= herIdx) return false;
+    // 角色顺序不能被破坏：不许出现连续两条 user
+    for (let i = 1; i < msgs.length; i += 1) {
+      if (msgs[i].role === 'user' && msgs[i - 1].role === 'user') return false;
+    }
+    // 她刚发完图、还没人回：照片是最后一条时也要带上（这条以前会被丢在 out 之外）
+    f.messages = [
+      { id: 'n1', role: 'user', text: '给我看看', ts: 1 },
+      { id: 'n2', role: 'peer', text: '喏', image: 'data:image/png;base64,AAAA', photo: '脚踝特写', ts: 2 },
+    ];
+    const tail = buildMessages(f, f, null, new Map([['n2', 'data:image/jpeg;base64,ZZZ']]));
+    const lastImg = tail.filter((m) => Array.isArray(m.content));
+    if (lastImg.length !== 1) return false;
+    if (!lastImg[0].content.some((p) => p && p.type === 'image_url')) return false;
+    // 没有图（vision 关着）时不能凭空多出这条
+    const plain = buildMessages(f, f, null, null);
+    return plain.filter((m) => Array.isArray(m.content)).length === 0;
   `);
   await check('回车发送开关：关掉后回车只换行，打开才发出去', `
     await resetCase({ delayOn: false });

@@ -1528,10 +1528,9 @@ function openReplyBox(m, c, card) {
   send.addEventListener('click', submit);
   cancel.addEventListener('click', () => box.remove());
   input.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' || isImeEnter(e)) return;
+    if (e.key !== 'Enter' || isImeKey(e)) return;
     e.preventDefault(); submit();
   });
-  trackIme(input);
   box.append(input, send, cancel);
   card.appendChild(box);
   setTimeout(() => input.focus(), 30);
@@ -1557,10 +1556,9 @@ function toggleCommentBox(momentId, card) {
 
   btn.addEventListener('click', submit);
   input.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' || isImeEnter(e)) return;
+    if (e.key !== 'Enter' || isImeKey(e)) return;
     e.preventDefault(); submit();
   });
-  trackIme(input);
 
   box.append(input, btn);
   card.append(box);
@@ -2512,9 +2510,22 @@ async function resolveImagesForModel(conv, budget = 2) {
   const map = new Map();
   const list = (conv && conv.messages) || [];
   let left = budget;
-  for (let i = list.length - 1; i >= 0 && left > 0; i -= 1) {
+  // 她自己刚发的那张也要给模型看（单独 1 张额度）：她要能像看用户发的图一样看到自己发出去的照片。
+  let herLeft = 1;
+  const limit = Math.max(6, Number(state.settings.contextLimit) || 60);
+  const floor = Math.max(0, list.length - limit);
+  for (let i = list.length - 1; i >= floor && (left > 0 || herLeft > 0); i -= 1) {
     const m = list[i];
-    if (!m.image || m.role !== 'user' || m.sticker) continue;   // 她发的图、双方的表情包都不占额度
+    if (!m.image || m.sticker) continue;        // 表情包两边都只用文字标注
+    if (m.role !== 'user') {
+      if (m.photo && herLeft > 0) {
+        herLeft -= 1;
+        const url = await imageForModel(m.image);
+        if (url) map.set(m.id, url);
+      }
+      continue;
+    }
+    if (left <= 0) continue;
     left -= 1;
     // 刚发出去的这一张：第一次给模型看原图（仅存在内存里，不落盘／不上传），
     // 之后同一张就只用服务端存的 1568 副本，原图在第一次请求后丢掉。
@@ -2796,6 +2807,31 @@ function personaLang(f) {
   return p + '\n\n【语言】你写的所有文字都必须用 ' + lang + '，不要用中文。';
 }
 
+/** 她发的那张照片：按位置插在她那条消息后面，并且说清「这是你自己发的」，不是对方发的。 */
+function attachHerPhoto(prepared) {
+  let idx = -1;
+  for (let i = prepared.length - 1; i >= 0; i -= 1) {
+    if (prepared[i] && prepared[i].__herPhoto) { idx = i; break; }
+  }
+  if (idx < 0) return false;
+  const url = prepared[idx].__herPhoto;
+  delete prepared[idx].__herPhoto;
+  const note = '（系统标注：下面这张图就是“你”（角色自己）刚才发出去的那张照片本身，不是他发来的。'
+    + '你已经看过它了，接着聊就行；不要复述画面，也不要说「你发了张图」这种话。）';
+  const imagePart = { type: 'image_url', image_url: { url } };
+  const next = prepared[idx + 1];
+  if (next && next.role === 'user') {
+    // 紧跟一条 user 消息：并进去，别造成「连续两条 user」（有些接口会直接报错）
+    const parts = Array.isArray(next.content)
+      ? next.content.slice()
+      : [{ type: 'text', text: String(next.content || '') }];
+    next.content = parts.concat([{ type: 'text', text: note }, imagePart]);
+  } else {
+    prepared.splice(idx + 1, 0, { role: 'user', content: [{ type: 'text', text: note }, imagePart] });
+  }
+  return true;
+}
+
 function buildMessages(friend, conv, nudge, imgMap) {
   const s = state.settings;
   const now = new Date();
@@ -3074,7 +3110,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const m = history[i];
     let allow = false;
-    if (m.image && imageBudget > 0) { allow = true; imageBudget -= 1; }
+    // 额度只算用户发来的图：她的照片走的是文字标注（真图另外挂），表情包也只标注
+    if (m.image && !m.sticker && m.role === 'user' && imageBudget > 0) { allow = true; imageBudget -= 1; }
     const base = toApiMessage(m, allow, imgMap);
     const qt = m.quote && m.quote.text ? '（引用 ' + m.quote.author + '：' + m.quote.text + '）' : '';
     if (qt && typeof base.content === 'string') base.content = qt + base.content;
@@ -3090,12 +3127,20 @@ function buildMessages(friend, conv, nudge, imgMap) {
       if (m.role === 'user' && typeof base.content === 'string') {
         prepared.unshift({ role: 'user', content: '【' + meName + '】' + base.content });
       } else {
+        // 她自己发的那张照片：先在这条 assistant 消息上做个记号，等历史拼完再按位置插图
+        // （接口不收 assistant 带图，只能借一条 user 消息把图带进来）
+        if (m.role === 'peer' && m.photo && imgMap && imgMap.get(m.id)) base.__herPhoto = imgMap.get(m.id);
         prepared.unshift(base);
       }
     }
   }
 
+  // 她刚发出去的那张照片：按位置插在她那条消息后面，让她真的「看见」自己发了什么。
+  // 必须在下面 push 进 out 之前做——照片是最后一条时这里会新插一条消息。
+  attachHerPhoto(prepared);
+
   for (const m of prepared) out.push(m);
+
   if (personaReminder) out.push({ role: 'system', content: personaReminder });
   if (nudge) out.push({ role: 'system', content: nudge });
   // 再在最后补一句：模型最容易看的就是倒数第一条
@@ -5035,21 +5080,17 @@ inputEl.addEventListener('keyup', (e) => {
 /**
  * 这一下回车是「发送」，还是「输入法在确认候选字」？
  *
- * macOS 中文输入法下打英文，按回车是「把字母原样上屏」——Safari/WKWebView 这时
- * 派发的 keydown 经常 isComposing 已经是 false（compositionend 先到一步），
- * 只看 isComposing 就会把上屏当成发送：别家软件能上屏，这里一敲回车就直接发出去了。
- * 所以自己再记一份拼字状态，并给 compositionend 之后留一个很短的窗口。
+ * macOS 中文输入法打英文时，按回车是把字母「上屏」：Safari/WKWebView 派发的 keydown
+ * 里 isComposing 常常已经是 false，而有些输入法下 keyCode 又恒等于 229（真回车也是 229）。
+ * 只看这两个判断都会出错——前者会误发，后者会彻底发不出去。
+ *
+ * 所以这里不猜：先记下「想发」，等一个 tick 再看。
+ *   - 真的是回车 → 这一 tick 里不会有别的动静 → 发；
+ *   - 其实是上屏 → 浏览器紧跟着会发 compositionend / input → 取消发送，字留在输入框里。
+ * 两种输入法行为都能覆盖，也不会因为某个标志位卡住而永远发不出去。
  */
-let imeComposing = false;
-let imeEndedAt = 0;
-function trackIme(el) {
-  if (!el) return;
-  el.addEventListener('compositionstart', () => { imeComposing = true; });
-  el.addEventListener('compositionend', () => { imeComposing = false; imeEndedAt = Date.now(); });
-}
-function isImeEnter(e) {
-  if (e && (e.isComposing || e.keyCode === 229)) return true;
-  return imeComposing || (Date.now() - imeEndedAt) < 150;
+function isImeKey(e) {
+  return !!(e && e.isComposing);
 }
 
 /** 回车直接发消息？设置里能改；没设过的时候桌面开、手机关（手机默认点「发送」）。 */
@@ -5059,28 +5100,44 @@ function enterSendOn() {
 }
 
 let lastEnterSendAt = 0;
+let pendingEnterSend = null;
+function cancelPendingEnter() {
+  if (pendingEnterSend) { clearTimeout(pendingEnterSend); pendingEnterSend = null; }
+}
 
 inputEl.addEventListener('keydown', (e) => {
   if (mentionKeydown(e)) return;
   if (e.key !== 'Enter') return;
-  if (e.shiftKey) return;              // Shift + 回车永远是换行
-  if (isImeEnter(e)) return;           // 输入法上屏：让字进输入框，不要发
-  if (!enterSendOn()) return;          // 设置里关掉了：回车换行，点「发送」才发
-  e.preventDefault();
+  if (e.shiftKey) return;               // Shift + 回车永远是换行
+  if (isImeKey(e)) return;              // 明确在拼字：这次回车归输入法
+  cancelPendingEnter();
+  if (!enterSendOn()) return;           // 设置里关掉了：回车换行，点「发送」才发
+  e.preventDefault();                   // 先别让它插换行
   lastEnterSendAt = Date.now();
-  send();
+  pendingEnterSend = setTimeout(() => {
+    pendingEnterSend = null;
+    send();
+  }, 0);
 });
+// 这一下回车如果其实是「上屏」，浏览器会紧跟着发这两个事件 → 撤掉刚才那次发送
+inputEl.addEventListener('compositionend', cancelPendingEnter);
+inputEl.addEventListener('input', (e) => {
+  // 只有「输入法把字填进来」这一类才说明刚才是上屏；普通输入（打字、补全）不要误伤
+  if (e && /Composition/.test(String(e.inputType || ''))) cancelPendingEnter();
+});
+inputEl.addEventListener('blur', cancelPendingEnter);
+
 // 有些手机输入法点「回车」根本不派发 keydown，只发一个换行输入事件：
-// 这种情况下也按设置里的开关处理，不然手机上开了「回车发送」还是没反应。
+// 这种情况也按设置里的开关处理，不然手机上开了「回车发送」还是没反应。
 inputEl.addEventListener('beforeinput', (e) => {
-  if (!e || e.inputType !== 'insertLineBreak') return;
-  if (!enterSendOn() || isImeEnter(e)) return;
-  if (Date.now() - lastEnterSendAt < 300) return;   // 上面那条 keydown 已经发过了
+  if (!e) return;
+  if (e.inputType !== 'insertLineBreak' && e.inputType !== 'insertParagraph') return;
+  if (!enterSendOn() || isImeKey(e)) return;
+  if (Date.now() - lastEnterSendAt < 300) return;   // 上面那条 keydown 已经处理过了
   e.preventDefault();
   lastEnterSendAt = Date.now();
   send();
 });
-trackIme(inputEl);
 
 sendBtn.addEventListener('click', () => {
   const conv = currentConv();
