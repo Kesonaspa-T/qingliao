@@ -5140,28 +5140,30 @@ inputEl.addEventListener('keyup', (e) => {
   if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) updateMentionPicker();
 });
 
-/* ---------------- 回车：输入法上屏 ≠ 发送 ---------------- */
+/* ---------------- 回车发送 ---------------- */
 
 /**
- * 这一下回车是「发送」，还是「输入法在确认候选字」？
+ * 回车发送，但**不跟输入法抢**。
  *
- * macOS 中文输入法打英文时，按回车是把字母「上屏」：Safari/WKWebView 派发的 keydown
- * 里 isComposing 常常已经是 false，而有些输入法下 keyCode 又恒等于 229（真回车也是 229）。
- * 只看这两个判断都会出错——前者会误发，后者会彻底发不出去。
+ * 来回踩过的坑：
+ *   1. 只看 isComposing → macOS 上把英文字母「上屏」的那下回车会误发；
+ *   2. 加上 keyCode === 229 → 有些输入法连真回车都是 229，直接一条都发不出去；
+ *   3. 在 keydown 里 preventDefault() → 有的输入法靠默认行为提交候选字，拦了等于把字吃掉，
+ *      看起来就是「回车没反应」。
  *
- * 所以这里不猜：先记下「想发」，等一个 tick 再看。
- *   - 真的是回车 → 这一 tick 里不会有别的动静 → 发；
- *   - 其实是上屏 → 浏览器紧跟着会发 compositionend / input → 取消发送，字留在输入框里。
- * 两种输入法行为都能覆盖，也不会因为某个标志位卡住而永远发不出去。
+ * 现在的做法：
+ *   - keydown 里**不拦默认行为**，只记一笔「想发」；
+ *   - 一个 tick 后看有没有 compositionend / 输入法填字事件：有就是上屏，撤销；没有才真的发。
+ *   - 手机输入法有的只发 beforeinput（不发 keydown），那条路也接了。
+ * 这样输入法想怎么提交都随它，我们只在「确实是回车」时发消息。
  */
 function isImeKey(e) {
   return !!(e && e.isComposing);
 }
 
-/** 回车直接发消息？设置里能改；没设过的时候桌面开、手机关（手机默认点「发送」）。 */
+/** 回车直接发消息？设置里能关；没设过就是开（和微信一样）。 */
 function enterSendOn() {
-  const v = state.settings.enterSend;
-  return v === undefined || v === null ? !COARSE : !!v;
+  return state.settings.enterSend !== false;
 }
 
 let lastEnterSendAt = 0;
@@ -5170,39 +5172,53 @@ function cancelPendingEnter() {
   if (pendingEnterSend) { clearTimeout(pendingEnterSend); pendingEnterSend = null; }
 }
 
+/** 最近几次输入事件的记录：万一还是不行，按「设置 → 其他 → 输入诊断」能看到。 */
+const inputLog = [];
+function logInput(type, e) {
+  try {
+    inputLog.push([type, e && e.key, !!(e && e.isComposing), e && e.keyCode,
+      Math.round(Date.now() % 100000)].join(':'));
+    if (inputLog.length > 12) inputLog.shift();
+  } catch (_) {}
+}
+
 inputEl.addEventListener('keydown', (e) => {
   if (mentionKeydown(e)) return;
   if (e.key !== 'Enter') return;
   if (e.shiftKey) return;               // Shift + 回车永远是换行
-  if (isImeKey(e)) return;              // 明确在拼字：这次回车归输入法
+  logInput('down', e);
   cancelPendingEnter();
   if (!enterSendOn()) return;           // 设置里关掉了：回车换行，点「发送」才发
-  e.preventDefault();                   // 先别让它插换行
+  // 注意：这里不能 preventDefault（会打断输入法提交候选字）
   lastEnterSendAt = Date.now();
   pendingEnterSend = setTimeout(() => {
     pendingEnterSend = null;
     send();
   }, 0);
 });
-// 这一下回车如果其实是「上屏」，浏览器会紧跟着发这两个事件 → 撤掉刚才那次发送
-inputEl.addEventListener('compositionend', cancelPendingEnter);
+
+// 上屏会紧跟着这些事件：撤掉刚才那次发送，字留在输入框里
+inputEl.addEventListener('compositionstart', () => logInput('cstart', null));
+inputEl.addEventListener('compositionend', (e) => { logInput('cend', null); cancelPendingEnter(); });
 inputEl.addEventListener('input', (e) => {
-  // 只有「输入法把字填进来」这一类才说明刚才是上屏；普通输入（打字、补全）不要误伤
   if (e && /Composition/.test(String(e.inputType || ''))) cancelPendingEnter();
 });
 inputEl.addEventListener('blur', cancelPendingEnter);
 
-// 有些手机输入法点「回车」根本不派发 keydown，只发一个换行输入事件：
-// 这种情况也按设置里的开关处理，不然手机上开了「回车发送」还是没反应。
+// 有些手机输入法点「回车」只发一个换行输入事件，根本不派发 keydown
 inputEl.addEventListener('beforeinput', (e) => {
   if (!e) return;
   if (e.inputType !== 'insertLineBreak' && e.inputType !== 'insertParagraph') return;
+  logInput('before', e);
   if (!enterSendOn() || isImeKey(e)) return;
   if (Date.now() - lastEnterSendAt < 300) return;   // 上面那条 keydown 已经处理过了
   e.preventDefault();
   lastEnterSendAt = Date.now();
   send();
 });
+
+// 设置里能看最近几次回车事件长什么样（排障用，不影响正常使用）
+window.qingliaoInputDiag = () => (inputLog.length ? inputLog.join('\n') : '（还没有记录，先在聊天里按几次回车）');
 
 sendBtn.addEventListener('click', () => {
   const conv = currentConv();
@@ -5385,17 +5401,30 @@ async function sendDocFile(file) {
   afterUserMessage(kind, conv);
 }
 
-$('#btnFile').addEventListener('click', () => {
-  const input = $('#fileDocInput');
-  if (!input) return;
-  input.value = '';
-  input.click();
-});
-$('#fileDocInput').addEventListener('change', (e) => {
-  const f = e.target.files && e.target.files[0];
-  e.target.value = '';
-  if (f) sendDocFile(f);
-});
+// 排障：看最近几次回车事件（key / isComposing / keyCode / 时间）到底长什么样
+const diagBtn = $('#btnInputDiag');
+if (diagBtn) {
+  diagBtn.addEventListener('click', () => {
+    const body = window.qingliaoInputDiag ? window.qingliaoInputDiag() : '（没有诊断数据）';
+    try { alert('最近的回车事件：\n' + body + '\n\n（截图发给作者就行）'); }
+    catch (_) { toast(body.slice(0, 120)); }
+  });
+}
+
+// 老页面（缓存/旧包）里没有这个按钮时不要报错，别把后面的初始化带崩
+const fileBtn = $('#btnFile');
+const fileDocInput = $('#fileDocInput');
+if (fileBtn && fileDocInput) {
+  fileBtn.addEventListener('click', () => {
+    fileDocInput.value = '';
+    fileDocInput.click();
+  });
+  fileDocInput.addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    fileDocInput.value = '';
+    if (f) sendDocFile(f);
+  });
+}
 
 /* ---------------- 消息菜单 ---------------- */
 
@@ -9570,6 +9599,12 @@ function migrate(raw) {
     s.settings.recallOn = false;
     s.settings.rewordOn = false;
     s.settings.lateOn = false;
+  }
+  // 回车发送：以前手机上默认是「关」，很多人根本没开过就已经被存成 false 了，
+  // 看起来就是「按回车没反应」。这里一次性清掉，回到默认「开」；之后用户自己关就尊重他。
+  if (Number(s.settings.enterSendV || 0) !== 2) {
+    delete s.settings.enterSend;
+    s.settings.enterSendV = 2;
   }
   if (!isCloud()) s.deleted = [];
   s.conv = null;

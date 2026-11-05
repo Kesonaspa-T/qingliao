@@ -773,7 +773,13 @@ try {
     inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     inputEl.dispatchEvent(new CompositionEvent('compositionend'));
     await advance(600);
-    return jobs.length === 1 && inputEl.value === 'hello';
+    if (jobs.length !== 1 || inputEl.value !== 'hello') return false;
+    // 只是普通打字（不是输入法提交）不能把发送误伤掉
+    inputEl.value = '再来一条';
+    inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    inputEl.dispatchEvent(new InputEvent('input', { inputType: 'insertText', bubbles: true }));
+    await advance(600);
+    return jobs.length === 2;
   `);
   // 她自己发的照片：要像用户发的图一样，真的把图给模型看
   await check('她发的照片会真的给模型看（vision 开着时）', `
