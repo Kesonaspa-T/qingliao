@@ -942,6 +942,17 @@ try {
     await flush();
     return jobs.length === 1;
   `);
+  // 她会把上下文里的标注原样抄出来（截图里那种「(你发给他一个文件：x.xlsx)」）
+  await check('她把「发文件」的系统标注抄出来时，不发这句话、直接再要文件', `
+    await resetCase({ delayOn: false });
+    const echo = '（你发给他一个文件：EV_Evaluation.xlsx）';
+    if (!isFileEchoOnly(echo)) return false;
+    if (isFileEchoOnly('给你，文件在下面（你发给他一个文件：a.xlsx）')) return false;   // 有真内容就不算
+    if (isFileEchoOnly('好的')) return false;
+    // 剥不掉的位置：deliver 里 scrub 也要清掉
+    const scrubbed = echo.replace(/[（(]\s*(你|他)\s*(刚|刚刚)?\s*发(给|来)(他|你)一个?文件[：:][^）)]*[）)]/g, '').trim();
+    return scrubbed === '';
+  `);
   // 以前提示词里写死「单人出镜，像自拍」，于是她说什么都发同一个角度的自拍：
   // 说了脚受伤，发来的还是全身自拍。这里锁住「机位按描述走」这条。
   await check('拍照：说了脚上的伤，拍的是特写不是自拍', `

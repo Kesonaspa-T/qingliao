@@ -3097,6 +3097,8 @@ function buildMessages(friend, conv, nudge, imgMap) {
     + '\n- 扩展名用 .md .txt .docx .py .js .html .css .json .csv：作文 / 文章 / 报告优先 .docx（用「# 」开头写标题），'
     + '纯文本用 .txt 或 .md，代码用对应扩展名'
     + '\n- 他说「我要个文件」「发我文件」「给我个文件」时，也按这个来'
+    + '\n- 历史里的「（你发给他一个文件：…）」「（他发来一个文件：…）」是系统标注，**绝对不要照抄或输出**；'
+    + '要给文件就直接写 [[文件:名字.扩展名]] … [[/文件]] 这一块，不要用一句话假装发文件'
     + '\n- **说到做到**：你要是说了「我给你写」「马上写」「慢慢写」「等我看完给你写」，就必须在这一条里把文件写出来；'
     + '只答应、只解释「论文太长我慢慢写」而没给文件，等于没写，他最讨厌这个'
     + '\n- 内容必须完整，不许写「省略」「同上」，代码要能直接跑'
@@ -3358,6 +3360,16 @@ async function prepareLinkDoc(conv) {
   }
 }
 
+/** 她有时候会把上下文里的标注原样抄出来（「(你发给他一个文件：x.xlsx)」），且没别的内容。 */
+const FILE_ECHO_RE = /[（(]\s*(你|他)\s*(刚|刚刚)?\s*发(给|来)(他|你)一个?文件[：:][^）)]*[）)]/g;
+function isFileEchoOnly(text) {
+  const t = String(text || '');
+  FILE_ECHO_RE.lastIndex = 0;
+  if (!FILE_ECHO_RE.test(t)) return false;
+  FILE_ECHO_RE.lastIndex = 0;
+  return !t.replace(FILE_ECHO_RE, '').trim();
+}
+
 /**
  * 她说了「我给你写/马上写/慢慢写」然后就没了 —— 自动再要一次。
  *
@@ -3369,16 +3381,16 @@ async function prepareLinkDoc(conv) {
  */
 async function maybeWritePromisedFile(kind, conv, rawText, authorId, alive) {
   try {
-    if (kind !== 'friend' || !conv) return;
+    if (kind !== 'friend' || !conv) return false;
     const ask = convLastUserText(conv) || '';
-    if (!/(文档|文件|总结|摘要|文章|作文|报告|清单|教程|整理|导出|写一份|写一篇|写个|写一下|帮我写|写成)/.test(ask)) return;
-    if (/\[\[文件[:：]/.test(String(rawText || ''))) return;
-    if (String(rawText || '').length > 240) return;
+    if (!/(文档|文件|总结|摘要|文章|作文|报告|清单|教程|整理|导出|写一份|写一篇|写个|写一下|帮我写|写成)/.test(ask)) return false;
+    if (/\[\[文件[:：]/.test(String(rawText || ''))) return false;
+    if (String(rawText || '').length > 240) return false;
     const now = Date.now();
-    if (conv.__fileNudgeAt && now - conv.__fileNudgeAt < 10 * 60 * 1000) return;
+    if (conv.__fileNudgeAt && now - conv.__fileNudgeAt < 10 * 60 * 1000) return false;
     conv.__fileNudgeAt = now;
     const key = (state.settings.apiKey || '').trim();
-    if (!key) return;
+    if (!key) return false;
     const ctx = buildMessages(conv, conv,
       '【系统】你刚说要给他写，但这一条里没有文件。现在直接把完整内容写出来：'
       + '另起一行写 [[文件:文件名.扩展名]]，把完整内容写在下面，最后一行 [[/文件]]。'
@@ -3388,13 +3400,15 @@ async function maybeWritePromisedFile(kind, conv, rawText, authorId, alive) {
       job = streamOnce({ url: chatUrl(), key, body: buildBody(ctx, false) });
       const res = await job.promise;
       const out = String((res && res.content) || '').trim();
-      if (!out || !/\[\[文件[:：]/.test(out)) return;
-      if (typeof alive === 'function' && !alive()) return;
+      if (!out || !/\[\[文件[:：]/.test(out)) return false;
+      if (typeof alive === 'function' && !alive()) return false;
       await deliver(kind, conv, out, authorId, undefined, alive);
+      return true;
     } catch (_) {
       // 补写失败就算了，别在聊天里留一堆错误
     }
   } catch (_) {}
+  return false;
 }
 
 async function runChat(friend, conv, r, nudge) {
@@ -3771,6 +3785,13 @@ async function startReply(kind, conv) {
     // 同步也可能带来新的用户消息；不能把过期答案发在新问题后面。
     if (kind === 'friend' && job.inputId !== lastUserId(conv)) { r.queued = true; return; }
     if (!text.trim()) throw new Error('这次没收到内容，再试一次？');
+    // 她只把系统标注抄了出来（没有真文件）：别把这句话发出去，直接再要一次文件
+    if (kind === 'friend' && isFileEchoOnly(text)) {
+      const acted = await maybeWritePromisedFile(kind, conv, text, authorId,
+        () => !job.cancelled && rt.get(key) === r && convById(kind, conv.id) === conv);
+      if (acted) { r.answeredUpTo = job.inputId; return; }
+      throw new Error('这次没收到可显示的内容，再试一次？');
+    }
     if (r.late && Math.random() < 0.75) text = '刚在忙，才看到。\n' + text;
     r.late = false;
     if (!r.painted) r.painted = text;
@@ -4433,6 +4454,8 @@ async function deliver(kind, conv, text, authorId, maxParts, canContinue = () =>
     .replace(/[（(]\s*(你刚|刚刚?)?发(了)?一个?表情包[：:][^）)]*[）)]/g, '')
     .replace(/[（(]\s*(你刚|刚刚?)?发了一张图片[）)]/g, '')
     .replace(/[（(]\s*(你刚|刚刚?)?发了一张照片([：:][^）)]*)?[）)]/g, '')
+    // 文件：她有时会把上下文标注原样抄出来（截图里那种「(你发给他一个文件：x.xlsx)」）
+    .replace(/[（(]\s*(你|他)\s*(刚|刚刚)?\s*发(给|来)(他|你)一个?文件[：:][^）)]*[）)]/g, '')
     .trim();
 
   // 表情包：把 [[表情:关键词]] 取出来，找到对应的图，剩下的才是文字
