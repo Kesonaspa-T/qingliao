@@ -60,6 +60,9 @@ def version_label():
 
 def should_skip(rel):
     rel_unix = rel.replace("\\", "/")
+    # Windows 壳的 desktop/windows/build/ 里放的是要提交的 icon.ico，不是构建产物
+    if rel_unix.startswith("desktop/windows/build/"):
+        return False
     if rel_unix.split("/")[-1] in SKIP_NAMES:
         return True
     if rel_unix.endswith(SKIP_PATTERNS):

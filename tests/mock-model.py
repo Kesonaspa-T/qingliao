@@ -24,7 +24,8 @@ class H(http.server.BaseHTTPRequestHandler):
         except Exception:
             data = {}
         try:
-            with open(LOG, 'a') as f:
+            # 显式 UTF-8：Windows 上默认按系统编码（GBK）写，测试按 UTF-8 读会整篇乱码
+            with open(LOG, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(data, ensure_ascii=False) + '\n')
         except Exception:
             pass
