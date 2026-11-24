@@ -52,6 +52,9 @@ def version_label():
     if not tag:
         tag = "no-tag"
     dirty = git("status", "--porcelain")
+    # 文件名跟发版材料里其它包对齐：不要 v 前缀
+    if tag.startswith("v"):
+        tag = tag[1:]
     return tag + ("-dirty" if dirty else "")
 
 
