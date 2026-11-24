@@ -1,0 +1,22 @@
+{
+  "name": "qingliao-win",
+  "version": "1.5.10",
+  "description": "轻聊 Windows 客户端",
+  "author": "Keson",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.qingliao.app",
+    "productName": "轻聊",
+    "files": ["main.js", "build/icon.ico"],
+    "win": { "target": ["portable"], "icon": "build/icon.ico" },
+    "portable": { "artifactName": "qingliao-win.exe" }
+  }
+}
