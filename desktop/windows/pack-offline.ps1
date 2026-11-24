@@ -69,10 +69,13 @@ Copy-Item (Join-Path $src "main.js") (Join-Path $inner "main.js")
 Copy-Item (Join-Path $src "build\icon.ico") (Join-Path $inner "build\icon.ico")
 
 # productName 决定 %APPDATA% 下的目录名（轻聊），config.json 就落在那里
+# 版本号从同目录 package.json 读，别在这里写死（不然升级忘了改，exe 里还是旧版本号）
+$pkgVersion = "0.0.0"
+try { $pkgVersion = (Get-Content (Join-Path $src "package.json") -Raw -Encoding UTF8 | ConvertFrom-Json).version } catch {}
 $appPkg = [ordered]@{
   name        = "qingliao-win"
   productName = "轻聊"
-  version     = "1.4.36"
+  version     = $pkgVersion
   description = "轻聊 Windows 客户端"
   author      = "Keson"
   main        = "main.js"
